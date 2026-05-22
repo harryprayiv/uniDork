@@ -42,6 +42,7 @@ in pkgs.mkShell {
     echo "    ucm         Codebase manager"
     echo ""
     echo "  Quick start:  pg-start && ucm"
+    echo "  Watch the postgres: watch -n 1 'ps -o pid,rss,vsz,cmd -p $(pgrep -f ucm)'"
     echo ""
   '';
 }
