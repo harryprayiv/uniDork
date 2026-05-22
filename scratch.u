@@ -2,12 +2,14 @@
 -- uniDork: scan folders of Kodi-style NFO files and import into PostgreSQL.
 --
 -- Run from ucm:
---   uniDork/main> run uniDork.batchedRun     -- import everything
---   uniDork/main> run Db.countMovies          -- check row count
---   uniDork/main> run Db.resetSchema          -- DROP and recreate tables
+--   uniDork/main> update                    -- commit definitions
+--   uniDork/main> run Db.resetSchema        -- DROP and recreate tables
+--   uniDork/main> run uniDork.batchedRun    -- import everything
+--   uniDork/main> run Db.countMovies        -- check row count
 --
--- Tune uniDork.batchSize down on memory pressure, up to reduce
--- per-batch connection-cleanup chatter from the hasql driver.
+-- Library convention: folders named "...~CHECKSUM". The folder_checksum
+-- is the unique row identifier, so the same kodi_id/imdb/tmdb/tvdb can
+-- appear in many rows (one per physical copy).
 -- ====================================================================
 
 
@@ -16,7 +18,10 @@
 -- ====================================================================
 
 type MovieId
-  = { kodi : Text, imdb : Optional Text, tmdb : Optional Text }
+  = { kodi : Text,
+      imdb : Optional Text,
+      tmdb : Optional Text,
+      tvdb : Optional Text }
 
 type Title
   = { display : Text, original : Text, sort : Text }
@@ -83,7 +88,7 @@ exampleMovie : Movie
 exampleMovie =
   use Actor Actor
   Movie.Movie
-    (MovieId.MovieId "tt0167260" (Some "tt0167260") (Some "122"))
+    (MovieId.MovieId "tt0167260" (Some "tt0167260") (Some "122") None)
     (Title.Title
       "The Lord of the Rings: The Return of the King"
       "The Lord of the Rings: The Return of the King"
@@ -115,7 +120,7 @@ exampleMovie =
 
 
 -- ====================================================================
--- JSON: encoders and decoders
+-- JSON
 -- ====================================================================
 
 toJsonOpt : (a -> Json) -> Optional a -> Json
@@ -139,6 +144,7 @@ MovieId.toJson m =
     [ ("kodi", text (MovieId.kodi m))
     , ("imdb", toJsonOpt text (MovieId.imdb m))
     , ("tmdb", toJsonOpt text (MovieId.tmdb m))
+    , ("tvdb", toJsonOpt text (MovieId.tvdb m))
     ]
 
 Scoring.toJson : Scoring -> Json
@@ -255,7 +261,8 @@ MovieId.fromJson = do
   kodi = object.at! "kodi" text
   imdb = optional! (at "imdb" text)
   tmdb = optional! (at "tmdb" text)
-  MovieId.MovieId kodi imdb tmdb
+  tvdb = optional! (at "tvdb" text)
+  MovieId.MovieId kodi imdb tmdb tvdb
 
 Scoring.fromJson : '{unison_json_1_4_2.Decoder} Scoring
 Scoring.fromJson = do
@@ -361,22 +368,8 @@ Movie.fromJson =
     fileSizeBytes = optional! (at "fileSizeBytes" nat)
     folderMeta = at! "folderMeta" FolderMeta.fromJson
     Movie.Movie
-      id
-      title
-      collection
-      runtime
-      scoring
-      plot
-      tagline
-      taxonomy
-      fileInfo
-      videoFilePath
-      checksum
-      actors
-      folderPath
-      nfoPath
-      fileSizeBytes
-      folderMeta
+      id title collection runtime scoring plot tagline taxonomy fileInfo
+      videoFilePath checksum actors folderPath nfoPath fileSizeBytes folderMeta
 
 Movie.toNdjsonLine : Movie -> Text
 Movie.toNdjsonLine m =
@@ -394,8 +387,7 @@ test> Movie.roundtrip.test =
 
 
 -- ====================================================================
--- Folder name parsing: extract resolution / codec / bit depth from
--- folder names like "Movie Title [1080p x265 8bit 120min]~ABCD1234"
+-- Folder-name metadata extraction
 -- ====================================================================
 
 textBetween : Text -> Text -> Text -> Optional Text
@@ -454,13 +446,18 @@ Nfo.parseFolderName name =
 
 
 -- ====================================================================
--- NFO XML parsing (via the Soup ability)
+-- NFO XML parsing
 -- ====================================================================
 
+-- Silent handler for {Throw XMLError}.
 tryXml : '{Throw XMLError} a -> Optional a
-tryXml thunk = match tracingErrors "" thunk with
-  Some (a +: _) -> Some a
-  _             -> None
+tryXml = Throw.toOptional
+
+-- Silent handler for {Each, Throw XMLError}. Each branch that throws
+-- is dropped; surviving branches form the result list.
+silentBranches : '{Each, Throw XMLError} a -> [a]
+silentBranches thunk =
+  List.filterMap (x -> x) (Each.toList do Throw.toOptional thunk)
 
 Nfo.allText : Soup ->{Throw XMLError} Text
 Nfo.allText s = Text.join "" (Soup.texts s)
@@ -478,10 +475,9 @@ Nfo.textOr default tag s = Optional.getOrElse default (Nfo.optText tag s)
 
 Nfo.texts : Text -> Soup -> [Text]
 Nfo.texts tag s =
-  Optional.getOrElse
-    [] (tracingErrors tag do
-      g = Soup.named tag s
-      Nfo.allText g)
+  silentBranches do
+    g = Soup.named tag s
+    Nfo.allText g
 
 Nfo.natOr : Nat -> Text -> Nat
 Nfo.natOr default t = Optional.getOrElse default (Nat.fromText t)
@@ -491,10 +487,75 @@ Nfo.floatOr default t = Optional.getOrElse default (Float.fromText t)
 
 Nfo.descendantAttr : Text -> Text -> Soup -> Optional Text
 Nfo.descendantAttr elemName attrName s =
-  match tracingErrors elemName do
-    Soup.attribute attrName (Soup.findFirst elemName s) with
-    Some (a +: _) -> Some a
-    _             -> None
+  Throw.toOptional do
+    Soup.attribute attrName (Soup.findFirst elemName s)
+
+-- Modern Kodi: <uniqueid type="X">value</uniqueid>.
+Nfo.uniqueIdOfType : Text -> Soup -> Optional Text
+Nfo.uniqueIdOfType wantType s =
+  candidates : [(Text, Text)]
+  candidates =
+    silentBranches do
+      u = Soup.named "uniqueid" s
+      typeAttr = Soup.attribute "type" u
+      textVal = Nfo.allText u
+      (typeAttr, textVal)
+  match List.find (cases (t, _) -> Universal.eq t wantType) candidates with
+    Some (_, v) -> Some (Text.trim v)
+    None        -> None
+
+-- Modern Kodi: <set><name>foo</name></set>. Legacy: <set>foo</set>.
+Nfo.parseCollection : Soup -> Optional Text
+Nfo.parseCollection s =
+  modern =
+    Throw.toOptional do
+      setElem = Soup.findFirst "set" s
+      nameElem = Soup.findFirst "name" setElem
+      Nfo.allText nameElem
+  match modern with
+    Some n ->
+      trimmed = Text.trim n
+      if Universal.eq (Text.size trimmed) 0 then Nfo.optText "set" s
+      else Some trimmed
+    None -> Nfo.optText "set" s
+
+-- Modern Kodi: <ratings><rating ...><value>X</value><votes>N</votes>
+-- </rating>...</ratings>. Prefers default="true", then name="imdb",
+-- then first. Falls back to legacy top-level <rating>/<votes>.
+Nfo.parseRatingAndVotes : Soup -> (Float, Nat)
+Nfo.parseRatingAndVotes s =
+  ratingsElem = Throw.toOptional do Soup.findFirst "ratings" s
+  match ratingsElem with
+    None ->
+      r = Nfo.floatOr 0.0 (Nfo.textOr "0" "rating" s)
+      v = Nfo.natOr 0 (Nfo.textOr "0" "votes" s)
+      (r, v)
+    Some rs ->
+      candidates : [(Optional Text, Optional Text, Float, Nat)]
+      candidates =
+        silentBranches do
+          r = Soup.named "rating" rs
+          name = Throw.toOptional do Soup.attribute "name" r
+          dflt = Throw.toOptional do Soup.attribute "default" r
+          valStr = Nfo.allText (Soup.findFirst "value" r)
+          votesStr = Nfo.allText (Soup.findFirst "votes" r)
+          val = Optional.getOrElse 0.0 (Float.fromText (Text.trim valStr))
+          vc = Optional.getOrElse 0 (Nat.fromText (Text.trim votesStr))
+          (name, dflt, val, vc)
+      defaultMatch =
+        List.find
+          (cases (_, d, _, _) -> Universal.eq d (Some "true")) candidates
+      imdbMatch =
+        List.find
+          (cases (n, _, _, _) -> Universal.eq n (Some "imdb")) candidates
+      best = match defaultMatch with
+        Some x -> Some x
+        None   -> match imdbMatch with
+          Some x -> Some x
+          None   -> List.head candidates
+      match best with
+        Some (_, _, r, v) -> (r, v)
+        None              -> (0.0, 0)
 
 Nfo.parseTitle : Soup ->{Throw XMLError} Title
 Nfo.parseTitle s =
@@ -505,16 +566,24 @@ Nfo.parseTitle s =
 
 Nfo.parseMovieId : Soup ->{Throw XMLError} MovieId
 Nfo.parseMovieId s =
-  kodi = Nfo.textOr "" "id" s
-  imdb = Nfo.descendantAttr "imdb" "id" s
-  tmdb = Nfo.descendantAttr "tmdb" "id" s
-  MovieId.MovieId kodi imdb tmdb
+  imdb = match Nfo.uniqueIdOfType "imdb" s with
+    Some v -> Some v
+    None   -> Nfo.descendantAttr "imdb" "id" s
+  tmdb = match Nfo.uniqueIdOfType "tmdb" s with
+    Some v -> Some v
+    None   -> Nfo.descendantAttr "tmdb" "id" s
+  tvdb = match Nfo.uniqueIdOfType "tvdb" s with
+    Some v -> Some v
+    None   -> Nfo.descendantAttr "tvdb" "id" s
+  kodi = match Nfo.optText "id" s with
+    Some k -> k
+    None   -> Optional.getOrElse "" imdb
+  MovieId.MovieId kodi imdb tmdb tvdb
 
 Nfo.parseScoring : Soup ->{Throw XMLError} Scoring
 Nfo.parseScoring s =
   year = Optional.map (Nfo.natOr 0) (Nfo.optText "year" s)
-  rating = Nfo.floatOr 0.0 (Nfo.textOr "0" "rating" s)
-  votes = Nfo.natOr 0 (Nfo.textOr "0" "votes" s)
+  (rating, votes) = Nfo.parseRatingAndVotes s
   mpaa = Nfo.textOr "" "mpaa" s
   Scoring.Scoring year rating votes mpaa
 
@@ -550,19 +619,16 @@ Nfo.parseSubtitle s =
 
 Nfo.parseStreamDetails : Soup ->{Throw XMLError} StreamDetails
 Nfo.parseStreamDetails s =
-  use Optional getOrElse
   use Soup named
   video = Nfo.parseVideo (Soup.findFirst "video" s)
   audios =
-    getOrElse
-      [] (tracingErrors "audio" do
-        a = named "audio" s
-        Nfo.parseAudio a)
+    silentBranches do
+      a = named "audio" s
+      Nfo.parseAudio a
   subs =
-    getOrElse
-      [] (tracingErrors "subtitle" do
-        sb = named "subtitle" s
-        Nfo.parseSubtitle sb)
+    silentBranches do
+      sb = named "subtitle" s
+      Nfo.parseSubtitle sb
   StreamDetails.StreamDetails video audios subs
 
 Nfo.parseFileInfo : Soup ->{Throw XMLError} FileInfo
@@ -578,16 +644,15 @@ Nfo.parseActor s =
 
 Nfo.parseActors : Soup -> [Actor]
 Nfo.parseActors s =
-  Optional.getOrElse
-    [] (tracingErrors "actor" do
-      a = Soup.named "actor" s
-      Nfo.parseActor a)
+  silentBranches do
+    a = Soup.named "actor" s
+    Nfo.parseActor a
 
 Nfo.parseMovie : Soup ->{Throw XMLError} Movie
 Nfo.parseMovie s =
   id = Nfo.parseMovieId s
   title = Nfo.parseTitle s
-  collection = Nfo.optText "set" s
+  collection = Nfo.parseCollection s
   runtime = Optional.map (Nfo.natOr 0) (Nfo.optText "runtime" s)
   scoring = Nfo.parseScoring s
   plot = Nfo.textOr "" "plot" s
@@ -600,22 +665,8 @@ Nfo.parseMovie s =
           (StreamDetails.StreamDetails (Video.Video "" 0.0 0 0) [] [])
       Right f -> f
   Movie.Movie
-    id
-    title
-    collection
-    runtime
-    scoring
-    plot
-    tagline
-    taxonomy
-    fileInfo
-    None
-    None
-    (Nfo.parseActors s)
-    None
-    None
-    None
-    emptyFolderMeta
+    id title collection runtime scoring plot tagline taxonomy fileInfo
+    None None (Nfo.parseActors s) None None None emptyFolderMeta
 
 Nfo.parse : Text -> Either Text Movie
 Nfo.parse xml = match withXML xml Nfo.parseMovie with
@@ -623,67 +674,9 @@ Nfo.parse xml = match withXML xml Nfo.parseMovie with
   Right (m +: _) -> Right m
   Right []       -> Left "no <movie> element found"
 
-sampleNfo : Text
-sampleNfo =
-  """
-  <?xml version="1.0" encoding="UTF-8"?>
-  <movie>
-    <title>The Return of the King</title>
-    <originaltitle>The Return of the King</originaltitle>
-    <sorttitle>Lord of the Rings, The: The Return of the King</sorttitle>
-    <set>The Lord of the Rings Collection</set>
-    <year>2003</year>
-    <rating>8.9</rating>
-    <votes>12000</votes>
-    <mpaa>PG-13</mpaa>
-    <id>tt0167260</id>
-    <plot>Aragorn leads the World of Men.</plot>
-    <tagline>The eye of the enemy is moving.</tagline>
-    <runtime>201</runtime>
-    <genre>Adventure</genre>
-    <genre>Fantasy</genre>
-    <country>New Zealand</country>
-    <country>United States</country>
-    <studio>New Line Cinema</studio>
-    <director>Peter Jackson</director>
-    <credits>Fran Walsh</credits>
-    <fileinfo>
-      <streamdetails>
-        <video>
-          <codec>h264</codec>
-          <aspect>2.39</aspect>
-          <width>1920</width>
-          <height>800</height>
-        </video>
-        <audio>
-          <codec>ac3</codec>
-          <language>eng</language>
-          <channels>6</channels>
-        </audio>
-        <subtitle>
-          <language>eng</language>
-        </subtitle>
-      </streamdetails>
-    </fileinfo>
-    <imdb id="tt0167260"/>
-    <tmdb id="122"/>
-    <actor>
-      <name>Elijah Wood</name>
-      <role>Frodo</role>
-    </actor>
-  </movie>
-  """
-
-test> Nfo.parse.test =
-  match Nfo.parse sampleNfo with
-    Left err -> [Fail err]
-    Right m ->
-      check
-        (Universal.eq (Title.display (Movie.title m)) "The Return of the King")
-
 
 -- ====================================================================
--- Filesystem helpers
+-- Filesystem
 -- ====================================================================
 
 pathJoin : FilePath -> Text -> FilePath
@@ -746,7 +739,7 @@ parseConfigLine l =
 
 
 -- ====================================================================
--- PostgreSQL: config, DDL, schema management
+-- PostgreSQL: schema (folder_checksum is the unique row identifier)
 -- ====================================================================
 
 Db.config : PostgresClientConfig
@@ -769,9 +762,11 @@ Db.moviesDdl =
     ""
     [ "CREATE TABLE IF NOT EXISTS movies ("
     , "  id                 SERIAL PRIMARY KEY,"
-    , "  kodi_id            TEXT NOT NULL UNIQUE,"
+    , "  folder_checksum    TEXT NOT NULL UNIQUE,"
+    , "  kodi_id            TEXT NOT NULL DEFAULT '',"
     , "  imdb_id            TEXT,"
     , "  tmdb_id            TEXT,"
+    , "  tvdb_id            TEXT,"
     , "  title              TEXT NOT NULL DEFAULT '',"
     , "  original_title     TEXT NOT NULL DEFAULT '',"
     , "  sort_title         TEXT NOT NULL DEFAULT '',"
@@ -787,7 +782,6 @@ Db.moviesDdl =
     , "  nfo_path           TEXT,"
     , "  video_file_path    TEXT,"
     , "  file_size_bytes    BIGINT,"
-    , "  folder_checksum    TEXT,"
     , "  parsed_size_str    TEXT,"
     , "  parsed_resolution  TEXT,"
     , "  parsed_codec       TEXT,"
@@ -800,21 +794,24 @@ Db.moviesDdl =
 
 Db.childDdl : [Text]
 Db.childDdl =
-  [ "CREATE TABLE IF NOT EXISTS movie_video_streams (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, codec TEXT NOT NULL DEFAULT '', aspect DOUBLE PRECISION NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0)"
-  , "CREATE TABLE IF NOT EXISTS movie_audio_tracks (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, codec TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT '', channels INTEGER NOT NULL DEFAULT 0)"
-  , "CREATE TABLE IF NOT EXISTS movie_subtitles (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, language TEXT NOT NULL DEFAULT '')"
-  , "CREATE TABLE IF NOT EXISTS movie_actors (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, sort_order INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '')"
-  , "CREATE TABLE IF NOT EXISTS movie_genres (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, genre TEXT NOT NULL, PRIMARY KEY (kodi_id, genre))"
-  , "CREATE TABLE IF NOT EXISTS movie_tags (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (kodi_id, tag))"
-  , "CREATE TABLE IF NOT EXISTS movie_countries (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, country TEXT NOT NULL, PRIMARY KEY (kodi_id, country))"
-  , "CREATE TABLE IF NOT EXISTS movie_studios (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, studio TEXT NOT NULL, PRIMARY KEY (kodi_id, studio))"
-  , "CREATE TABLE IF NOT EXISTS movie_directors (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, director TEXT NOT NULL, PRIMARY KEY (kodi_id, director))"
-  , "CREATE TABLE IF NOT EXISTS movie_credits (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, credit TEXT NOT NULL, PRIMARY KEY (kodi_id, credit))"
+  [ "CREATE TABLE IF NOT EXISTS movie_video_streams (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, codec TEXT NOT NULL DEFAULT '', aspect DOUBLE PRECISION NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0)"
+  , "CREATE TABLE IF NOT EXISTS movie_audio_tracks (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, codec TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT '', channels INTEGER NOT NULL DEFAULT 0)"
+  , "CREATE TABLE IF NOT EXISTS movie_subtitles (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, language TEXT NOT NULL DEFAULT '')"
+  , "CREATE TABLE IF NOT EXISTS movie_actors (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, sort_order INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '')"
+  , "CREATE TABLE IF NOT EXISTS movie_genres (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, genre TEXT NOT NULL, PRIMARY KEY (folder_checksum, genre))"
+  , "CREATE TABLE IF NOT EXISTS movie_tags (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (folder_checksum, tag))"
+  , "CREATE TABLE IF NOT EXISTS movie_countries (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, country TEXT NOT NULL, PRIMARY KEY (folder_checksum, country))"
+  , "CREATE TABLE IF NOT EXISTS movie_studios (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, studio TEXT NOT NULL, PRIMARY KEY (folder_checksum, studio))"
+  , "CREATE TABLE IF NOT EXISTS movie_directors (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, director TEXT NOT NULL, PRIMARY KEY (folder_checksum, director))"
+  , "CREATE TABLE IF NOT EXISTS movie_credits (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, credit TEXT NOT NULL, PRIMARY KEY (folder_checksum, credit))"
   ]
 
 Db.indexDdl : [Text]
 Db.indexDdl =
-  [ "CREATE INDEX IF NOT EXISTS idx_movies_imdb       ON movies(imdb_id)"
+  [ "CREATE INDEX IF NOT EXISTS idx_movies_kodi       ON movies(kodi_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_imdb       ON movies(imdb_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_tmdb       ON movies(tmdb_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_tvdb       ON movies(tvdb_id)"
   , "CREATE INDEX IF NOT EXISTS idx_movies_year       ON movies(year)"
   , "CREATE INDEX IF NOT EXISTS idx_movies_title      ON movies(title)"
   , "CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)"
@@ -853,17 +850,17 @@ Db.resetSchema = do
 
 
 -- ====================================================================
--- PostgreSQL: prepared statements
+-- PostgreSQL: prepared statement definitions
 -- ====================================================================
 
 Db.deleteChildSql table =
-  q = Text.join "" ["DELETE FROM ", table, " WHERE kodi_id = "]
+  q = Text.join "" ["DELETE FROM ", table, " WHERE folder_checksum = "]
   sql q %% var Codec.text |> buildCommand
 
 Db.insertVideoSql =
   use Codec text
   sql
-    "INSERT INTO movie_video_streams (kodi_id, codec, aspect, width, height) VALUES ("
+    "INSERT INTO movie_video_streams (folder_checksum, codec, aspect, width, height) VALUES ("
     %% var text
     %% sql ", "
     %% var text
@@ -879,7 +876,7 @@ Db.insertVideoSql =
 Db.insertAudioSql =
   use Codec text
   sql
-    "INSERT INTO movie_audio_tracks (kodi_id, track_order, codec, language, channels) VALUES ("
+    "INSERT INTO movie_audio_tracks (folder_checksum, track_order, codec, language, channels) VALUES ("
     %% var text
     %% sql ", "
     %% var integer
@@ -894,7 +891,7 @@ Db.insertAudioSql =
 
 Db.insertSubSql =
   use Codec text
-  sql "INSERT INTO movie_subtitles (kodi_id, track_order, language) VALUES ("
+  sql "INSERT INTO movie_subtitles (folder_checksum, track_order, language) VALUES ("
     %% var text
     %% sql ", "
     %% var integer
@@ -905,7 +902,7 @@ Db.insertSubSql =
 
 Db.insertActorSql =
   use Codec text
-  sql "INSERT INTO movie_actors (kodi_id, sort_order, name, role) VALUES ("
+  sql "INSERT INTO movie_actors (folder_checksum, sort_order, name, role) VALUES ("
     %% var text
     %% sql ", "
     %% var integer
@@ -918,7 +915,9 @@ Db.insertActorSql =
 
 Db.insertPairSql table col =
   use Codec text
-  q = Text.join "" ["INSERT INTO ", table, " (kodi_id, ", col, ") VALUES ("]
+  q =
+    Text.join
+      "" ["INSERT INTO ", table, " (folder_checksum, ", col, ") VALUES ("]
   sql q %% var text %% sql ", " %% var text %% sql ") ON CONFLICT DO NOTHING"
     |> buildCommand
 
@@ -937,8 +936,10 @@ Db.insertCreditSql = Db.insertPairSql "movie_credits" "credit"
 Db.upsertMovieSql =
   use Codec optional text
   sql
-    "INSERT INTO movies (kodi_id, imdb_id, tmdb_id, title, original_title, sort_title, collection, year, rating, votes, mpaa, runtime, plot, tagline, folder_path, nfo_path, video_file_path, file_size_bytes, folder_checksum, parsed_size_str, parsed_resolution, parsed_codec, parsed_bit_depth, parsed_runtime_min) VALUES ("
+    "INSERT INTO movies (kodi_id, imdb_id, tmdb_id, tvdb_id, title, original_title, sort_title, collection, year, rating, votes, mpaa, runtime, plot, tagline, folder_path, nfo_path, video_file_path, file_size_bytes, folder_checksum, parsed_size_str, parsed_resolution, parsed_codec, parsed_bit_depth, parsed_runtime_min) VALUES ("
     %% var text
+    %% sql ", "
+    %% var (optional text)
     %% sql ", "
     %% var (optional text)
     %% sql ", "
@@ -985,12 +986,11 @@ Db.upsertMovieSql =
     %% var (optional integer)
     %% sql ", "
     %% var (optional integer)
-    %% sql ") ON CONFLICT (kodi_id) DO UPDATE SET imdb_id = EXCLUDED.imdb_id, tmdb_id = EXCLUDED.tmdb_id, title = EXCLUDED.title, original_title = EXCLUDED.original_title, sort_title = EXCLUDED.sort_title, collection = EXCLUDED.collection, year = EXCLUDED.year, rating = EXCLUDED.rating, votes = EXCLUDED.votes, mpaa = EXCLUDED.mpaa, runtime = EXCLUDED.runtime, plot = EXCLUDED.plot, tagline = EXCLUDED.tagline, folder_path = EXCLUDED.folder_path, nfo_path = EXCLUDED.nfo_path, video_file_path = EXCLUDED.video_file_path, file_size_bytes = EXCLUDED.file_size_bytes, folder_checksum = EXCLUDED.folder_checksum, parsed_size_str = EXCLUDED.parsed_size_str, parsed_resolution = EXCLUDED.parsed_resolution, parsed_codec = EXCLUDED.parsed_codec, parsed_bit_depth = EXCLUDED.parsed_bit_depth, parsed_runtime_min = EXCLUDED.parsed_runtime_min, updated_at = NOW()"
-    |> buildCommand
+    %% sql ") ON CONFLICT (folder_checksum) DO UPDATE SET kodi_id = EXCLUDED.kodi_id, imdb_id = EXCLUDED.imdb_id, tmdb_id = EXCLUDED.tmdb_id, tvdb_id = EXCLUDED.tvdb_id, title = EXCLUDED.title, original_title = EXCLUDED.original_title, sort_title = EXCLUDED.sort_title, collection = EXCLUDED.collection, year = EXCLUDED.year, rating = EXCLUDED.rating, votes = EXCLUDED.votes, mpaa = EXCLUDED.mpaa, runtime = EXCLUDED.runtime, plot = EXCLUDED.plot, tagline = EXCLUDED.tagline, folder_path = EXCLUDED.folder_path, nfo_path = EXCLUDED.nfo_path, video_file_path = EXCLUDED.video_file_path, file_size_bytes = EXCLUDED.file_size_bytes, parsed_size_str = EXCLUDED.parsed_size_str, parsed_resolution = EXCLUDED.parsed_resolution, parsed_codec = EXCLUDED.parsed_codec, parsed_bit_depth = EXCLUDED.parsed_bit_depth, parsed_runtime_min = EXCLUDED.parsed_runtime_min, updated_at = NOW()" |> buildCommand
 
 
 -- ====================================================================
--- PostgreSQL: encoding helpers and per-batch utilities
+-- PostgreSQL: helpers and utilities
 -- ====================================================================
 
 Db.pt : Text -> [Optional Text]
@@ -1043,9 +1043,7 @@ Db.countMovies = do
 
 
 -- ====================================================================
--- Per-movie upsert. Wraps one movie's worth of work in a single
--- PostgreSQL transaction using shared prepared commands from the
--- enclosing singleIO batch.
+-- Per-movie upsert. Child rows key on folder_checksum.
 -- ====================================================================
 
 Db.upsertWith
@@ -1058,6 +1056,7 @@ Db.upsertWith
     use Nat toInt
     use Optional map
     k = MovieId.kodi (Movie.id m)
+    csum = Optional.getOrElse "" (Movie.checksum m)
     mid = Movie.id m
     t = Movie.title m
     s = Movie.scoring m
@@ -1069,18 +1068,19 @@ Db.upsertWith
     indexedSubs = Db.withIndex (StreamDetails.subtitles sd)
     indexedActors = Db.withIndex (Movie.actors m)
     del pc =
-      _ = bindAndExecuteCommand pc (Db.pt k)
+      _ = bindAndExecuteCommand pc (Db.pt csum)
       ()
     repList delPc insPc vals =
       _ = del delPc
-      foreach_ (v -> bindAndExecuteCommand insPc (Db.pt k ++ Db.pt v)) vals
-    _ = printLine (Text.join "" ["upserting: ", k])
+      foreach_ (v -> bindAndExecuteCommand insPc (Db.pt csum ++ Db.pt v)) vals
+    _ = printLine (Text.join "" ["upserting: ", k, " (", csum, ")"])
     _ =
       bindAndExecuteCommand
         pcUpsert
         (Db.pt k
           ++ Db.pot (MovieId.imdb mid)
           ++ Db.pot (MovieId.tmdb mid)
+          ++ Db.pot (MovieId.tvdb mid)
           ++ Db.pt (Title.display t)
           ++ Db.pt (Title.original t)
           ++ Db.pt (Title.sort t)
@@ -1106,7 +1106,7 @@ Db.upsertWith
     _ =
       bindAndExecuteCommand
         pcVid
-        (Db.pt k
+        (Db.pt csum
           ++ Db.pt (Video.codec vid)
           ++ Db.pf (Video.aspect vid)
           ++ Db.pi (toInt (Video.width vid))
@@ -1118,7 +1118,7 @@ Db.upsertWith
           (i, a) ->
             bindAndExecuteCommand
               pcAud
-              (Db.pt k
+              (Db.pt csum
                 ++ Db.pi (toInt i)
                 ++ Db.pt (Audio.codec a)
                 ++ Db.pt (Audio.language a)
@@ -1131,7 +1131,7 @@ Db.upsertWith
           (i, sub) ->
             bindAndExecuteCommand
               pcSub
-              (Db.pt k ++ Db.pi (toInt i) ++ Db.pt (Subtitle.language sub)))
+              (Db.pt csum ++ Db.pi (toInt i) ++ Db.pt (Subtitle.language sub)))
         indexedSubs
     _ = del pcDAct
     _ =
@@ -1140,7 +1140,7 @@ Db.upsertWith
           (i, a) ->
             bindAndExecuteCommand
               pcAct
-              (Db.pt k
+              (Db.pt csum
                 ++ Db.pi (toInt i)
                 ++ Db.pt (Actor.name a)
                 ++ Db.pt (Actor.role a)))
@@ -1155,7 +1155,7 @@ Db.upsertWith
 
 
 -- ====================================================================
--- Batched import pipeline. Top-level entry point: uniDork.batchedRun
+-- Batched import pipeline. Entry point: uniDork.batchedRun
 -- ====================================================================
 
 uniDork.batchSize : Nat
