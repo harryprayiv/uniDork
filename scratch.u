@@ -1042,21 +1042,6 @@ uniDork.streamRoot rootDir =
            " (", Nat.toText (List.size basenames), " entries)"])
   Db.foreach_ (uniDork.streamEntry rootDir) basenames
 
--- uniDork.streamMain : Text ->{IO, Exception} ()
--- uniDork.streamMain configPath =
---   configText = readFileUtf8 (FilePath configPath)
---   dirs       = List.filterMap parseConfigLine (Text.lines configText)
---   libraryDir = FilePath "dork_library"
---   _ = if isDirectory libraryDir then () else createDirectory libraryDir
---   _ = !Db.createSchema
---   _ = printLine "starting streaming import"
---   singleIO Db.config do
---     Db.foreach_ uniDork.streamRoot dirs
---   printLine "done"
-
--- uniDork.streamRun : '{IO, Exception} ()
--- uniDork.streamRun = do uniDork.streamMain "/tmp/uniDork.conf"
-
 -- =====================================================================
 -- Stage 5b: PostgreSQL persistence.
 -- =====================================================================
@@ -1168,9 +1153,6 @@ Db.resetSchema = do
     _ = Db.runDDLList [Db.moviesDdl]
     _ = Db.runDDLList Db.childDdl
     Db.runDDLList Db.indexDdl
-
-
--- Delete Db.nullableText, Db.nullableInt, Db.nullableBigint entirely.
 
 -- SQL definitions: standard optional codecs from the library.
 -- These work correctly for Parse/Describe (proven earlier).
@@ -1286,13 +1268,6 @@ Db.withIndex xs =
 -- Slower per movie than one big txn, but the difference is small and
 -- you get incremental progress on failure as a bonus.
 -- =====================================================================
-
-Db.foreach_ : (a ->{g} b) -> [a] ->{g} ()
-Db.foreach_ f = cases
-  []      -> ()
-  x +: xs ->
-    _ = f x
-    Db.foreach_ f xs
 
 Db.upsertOne m =
   transaction do
@@ -1564,14 +1539,22 @@ uniDork.streamRootWith
       pcStu pcDStu pcDir pcDDir pcCre pcDCre rootDir)
     basenames
 
+-- Strict left fold style: presumed TCO'd by Unison stdlib.
+-- Replaces the custom recursive Db.foreach_.
+Db.foreach_ : (a ->{g} b) -> [a] ->{g} ()
+Db.foreach_ f xs =
+  step acc x =
+    _ = f x
+    acc
+  _ = List.foldLeft step () xs
+  ()
+
 uniDork.streamMain : Text ->{IO, Exception} ()
 uniDork.streamMain configPath =
   configText = readFileUtf8 (FilePath configPath)
   dirs       = List.filterMap parseConfigLine (Text.lines configText)
-  libraryDir = FilePath "dork_library"
-  _ = if isDirectory libraryDir then () else createDirectory libraryDir
   _ = !Db.createSchema
-  _ = printLine "starting streaming import (shared prepared commands)"
+  _ = printLine "starting streaming DB import"
   singleIO Db.config do
     pcIns  = prepareCommand Db.insertMovieSql
     pcUpd  = prepareCommand Db.updateMovieSql
@@ -1595,14 +1578,12 @@ uniDork.streamMain configPath =
     pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
     pcCre  = prepareCommand Db.insertCreditSql
     pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
-
     _ = Db.foreach_
           (uniDork.streamRootWith
             pcIns pcUpd pcVid pcDVid pcAud pcDAud pcSub pcDSub
             pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
             pcStu pcDStu pcDir pcDDir pcCre pcDCre)
           dirs
-
     _ = PreparedCommand.close pcIns
     _ = PreparedCommand.close pcUpd
     _ = PreparedCommand.close pcVid
