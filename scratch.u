@@ -1,550 +1,390 @@
--- scratch.u — Stage 1 of the Unison port of the NFO->JSON tool.
--- Run `ucm` in the same directory. It will pick this up on save.
--- Then in ucm:
---   scratch/main> add
--- That commits these definitions to your codebase. Inspect with:
---   scratch/main> view Movie
---   scratch/main> find-in Movie
+-- ====================================================================
+-- uniDork: scan folders of Kodi-style NFO files and import into PostgreSQL.
+--
+-- Run from ucm:
+--   uniDork/main> run uniDork.batchedRun     -- import everything
+--   uniDork/main> run Db.countMovies          -- check row count
+--   uniDork/main> run Db.resetSchema          -- DROP and recreate tables
+--
+-- Tune uniDork.batchSize down on memory pressure, up to reduce
+-- per-batch connection-cleanup chatter from the hasql driver.
+-- ====================================================================
 
--- =====================================================================
--- IDs.  Grouped because in the Haskell original they were three
--- unrelated fields on Movie (movieId, imdbId, tmdbId).  IMDB and TMDB
--- IDs may legitimately be absent on an NFO, so Optional, not Text "".
--- =====================================================================
 
-> Movie.toNdjsonLine exampleMovie
-> Movie.fromNdjsonLine (Movie.toNdjsonLine exampleMovie)
+-- ====================================================================
+-- Types
+-- ====================================================================
 
-unique type MovieId = {
-  kodi : Text,
-  imdb : Optional Text,
-  tmdb : Optional Text
-}
+type MovieId
+  = { kodi : Text, imdb : Optional Text, tmdb : Optional Text }
 
--- =====================================================================
--- Titles.  In Kodi NFO there are three: displayed, original-language,
--- and a sort-friendly variant ("Lord of the Rings, The").  Grouping
--- them is mechanical refactoring you could have done in Haskell too,
--- but in Unison it costs you nothing because the field accessors live
--- in the Title namespace -- no name collisions.
--- =====================================================================
+type Title
+  = { display : Text, original : Text, sort : Text }
 
-unique type Title = {
-  display  : Text,
-  original : Text,
-  sort     : Text
-}
+type Scoring
+  = { year : Optional Nat, rating : Float, votes : Nat, mpaa : Text }
 
--- =====================================================================
--- Scoring metadata.  In the Haskell, `year` was Int defaulting to 0,
--- `votes` was Int defaulting to 0, `rating` Double defaulting to 0.0.
--- Use Nat where negative is meaningless.  Make year Optional because
--- "no year known" is a real state distinct from "released in year 0".
--- =====================================================================
+type Taxonomy
+  = { genres : [Text],
+      tags : [Text],
+      countries : [Text],
+      studios : [Text],
+      directors : [Text],
+      credits : [Text] }
 
-unique type Scoring = {
-  year   : Optional Nat,
-  rating : Float,
-  votes  : Nat,
-  mpaa   : Text
-}
+type Video
+  = { codec : Text, aspect : Float, width : Nat, height : Nat }
 
--- =====================================================================
--- Taxonomy.  Six list-of-Text fields that were sitting flat on Movie
--- and obviously belong together.
--- =====================================================================
+type Audio
+  = { codec : Text, language : Text, channels : Nat }
 
-unique type Taxonomy = {
-  genres    : [Text],
-  tags      : [Text],
-  countries : [Text],
-  studios   : [Text],
-  directors : [Text],
-  credits   : [Text]
-}
+type Subtitle
+  = { language : Text }
 
--- =====================================================================
--- Stream details.  Notice the field name `codec` appears on both
--- Video and Audio.  In Haskell you renamed them `v_codec` and `a_codec`
--- to avoid clash.  Here, Video.codec and Audio.codec are different
--- definitions in different namespaces -- no rename needed.
--- =====================================================================
+type StreamDetails
+  = { video : Video, audios : [Audio], subtitles : [Subtitle] }
 
-unique type Video = {
-  codec  : Text,
-  aspect : Float,
-  width  : Nat,
-  height : Nat
-}
+type FileInfo
+  = { streams : StreamDetails }
 
-unique type Audio = {
-  codec    : Text,
-  language : Text,
-  channels : Nat
-}
+type Actor
+  = { name : Text, role : Text }
 
-unique type Subtitle = {
-  language : Text
-}
+type FolderMeta
+  = { rawSize : Optional Text,
+      resolution : Optional Text,
+      videoCodec : Optional Text,
+      bitDepth : Optional Nat,
+      runtimeMin : Optional Nat,
+      checksum : Optional Text }
 
-unique type StreamDetails = {
-  video     : Video,
-  audios    : [Audio],
-  subtitles : [Subtitle]
-}
-
-unique type FileInfo = {
-  streams : StreamDetails
-}
-
--- =====================================================================
--- Cast member.
--- =====================================================================
-
-unique type Actor = {
-  name : Text,
-  role : Text
-}
-
--- =====================================================================
--- The movie itself.  Note `collection` instead of `set` -- `set` is
--- the suffix Unison uses for record setters (Movie.title.set), and
--- having a field literally named `set` would invite confusion every
--- time you read code like `Movie.set.set newVal m`.  Rename early.
--- =====================================================================
-
--- unique type Movie = {
---   id            : MovieId,
---   title         : Title,
---   collection    : Optional Text,   -- was `set`
---   runtime       : Optional Nat,
---   scoring       : Scoring,
---   plot          : Text,
---   tagline       : Text,
---   taxonomy      : Taxonomy,
---   fileInfo      : FileInfo,
---   videoFilePath : Optional Text,
---   checksum      : Optional Text,
---   actors        : [Actor]
--- }
-
-unique type Movie = {
-  id            : MovieId,
-  title         : Title,
-  collection    : Optional Text,
-  runtime       : Optional Nat,
-  scoring       : Scoring,
-  plot          : Text,
-  tagline       : Text,
-  taxonomy      : Taxonomy,
-  fileInfo      : FileInfo,
-  videoFilePath : Optional Text,
-  checksum      : Optional Text,
-  actors        : [Actor],
-  folderPath    : Optional Text,    -- NEW
-  nfoPath       : Optional Text,    -- NEW
-  fileSizeBytes : Optional Nat,     -- NEW (populated when we add stat)
-  folderMeta    : FolderMeta        -- NEW
-}
-
-unique type FolderMeta = {
-  rawSize    : Optional Text,    -- "1.9G", "850M"
-  resolution : Optional Text,    -- "1080p", "720p", "2160p"
-  videoCodec : Optional Text,    -- "x264", "x265", "h264", "av1"
-  bitDepth   : Optional Nat,     -- 8, 10, 12
-  runtimeMin : Optional Nat,     -- minutes
-  checksum   : Optional Text     -- "2FEC347B" — CRC32, not MD5
-}
+type Movie
+  = { id : MovieId,
+      title : Title,
+      collection : Optional Text,
+      runtime : Optional Nat,
+      scoring : Scoring,
+      plot : Text,
+      tagline : Text,
+      taxonomy : Taxonomy,
+      fileInfo : FileInfo,
+      videoFilePath : Optional Text,
+      checksum : Optional Text,
+      actors : [Actor],
+      folderPath : Optional Text,
+      nfoPath : Optional Text,
+      fileSizeBytes : Optional Nat,
+      folderMeta : FolderMeta }
 
 emptyFolderMeta : FolderMeta
-emptyFolderMeta = FolderMeta None None None None None None
--- =====================================================================
--- Smoke test: a literal Movie value.  Once you've `add`-ed everything,
--- run `display exampleMovie` in ucm and you should see the record
--- pretty-printed.  Also try `display Movie.title (Movie.title example)`
--- and notice how accessors compose like ordinary functions.
--- =====================================================================
+emptyFolderMeta = FolderMeta.FolderMeta None None None None None None
 
 exampleMovie : Movie
 exampleMovie =
-  Movie
-    (MovieId "tt0167260" (Some "tt0167260") (Some "122"))
-    (Title "The Lord of the Rings: The Return of the King"
-           "The Lord of the Rings: The Return of the King"
-           "Lord of the Rings, The: The Return of the King")
+  use Actor Actor
+  Movie.Movie
+    (MovieId.MovieId "tt0167260" (Some "tt0167260") (Some "122"))
+    (Title.Title
+      "The Lord of the Rings: The Return of the King"
+      "The Lord of the Rings: The Return of the King"
+      "Lord of the Rings, The: The Return of the King")
     (Some "The Lord of the Rings Collection")
     (Some 201)
-    (Scoring (Some 2003) 8.9 12000 "PG-13")
+    (Scoring.Scoring (Some 2003) 8.9 12000 "PG-13")
     "Aragorn leads the World of Men against Sauron's army..."
     "The eye of the enemy is moving."
-    (Taxonomy
-      ["Adventure", "Fantasy"] [] ["New Zealand", "United States"]
-      ["New Line Cinema"] ["Peter Jackson"] ["Fran Walsh"])
-    (FileInfo
-      (StreamDetails
-        (Video "h264" 2.39 1920 800)
-        [Audio "ac3" "eng" 6]
-        [Subtitle "eng"]))
+    (Taxonomy.Taxonomy
+      ["Adventure", "Fantasy"]
+      []
+      ["New Zealand", "United States"]
+      ["New Line Cinema"]
+      ["Peter Jackson"]
+      ["Fran Walsh"])
+    (FileInfo.FileInfo
+      (StreamDetails.StreamDetails
+        (Video.Video "h264" 2.39 1920 800)
+        [Audio.Audio "ac3" "eng" 6]
+        [Subtitle.Subtitle "eng"]))
     (Some "/movies/lotr-rotk/lotr-rotk.mkv")
     (Some "a3f1c9")
-    [Actor "Elijah Wood" "Frodo Baggins",
-     Actor "Viggo Mortensen" "Aragorn"]
+    [Actor "Elijah Wood" "Frodo Baggins", Actor "Viggo Mortensen" "Aragorn"]
     (Some "/movies/lotr-rotk")
     (Some "/movies/lotr-rotk/lotr-rotk.nfo")
     None
     emptyFolderMeta
 
--- =====================================================================
--- Stage 2: JSON encoders, decoders, NDJSON, roundtrip test.
--- =====================================================================
--- 
--- The honest pain point: in Haskell, `deriving (Generic, ToJSON,
--- FromJSON)` gave you wire serialization for free.  Unison has no
--- type classes, so you write one `T.toJson : T -> Json` and one
--- `T.fromJson : '{Decoder} T` per type.  That is real boilerplate.
--- 
--- The upsides you're paying for:
---   1. the wire format is right there in source, fully explicit, with
---      no surprise from a deriving strategy you forgot you enabled;
---   2. fields can be reordered, renamed, or made optional without
---      cascading rewrites -- you change one function;
---   3. encoders and decoders are ordinary values; you can build them
---      with combinators, pass them around, version them, test them.
--- 
--- Convention below: encoders are pure functions, decoders are thunks
--- in the {Decoder} ability.  Force a decoder thunk with `!`.
 
--- =====================================================================
--- Helper: encode an Optional.  None -> JSON null, Some -> the value.
--- =====================================================================
+-- ====================================================================
+-- JSON: encoders and decoders
+-- ====================================================================
 
 toJsonOpt : (a -> Json) -> Optional a -> Json
 toJsonOpt f = cases
   None   -> Json.null
   Some a -> f a
 
--- =====================================================================
--- Leaf encoders.  Each is a pattern match (or accessor chain) into the
--- record, then `Json.object` with the wire key for each field.
--- =====================================================================
-
 Title.toJson : Title -> Json
 Title.toJson t =
-  Json.object [
-    ("display",  Json.text (Title.display t)),
-    ("original", Json.text (Title.original t)),
-    ("sort",     Json.text (Title.sort t))
-  ]
+  use Json text
+  Json.object
+    [ ("display", text (Title.display t))
+    , ("original", text (Title.original t))
+    , ("sort", text (Title.sort t))
+    ]
 
 MovieId.toJson : MovieId -> Json
 MovieId.toJson m =
-  Json.object [
-    ("kodi", Json.text (MovieId.kodi m)),
-    ("imdb", toJsonOpt Json.text (MovieId.imdb m)),
-    ("tmdb", toJsonOpt Json.text (MovieId.tmdb m))
-  ]
+  use Json text
+  Json.object
+    [ ("kodi", text (MovieId.kodi m))
+    , ("imdb", toJsonOpt text (MovieId.imdb m))
+    , ("tmdb", toJsonOpt text (MovieId.tmdb m))
+    ]
 
 Scoring.toJson : Scoring -> Json
 Scoring.toJson s =
-  Json.object [
-    ("year",   toJsonOpt Json.nat (Scoring.year s)),
-    ("rating", Json.float (Scoring.rating s)),
-    ("votes",  Json.nat (Scoring.votes s)),
-    ("mpaa",   Json.text (Scoring.mpaa s))
-  ]
+  use Json nat
+  Json.object
+    [ ("year", toJsonOpt nat (Scoring.year s))
+    , ("rating", Json.float (Scoring.rating s))
+    , ("votes", nat (Scoring.votes s))
+    , ("mpaa", Json.text (Scoring.mpaa s))
+    ]
 
 Taxonomy.toJson : Taxonomy -> Json
 Taxonomy.toJson t =
-  Json.object [
-    ("genres",    Json.array (List.map Json.text (Taxonomy.genres t))),
-    ("tags",      Json.array (List.map Json.text (Taxonomy.tags t))),
-    ("countries", Json.array (List.map Json.text (Taxonomy.countries t))),
-    ("studios",   Json.array (List.map Json.text (Taxonomy.studios t))),
-    ("directors", Json.array (List.map Json.text (Taxonomy.directors t))),
-    ("credits",   Json.array (List.map Json.text (Taxonomy.credits t)))
-  ]
+  use Json array text
+  use List map
+  Json.object
+    [ ("genres", array (map text (Taxonomy.genres t)))
+    , ("tags", array (map text (Taxonomy.tags t)))
+    , ("countries", array (map text (Taxonomy.countries t)))
+    , ("studios", array (map text (Taxonomy.studios t)))
+    , ("directors", array (map text (Taxonomy.directors t)))
+    , ("credits", array (map text (Taxonomy.credits t)))
+    ]
 
 Video.toJson : Video -> Json
 Video.toJson v =
-  Json.object [
-    ("codec",  Json.text (Video.codec v)),
-    ("aspect", Json.float (Video.aspect v)),
-    ("width",  Json.nat (Video.width v)),
-    ("height", Json.nat (Video.height v))
-  ]
+  use Json nat
+  Json.object
+    [ ("codec", Json.text (Video.codec v))
+    , ("aspect", Json.float (Video.aspect v))
+    , ("width", nat (Video.width v))
+    , ("height", nat (Video.height v))
+    ]
 
 Audio.toJson : Audio -> Json
 Audio.toJson a =
-  Json.object [
-    ("codec",    Json.text (Audio.codec a)),
-    ("language", Json.text (Audio.language a)),
-    ("channels", Json.nat (Audio.channels a))
-  ]
+  use Json text
+  Json.object
+    [ ("codec", text (Audio.codec a))
+    , ("language", text (Audio.language a))
+    , ("channels", Json.nat (Audio.channels a))
+    ]
 
 Subtitle.toJson : Subtitle -> Json
-Subtitle.toJson s =
-  Json.object [
-    ("language", Json.text (Subtitle.language s))
-  ]
+Subtitle.toJson s = Json.object [("language", Json.text (Subtitle.language s))]
 
 StreamDetails.toJson : StreamDetails -> Json
 StreamDetails.toJson s =
-  Json.object [
-    ("video",     Video.toJson (StreamDetails.video s)),
-    ("audios",    Json.array (List.map Audio.toJson    (StreamDetails.audios s))),
-    ("subtitles", Json.array (List.map Subtitle.toJson (StreamDetails.subtitles s)))
-  ]
+  use Json array
+  use List map
+  Json.object
+    [ ("video", Video.toJson (StreamDetails.video s))
+    , ("audios", array (map Audio.toJson (StreamDetails.audios s)))
+    , ("subtitles", array (map Subtitle.toJson (StreamDetails.subtitles s)))
+    ]
 
 FileInfo.toJson : FileInfo -> Json
 FileInfo.toJson f =
-  Json.object [
-    ("streams", StreamDetails.toJson (FileInfo.streams f))
-  ]
+  Json.object [("streams", StreamDetails.toJson (FileInfo.streams f))]
 
 Actor.toJson : Actor -> Json
 Actor.toJson a =
-  Json.object [
-    ("name", Json.text (Actor.name a)),
-    ("role", Json.text (Actor.role a))
-  ]
-
--- =====================================================================
--- Movie encoder.  Bottom-up composition.
--- =====================================================================
-
-Movie.toJson : Movie -> Json
-Movie.toJson m =
-  Json.object [
-    ("id",            MovieId.toJson  (Movie.id m)),
-    ("title",         Title.toJson    (Movie.title m)),
-    ("collection",    toJsonOpt Json.text (Movie.collection m)),
-    ("runtime",       toJsonOpt Json.nat  (Movie.runtime m)),
-    ("scoring",       Scoring.toJson  (Movie.scoring m)),
-    ("plot",          Json.text       (Movie.plot m)),
-    ("tagline",       Json.text       (Movie.tagline m)),
-    ("taxonomy",      Taxonomy.toJson (Movie.taxonomy m)),
-    ("fileInfo",      FileInfo.toJson (Movie.fileInfo m)),
-    ("videoFilePath", toJsonOpt Json.text (Movie.videoFilePath m)),
-    ("checksum",      toJsonOpt Json.text (Movie.checksum m)),
-    ("actors",        Json.array (List.map Actor.toJson (Movie.actors m))),
-    ("folderPath",    toJsonOpt Json.text (Movie.folderPath m)),
-    ("nfoPath",       toJsonOpt Json.text (Movie.nfoPath m)),
-    ("fileSizeBytes", toJsonOpt Json.nat  (Movie.fileSizeBytes m)),
-    ("folderMeta",    FolderMeta.toJson   (Movie.folderMeta m))
-  ]
-
--- =====================================================================
--- Decoders.
--- 
--- Each is `'{Decoder} T`: a thunk that, when run inside a Decoder
--- handler, yields a T.  The `do` block sequences pulls from the
--- current JSON object; the final expression is the assembled record.
--- 
--- Required field:    Decoder.object.at!  "key" leafDecoder
--- Optional field:    Decoder.optional!  (Decoder.object.at "key" leafDecoder)
--- 
--- Note `at!` (force) vs `at` (thunk).  `Decoder.optional!` wraps a
--- thunk that may fail, returning Optional rather than failing.
--- =====================================================================
-use lib.unison_json_1_4_2 Decoder
-
-Title.fromJson : '{Decoder} Title
-Title.fromJson = do
-  display  = Decoder.object.at! "display"  Decoder.text
-  original = Decoder.object.at! "original" Decoder.text
-  sort     = Decoder.object.at! "sort"     Decoder.text
-  Title display original sort
-
-MovieId.fromJson : '{Decoder} MovieId
-MovieId.fromJson = do
-  kodi = Decoder.object.at! "kodi" Decoder.text
-  imdb = Decoder.optional! (Decoder.object.at "imdb" Decoder.text)
-  tmdb = Decoder.optional! (Decoder.object.at "tmdb" Decoder.text)
-  MovieId kodi imdb tmdb
-
-Scoring.fromJson : '{Decoder} Scoring
-Scoring.fromJson = do
-  year   = Decoder.optional! (Decoder.object.at "year" Decoder.nat)
-  rating = Decoder.object.at! "rating" Decoder.float
-  votes  = Decoder.object.at! "votes"  Decoder.nat
-  mpaa   = Decoder.object.at! "mpaa"   Decoder.text
-  Scoring year rating votes mpaa
-
-Taxonomy.fromJson : '{Decoder} Taxonomy
-Taxonomy.fromJson = do
-  genres    = Decoder.object.at! "genres"    (Decoder.array Decoder.text)
-  tags      = Decoder.object.at! "tags"      (Decoder.array Decoder.text)
-  countries = Decoder.object.at! "countries" (Decoder.array Decoder.text)
-  studios   = Decoder.object.at! "studios"   (Decoder.array Decoder.text)
-  directors = Decoder.object.at! "directors" (Decoder.array Decoder.text)
-  credits   = Decoder.object.at! "credits"   (Decoder.array Decoder.text)
-  Taxonomy genres tags countries studios directors credits
-
-Video.fromJson : '{Decoder} Video
-Video.fromJson = do
-  codec  = Decoder.object.at! "codec"  Decoder.text
-  aspect = Decoder.object.at! "aspect" Decoder.float
-  width  = Decoder.object.at! "width"  Decoder.nat
-  height = Decoder.object.at! "height" Decoder.nat
-  Video codec aspect width height
-
-Audio.fromJson : '{Decoder} Audio
-Audio.fromJson = do
-  codec    = Decoder.object.at! "codec"    Decoder.text
-  language = Decoder.object.at! "language" Decoder.text
-  channels = Decoder.object.at! "channels" Decoder.nat
-  Audio codec language channels
-
-Subtitle.fromJson : '{Decoder} Subtitle
-Subtitle.fromJson = do
-  language = Decoder.object.at! "language" Decoder.text
-  Subtitle language
-
-StreamDetails.fromJson : '{Decoder} StreamDetails
-StreamDetails.fromJson = do
-  video     = Decoder.object.at! "video"     Video.fromJson
-  audios    = Decoder.object.at! "audios"    (Decoder.array Audio.fromJson)
-  subtitles = Decoder.object.at! "subtitles" (Decoder.array Subtitle.fromJson)
-  StreamDetails video audios subtitles
-
-FileInfo.fromJson : '{Decoder} FileInfo
-FileInfo.fromJson = do
-  streams = Decoder.object.at! "streams" StreamDetails.fromJson
-  FileInfo streams
-
-Actor.fromJson : '{Decoder} Actor
-Actor.fromJson = do
-  name = Decoder.object.at! "name" Decoder.text
-  role = Decoder.object.at! "role" Decoder.text
-  Actor name role
-
-Movie.fromJson : '{Decoder} Movie
-Movie.fromJson = do
-  id            = Decoder.object.at!   "id"            MovieId.fromJson
-  title         = Decoder.object.at!   "title"         Title.fromJson
-  collection    = Decoder.optional! (Decoder.object.at "collection"    Decoder.text)
-  runtime       = Decoder.optional! (Decoder.object.at "runtime"       Decoder.nat)
-  scoring       = Decoder.object.at!   "scoring"       Scoring.fromJson
-  plot          = Decoder.object.at!   "plot"          Decoder.text
-  tagline       = Decoder.object.at!   "tagline"       Decoder.text
-  taxonomy      = Decoder.object.at!   "taxonomy"      Taxonomy.fromJson
-  fileInfo      = Decoder.object.at!   "fileInfo"      FileInfo.fromJson
-  videoFilePath = Decoder.optional! (Decoder.object.at "videoFilePath" Decoder.text)
-  checksum      = Decoder.optional! (Decoder.object.at "checksum"      Decoder.text)
-  actors        = Decoder.object.at!   "actors"        (Decoder.array Actor.fromJson)
-  folderPath    = Decoder.optional! (Decoder.object.at "folderPath"    Decoder.text)
-  nfoPath       = Decoder.optional! (Decoder.object.at "nfoPath"       Decoder.text)
-  fileSizeBytes = Decoder.optional! (Decoder.object.at "fileSizeBytes" Decoder.nat)
-  folderMeta    = Decoder.object.at!   "folderMeta"    FolderMeta.fromJson
-  Movie id title collection runtime scoring plot tagline
-        taxonomy fileInfo videoFilePath checksum actors
-        folderPath nfoPath fileSizeBytes folderMeta
-        
--- =====================================================================
--- NDJSON helpers.  One JSON object per line, no pretty-printing.
--- =====================================================================
--- 
--- The exact spellings of `Json.toText` and `Json.fromText` may differ
--- in your installed version of @unison/json -- I've seen them named
--- `Json.serialize` / `Json.parse` in some places.  If these don't
--- resolve, run `find-in lib.unison_json Json. text` in ucm and adjust.
-
-Movie.toNdjsonLine : Movie -> Text
-Movie.toNdjsonLine m =
-  Json.toText (Movie.toJson m) Text.++ "\n"
-
-Movie.fromNdjsonLine : Text -> Either Failure Movie
-Movie.fromNdjsonLine line = catch do
-  Decoder.run Movie.fromJson (Text.trim line)
-
--- =====================================================================
--- Roundtrip test.  Unison's `test>` prefix evaluates at typecheck
--- time and caches the [Result] by the test's hash.  No test runner
--- to install, no test discovery rules, no fixture loading.  The test
--- only re-runs if its own hash or a transitive dependency hash
--- changes.  Re-run all tests with `test` in ucm.
--- =====================================================================
-
--- Substring between two delimiters (exclusive).  None if either missing.
-textBetween : Text -> Text -> Text -> Optional Text
-textBetween startD endD t =
-  match Text.indexOf startD t with
-    None -> None
-    Some i ->
-      after = Text.drop (i Nat.+ Text.size startD) t
-      match Text.indexOf endD after with
-        None -> None
-        Some j -> Some (Text.take j after)
-
--- Substring after first occurrence of sep, trimmed.
-textAfter : Text -> Text -> Optional Text
-textAfter sep t =
-  match Text.indexOf sep t with
-    None -> None
-    Some i -> Some (Text.trim (Text.drop (i Nat.+ Text.size sep) t))
-
--- Strip a suffix and parse the remainder as Nat.
-parseNatBefore : Text -> Text -> Optional Nat
-parseNatBefore suffix t =
-  if Text.endsWith suffix t then
-    sz = Text.size t Nat.- Text.size suffix
-    Nat.fromText (Text.take sz t)
-  else None
-
--- Classify one bracket-content piece and merge it into accumulating meta.
-classifyPiece : Text -> FolderMeta -> FolderMeta
-classifyPiece p m =
-  if Text.endsWith "min" p then
-    FolderMeta.runtimeMin.set (parseNatBefore "min" p) m
-  else if Text.endsWith "p" p then
-    FolderMeta.resolution.set (Some p) m
-  else if Text.endsWith "b" p then
-    FolderMeta.bitDepth.set (parseNatBefore "b" p) m
-  else if Text.endsWith "G" p then
-    FolderMeta.rawSize.set (Some p) m
-  else if Text.endsWith "M" p then
-    FolderMeta.rawSize.set (Some p) m
-  else if Text.startsWith "x" p then
-    FolderMeta.videoCodec.set (Some p) m
-  else if Text.startsWith "h" p then
-    FolderMeta.videoCodec.set (Some p) m
-  else if Text.startsWith "av" p then
-    FolderMeta.videoCodec.set (Some p) m
-  else m
-
-Nfo.parseFolderName : Text -> FolderMeta
-Nfo.parseFolderName name =
-  csum     = textAfter "~" name
-  brackets = textBetween "[" "]" name
-  base     = FolderMeta.checksum.set csum emptyFolderMeta
-  match brackets with
-    None -> base
-    Some content ->
-      List.foldLeft
-        (acc p -> classifyPiece (Text.trim p) acc)
-        base
-        (Text.split ?. content)
+  use Json text
+  Json.object [("name", text (Actor.name a)), ("role", text (Actor.role a))]
 
 FolderMeta.toJson : FolderMeta -> Json
 FolderMeta.toJson f =
-  Json.object [
-    ("rawSize",    toJsonOpt Json.text (FolderMeta.rawSize f)),
-    ("resolution", toJsonOpt Json.text (FolderMeta.resolution f)),
-    ("videoCodec", toJsonOpt Json.text (FolderMeta.videoCodec f)),
-    ("bitDepth",   toJsonOpt Json.nat  (FolderMeta.bitDepth f)),
-    ("runtimeMin", toJsonOpt Json.nat  (FolderMeta.runtimeMin f)),
-    ("checksum",   toJsonOpt Json.text (FolderMeta.checksum f))
-  ]
+  use Json nat text
+  Json.object
+    [ ("rawSize", toJsonOpt text (FolderMeta.rawSize f))
+    , ("resolution", toJsonOpt text (FolderMeta.resolution f))
+    , ("videoCodec", toJsonOpt text (FolderMeta.videoCodec f))
+    , ("bitDepth", toJsonOpt nat (FolderMeta.bitDepth f))
+    , ("runtimeMin", toJsonOpt nat (FolderMeta.runtimeMin f))
+    , ("checksum", toJsonOpt text (FolderMeta.checksum f))
+    ]
 
-FolderMeta.fromJson : '{Decoder} FolderMeta
-FolderMeta.fromJson = do
-  rawSize    = Decoder.optional! (Decoder.object.at "rawSize"    Decoder.text)
-  resolution = Decoder.optional! (Decoder.object.at "resolution" Decoder.text)
-  videoCodec = Decoder.optional! (Decoder.object.at "videoCodec" Decoder.text)
-  bitDepth   = Decoder.optional! (Decoder.object.at "bitDepth"   Decoder.nat)
-  runtimeMin = Decoder.optional! (Decoder.object.at "runtimeMin" Decoder.nat)
-  checksum   = Decoder.optional! (Decoder.object.at "checksum"   Decoder.text)
-  FolderMeta rawSize resolution videoCodec bitDepth runtimeMin checksum
+Movie.toJson : Movie -> Json
+Movie.toJson m =
+  use Json nat text
+  Json.object
+    [ ("id", MovieId.toJson (Movie.id m))
+    , ("title", Title.toJson (Movie.title m))
+    , ("collection", toJsonOpt text (Movie.collection m))
+    , ("runtime", toJsonOpt nat (Movie.runtime m))
+    , ("scoring", Scoring.toJson (Movie.scoring m))
+    , ("plot", text (Movie.plot m))
+    , ("tagline", text (Movie.tagline m))
+    , ("taxonomy", Taxonomy.toJson (Movie.taxonomy m))
+    , ("fileInfo", FileInfo.toJson (Movie.fileInfo m))
+    , ("videoFilePath", toJsonOpt text (Movie.videoFilePath m))
+    , ("checksum", toJsonOpt text (Movie.checksum m))
+    , ("actors", Json.array (List.map Actor.toJson (Movie.actors m)))
+    , ("folderPath", toJsonOpt text (Movie.folderPath m))
+    , ("nfoPath", toJsonOpt text (Movie.nfoPath m))
+    , ("fileSizeBytes", toJsonOpt nat (Movie.fileSizeBytes m))
+    , ("folderMeta", FolderMeta.toJson (Movie.folderMeta m))
+    ]
+
+Title.fromJson : '{unison_json_1_4_2.Decoder} Title
+Title.fromJson = do
+  use Decoder text
+  use object at!
+  display = at! "display" text
+  original = at! "original" text
+  sort = at! "sort" text
+  Title.Title display original sort
+
+MovieId.fromJson : '{unison_json_1_4_2.Decoder} MovieId
+MovieId.fromJson = do
+  use Decoder optional! text
+  use object at
+  kodi = object.at! "kodi" text
+  imdb = optional! (at "imdb" text)
+  tmdb = optional! (at "tmdb" text)
+  MovieId.MovieId kodi imdb tmdb
+
+Scoring.fromJson : '{unison_json_1_4_2.Decoder} Scoring
+Scoring.fromJson = do
+  use Decoder nat
+  use object at!
+  year = Decoder.optional! (object.at "year" nat)
+  rating = at! "rating" Decoder.float
+  votes = at! "votes" nat
+  mpaa = at! "mpaa" Decoder.text
+  Scoring.Scoring year rating votes mpaa
+
+Taxonomy.fromJson : '{unison_json_1_4_2.Decoder} Taxonomy
+Taxonomy.fromJson = do
+  use Decoder array text
+  use object at!
+  genres = at! "genres" (array text)
+  tags = at! "tags" (array text)
+  countries = at! "countries" (array text)
+  studios = at! "studios" (array text)
+  directors = at! "directors" (array text)
+  credits = at! "credits" (array text)
+  Taxonomy.Taxonomy genres tags countries studios directors credits
+
+Video.fromJson : '{unison_json_1_4_2.Decoder} Video
+Video.fromJson = do
+  use Decoder nat
+  use object at!
+  codec = at! "codec" Decoder.text
+  aspect = at! "aspect" Decoder.float
+  width = at! "width" nat
+  height = at! "height" nat
+  Video.Video codec aspect width height
+
+Audio.fromJson : '{unison_json_1_4_2.Decoder} Audio
+Audio.fromJson = do
+  use Decoder text
+  use object at!
+  codec = at! "codec" text
+  language = at! "language" text
+  channels = at! "channels" Decoder.nat
+  Audio.Audio codec language channels
+
+Subtitle.fromJson : '{unison_json_1_4_2.Decoder} Subtitle
+Subtitle.fromJson = do
+  language = object.at! "language" Decoder.text
+  Subtitle.Subtitle language
+
+StreamDetails.fromJson : '{unison_json_1_4_2.Decoder} StreamDetails
+StreamDetails.fromJson = do
+  use Decoder array
+  use object at!
+  video = at! "video" Video.fromJson
+  audios = at! "audios" (array Audio.fromJson)
+  subtitles = at! "subtitles" (array Subtitle.fromJson)
+  StreamDetails.StreamDetails video audios subtitles
+
+FileInfo.fromJson : '{unison_json_1_4_2.Decoder} FileInfo
+FileInfo.fromJson = do
+  streams = object.at! "streams" StreamDetails.fromJson
+  FileInfo.FileInfo streams
+
+Actor.fromJson : '{unison_json_1_4_2.Decoder} Actor
+Actor.fromJson = do
+  use Decoder text
+  use object at!
+  name = at! "name" text
+  role = at! "role" text
+  Actor.Actor name role
+
+FolderMeta.fromJson : '{unison_json_1_4_2.Decoder} FolderMeta
+FolderMeta.fromJson =
+  do
+    use Decoder nat optional! text
+    use object at
+    rawSize = optional! (at "rawSize" text)
+    resolution = optional! (at "resolution" text)
+    videoCodec = optional! (at "videoCodec" text)
+    bitDepth = optional! (at "bitDepth" nat)
+    runtimeMin = optional! (at "runtimeMin" nat)
+    checksum = optional! (at "checksum" text)
+    FolderMeta.FolderMeta
+      rawSize resolution videoCodec bitDepth runtimeMin checksum
+
+Movie.fromJson : '{unison_json_1_4_2.Decoder} Movie
+Movie.fromJson =
+  do
+    use Decoder nat optional! text
+    use object at at!
+    id = at! "id" MovieId.fromJson
+    title = at! "title" Title.fromJson
+    collection = optional! (at "collection" text)
+    runtime = optional! (at "runtime" nat)
+    scoring = at! "scoring" Scoring.fromJson
+    plot = at! "plot" text
+    tagline = at! "tagline" text
+    taxonomy = at! "taxonomy" Taxonomy.fromJson
+    fileInfo = at! "fileInfo" FileInfo.fromJson
+    videoFilePath = optional! (at "videoFilePath" text)
+    checksum = optional! (at "checksum" text)
+    actors = at! "actors" (Decoder.array Actor.fromJson)
+    folderPath = optional! (at "folderPath" text)
+    nfoPath = optional! (at "nfoPath" text)
+    fileSizeBytes = optional! (at "fileSizeBytes" nat)
+    folderMeta = at! "folderMeta" FolderMeta.fromJson
+    Movie.Movie
+      id
+      title
+      collection
+      runtime
+      scoring
+      plot
+      tagline
+      taxonomy
+      fileInfo
+      videoFilePath
+      checksum
+      actors
+      folderPath
+      nfoPath
+      fileSizeBytes
+      folderMeta
+
+Movie.toNdjsonLine : Movie -> Text
+Movie.toNdjsonLine m =
+  use Text ++
+  Json.toText (Movie.toJson m) ++ "\n"
+
+Movie.fromNdjsonLine : Text -> Either Failure Movie
+Movie.fromNdjsonLine line = catch do Decoder.run Movie.fromJson (trim line)
 
 test> Movie.roundtrip.test =
   encoded = Movie.toNdjsonLine exampleMovie
@@ -552,48 +392,83 @@ test> Movie.roundtrip.test =
     Left failure -> [Fail (Failure.message failure)]
     Right m      -> check (Universal.eq m exampleMovie)
 
--- =====================================================================
--- Stage 3: NFO XML -> Movie parser via Soup.
--- =====================================================================
--- 
--- Mental model: a Soup is a position in an XML tree.  You navigate
--- with combinators that throw XMLError on missing nodes.  The Each
--- ability turns "find all matching descendants" into a forking
--- computation; Soup.tracingErrors collects forks into [a].
--- 
--- Note the ability differences from earlier stages:
---   * Stage 2 used {Exception}.  We caught it with `catch` from base.
---   * Stage 3 uses {Throw XMLError, Each}.  We collect via
---     Soup.tracingErrors, which handles both at once.
--- 
--- This is on-the-nose for Unison's design: every effect is explicit
--- in the type, and each ability has its own handlers.  The cost is
--- you can't reuse one `catch` for everything.  The benefit is the
--- type tells you exactly what failure modes are possible.
 
--- =====================================================================
--- Helpers.  These give us xml-conduit-style ergonomics on top of Soup.
--- =====================================================================
+-- ====================================================================
+-- Folder name parsing: extract resolution / codec / bit depth from
+-- folder names like "Movie Title [1080p x265 8bit 120min]~ABCD1234"
+-- ====================================================================
 
--- Handler for the {Throw XMLError} ability.  Converts a throw to None.
--- Uses Soup.tracingErrors with empty label.  Trace noise unavoidable
--- with this approach; see note below.
+textBetween : Text -> Text -> Text -> Optional Text
+textBetween startD endD t = match Text.indexOf startD t with
+  None   -> None
+  Some i ->
+    use Nat +
+    after = Text.drop (i + Text.size startD) t
+    match Text.indexOf endD after with
+      None   -> None
+      Some j -> Some (Text.take j after)
+
+textAfter : Text -> Text -> Optional Text
+textAfter sep t = match Text.indexOf sep t with
+  None   -> None
+  Some i -> Some (trim (Text.drop (i Nat.+ Text.size sep) t))
+
+parseNatBefore : Text -> Text -> Optional Nat
+parseNatBefore suffix t =
+  use Nat -
+  use Text size
+  if endsWith suffix t then
+    sz = size t - size suffix
+    Nat.fromText (Text.take sz t)
+  else None
+
+classifyPiece : Text -> FolderMeta -> FolderMeta
+classifyPiece p m =
+  if endsWith "min" p then FolderMeta.runtimeMin.set (parseNatBefore "min" p) m
+  else
+    if endsWith "p" p then FolderMeta.resolution.set (Some p) m
+    else
+      if endsWith "b" p then FolderMeta.bitDepth.set (parseNatBefore "b" p) m
+      else
+        if endsWith "G" p then FolderMeta.rawSize.set (Some p) m
+        else
+          if endsWith "M" p then FolderMeta.rawSize.set (Some p) m
+          else
+            if startsWith "x" p then FolderMeta.videoCodec.set (Some p) m
+            else
+              if startsWith "h" p then FolderMeta.videoCodec.set (Some p) m
+              else
+                if startsWith "av" p then FolderMeta.videoCodec.set (Some p) m
+                else m
+
+Nfo.parseFolderName : Text -> FolderMeta
+Nfo.parseFolderName name =
+  csum = textAfter "~" name
+  brackets = textBetween "[" "]" name
+  base = FolderMeta.checksum.set csum emptyFolderMeta
+  match brackets with
+    None -> base
+    Some content ->
+      List.foldLeft
+        (acc p -> classifyPiece (trim p) acc) base (Text.split ?\s content)
+
+
+-- ====================================================================
+-- NFO XML parsing (via the Soup ability)
+-- ====================================================================
+
 tryXml : '{Throw XMLError} a -> Optional a
-tryXml thunk =
-  match Soup.tracingErrors "" thunk with
-    Some (a +: _) -> Some a
-    _             -> None
+tryXml thunk = match tracingErrors "" thunk with
+  Some (a +: _) -> Some a
+  _             -> None
 
--- Tolerant text extraction.  Soup.texts (plural) returns [] for
--- empty elements; we join the pieces.  Replaces Soup.text everywhere.
 Nfo.allText : Soup ->{Throw XMLError} Text
 Nfo.allText s = Text.join "" (Soup.texts s)
 
 Nfo.optText : Text -> Soup -> Optional Text
-Nfo.optText tag s =
-  match tryXml '(Nfo.allText (Soup.findFirst tag s)) with
-    Some t  -> if Universal.eq (Text.size t) 0 then None else Some t
-    None    -> None
+Nfo.optText tag s = match tryXml do Nfo.allText (Soup.findFirst tag s) with
+  Some t -> if Universal.eq (Text.size t) 0 then None else Some t
+  None   -> None
 
 Nfo.requireText : Text -> Soup ->{Throw XMLError} Text
 Nfo.requireText tag s = Nfo.allText (Soup.findFirst tag s)
@@ -603,280 +478,242 @@ Nfo.textOr default tag s = Optional.getOrElse default (Nfo.optText tag s)
 
 Nfo.texts : Text -> Soup -> [Text]
 Nfo.texts tag s =
-  Optional.getOrElse [] (Soup.tracingErrors tag do
-    g = Soup.named tag s
-    Nfo.allText g)
+  Optional.getOrElse
+    [] (tracingErrors tag do
+      g = Soup.named tag s
+      Nfo.allText g)
 
--- Numeric fields with default (real NFO files have missing/garbage
--- numbers all over the place).
 Nfo.natOr : Nat -> Text -> Nat
 Nfo.natOr default t = Optional.getOrElse default (Nat.fromText t)
 
 Nfo.floatOr : Float -> Text -> Float
 Nfo.floatOr default t = Optional.getOrElse default (Float.fromText t)
 
--- Attribute off the first matching descendant.
--- E.g. `<imdb id="tt0167260"/>` -> descendantAttr "imdb" "id" s
 Nfo.descendantAttr : Text -> Text -> Soup -> Optional Text
 Nfo.descendantAttr elemName attrName s =
-  match Soup.tracingErrors elemName
-        '(Soup.attribute attrName (Soup.findFirst elemName s)) with
+  match tracingErrors elemName do
+    Soup.attribute attrName (Soup.findFirst elemName s) with
     Some (a +: _) -> Some a
     _             -> None
 
--- =====================================================================
--- Per-type parsers.  Bottom-up, mirroring the JSON decoders from
--- Stage 2.  Each takes a Soup positioned at the relevant subtree.
--- =====================================================================
-
 Nfo.parseTitle : Soup ->{Throw XMLError} Title
 Nfo.parseTitle s =
-  display  = Nfo.textOr "" "title" s
+  display = Nfo.textOr "" "title" s
   original = Nfo.textOr "" "originaltitle" s
-  sort     = Nfo.textOr "" "sorttitle" s
-  Title display original sort
+  sort = Nfo.textOr "" "sorttitle" s
+  Title.Title display original sort
 
 Nfo.parseMovieId : Soup ->{Throw XMLError} MovieId
 Nfo.parseMovieId s =
   kodi = Nfo.textOr "" "id" s
   imdb = Nfo.descendantAttr "imdb" "id" s
   tmdb = Nfo.descendantAttr "tmdb" "id" s
-  MovieId kodi imdb tmdb
+  MovieId.MovieId kodi imdb tmdb
 
 Nfo.parseScoring : Soup ->{Throw XMLError} Scoring
 Nfo.parseScoring s =
-  year   = Optional.map (Nfo.natOr 0) (Nfo.optText "year" s)
+  year = Optional.map (Nfo.natOr 0) (Nfo.optText "year" s)
   rating = Nfo.floatOr 0.0 (Nfo.textOr "0" "rating" s)
-  votes  = Nfo.natOr   0   (Nfo.textOr "0" "votes" s)
-  mpaa   = Nfo.textOr  ""  "mpaa" s
-  Scoring year rating votes mpaa
+  votes = Nfo.natOr 0 (Nfo.textOr "0" "votes" s)
+  mpaa = Nfo.textOr "" "mpaa" s
+  Scoring.Scoring year rating votes mpaa
 
 Nfo.parseTaxonomy : Soup -> Taxonomy
 Nfo.parseTaxonomy s =
-  Taxonomy
-    (Nfo.texts "genre"    s)
-    (Nfo.texts "tag"      s)
-    (Nfo.texts "country"  s)
-    (Nfo.texts "studio"   s)
+  Taxonomy.Taxonomy
+    (Nfo.texts "genre" s)
+    (Nfo.texts "tag" s)
+    (Nfo.texts "country" s)
+    (Nfo.texts "studio" s)
     (Nfo.texts "director" s)
-    (Nfo.texts "credits"  s)
+    (Nfo.texts "credits" s)
 
 Nfo.parseVideo : Soup ->{Throw XMLError} Video
 Nfo.parseVideo s =
-  codec  = Nfo.textOr "" "codec" s
+  codec = Nfo.textOr "" "codec" s
   aspect = Nfo.floatOr 0.0 (Nfo.textOr "0" "aspect" s)
-  width  = Nfo.natOr 0 (Nfo.textOr "0" "width" s)
+  width = Nfo.natOr 0 (Nfo.textOr "0" "width" s)
   height = Nfo.natOr 0 (Nfo.textOr "0" "height" s)
-  Video codec aspect width height
+  Video.Video codec aspect width height
 
 Nfo.parseAudio : Soup ->{Throw XMLError} Audio
 Nfo.parseAudio s =
-  codec    = Nfo.textOr "" "codec" s
+  codec = Nfo.textOr "" "codec" s
   language = Nfo.textOr "" "language" s
   channels = Nfo.natOr 0 (Nfo.textOr "0" "channels" s)
-  Audio codec language channels
+  Audio.Audio codec language channels
 
 Nfo.parseSubtitle : Soup ->{Throw XMLError} Subtitle
 Nfo.parseSubtitle s =
   language = Nfo.textOr "" "language" s
-  Subtitle language
+  Subtitle.Subtitle language
 
 Nfo.parseStreamDetails : Soup ->{Throw XMLError} StreamDetails
 Nfo.parseStreamDetails s =
-  video  = Nfo.parseVideo (Soup.findFirst "video" s)
-  audios = Optional.getOrElse [] (Soup.tracingErrors "audio" do
-             a = Soup.named "audio" s
-             Nfo.parseAudio a)
-  subs   = Optional.getOrElse [] (Soup.tracingErrors "subtitle" do
-             sb = Soup.named "subtitle" s
-             Nfo.parseSubtitle sb)
-  StreamDetails video audios subs
+  use Optional getOrElse
+  use Soup named
+  video = Nfo.parseVideo (Soup.findFirst "video" s)
+  audios =
+    getOrElse
+      [] (tracingErrors "audio" do
+        a = named "audio" s
+        Nfo.parseAudio a)
+  subs =
+    getOrElse
+      [] (tracingErrors "subtitle" do
+        sb = named "subtitle" s
+        Nfo.parseSubtitle sb)
+  StreamDetails.StreamDetails video audios subs
 
 Nfo.parseFileInfo : Soup ->{Throw XMLError} FileInfo
 Nfo.parseFileInfo s =
   streams = Nfo.parseStreamDetails (Soup.findFirst "streamdetails" s)
-  FileInfo streams
+  FileInfo.FileInfo streams
 
 Nfo.parseActor : Soup ->{Throw XMLError} Actor
 Nfo.parseActor s =
   name = Nfo.textOr "" "name" s
   role = Nfo.textOr "" "role" s
-  Actor name role
+  Actor.Actor name role
 
 Nfo.parseActors : Soup -> [Actor]
 Nfo.parseActors s =
-  Optional.getOrElse [] (Soup.tracingErrors "actor" do
-    a = Soup.named "actor" s
-    Nfo.parseActor a)
-
--- =====================================================================
--- The whole-movie parser.  Takes a Soup positioned at (or above) the
--- <movie> element.  All field extraction is by descendant search, so
--- it doesn't matter whether we're AT <movie> or at the document root.
--- =====================================================================
+  Optional.getOrElse
+    [] (tracingErrors "actor" do
+      a = Soup.named "actor" s
+      Nfo.parseActor a)
 
 Nfo.parseMovie : Soup ->{Throw XMLError} Movie
 Nfo.parseMovie s =
-  id            = Nfo.parseMovieId s
-  title         = Nfo.parseTitle s
-  collection    = Nfo.optText "set" s
-  runtime       = Optional.map (Nfo.natOr 0) (Nfo.optText "runtime" s)
-  scoring       = Nfo.parseScoring s
-  plot          = Nfo.textOr "" "plot" s
-  tagline       = Nfo.textOr "" "tagline" s
-  taxonomy      = Nfo.parseTaxonomy s
-  fileInfo      = match catch '(Nfo.parseFileInfo s) with
-                    Left _  -> FileInfo (StreamDetails (Video "" 0.0 0 0) [] [])
-                    Right f -> f
-  -- videoFilePath and checksum come from the filesystem in Stage 4,
-  -- not from the NFO itself.
-  Movie id title collection runtime scoring plot tagline
-        taxonomy fileInfo None None (Nfo.parseActors s)
-        None None None emptyFolderMeta
-
--- =====================================================================
--- Top-level entry point.  Soup.withXML handles parse failure, the
--- Throw XMLError ability, and the Each ability all in one shot.  It
--- gives us back Either Text [Movie] -- the list dimension because the
--- callback could have used Each at the top level (we don't, so the
--- list is always 0 or 1 elements).
--- =====================================================================
+  id = Nfo.parseMovieId s
+  title = Nfo.parseTitle s
+  collection = Nfo.optText "set" s
+  runtime = Optional.map (Nfo.natOr 0) (Nfo.optText "runtime" s)
+  scoring = Nfo.parseScoring s
+  plot = Nfo.textOr "" "plot" s
+  tagline = Nfo.textOr "" "tagline" s
+  taxonomy = Nfo.parseTaxonomy s
+  fileInfo =
+    match catch do Nfo.parseFileInfo s with
+      Left _ ->
+        FileInfo.FileInfo
+          (StreamDetails.StreamDetails (Video.Video "" 0.0 0 0) [] [])
+      Right f -> f
+  Movie.Movie
+    id
+    title
+    collection
+    runtime
+    scoring
+    plot
+    tagline
+    taxonomy
+    fileInfo
+    None
+    None
+    (Nfo.parseActors s)
+    None
+    None
+    None
+    emptyFolderMeta
 
 Nfo.parse : Text -> Either Text Movie
-Nfo.parse xml =
-  match Soup.withXML xml Nfo.parseMovie with
-    Left err       -> Left err
-    Right (m +: _) -> Right m
-    Right []       -> Left "no <movie> element found"
-
--- =====================================================================
--- Sample NFO and roundtrip test.
--- =====================================================================
+Nfo.parse xml = match withXML xml Nfo.parseMovie with
+  Left err       -> Left err
+  Right (m +: _) -> Right m
+  Right []       -> Left "no <movie> element found"
 
 sampleNfo : Text
-sampleNfo = """
-<?xml version="1.0" encoding="UTF-8"?>
-<movie>
-  <title>The Return of the King</title>
-  <originaltitle>The Return of the King</originaltitle>
-  <sorttitle>Lord of the Rings, The: The Return of the King</sorttitle>
-  <set>The Lord of the Rings Collection</set>
-  <year>2003</year>
-  <rating>8.9</rating>
-  <votes>12000</votes>
-  <mpaa>PG-13</mpaa>
-  <id>tt0167260</id>
-  <plot>Aragorn leads the World of Men.</plot>
-  <tagline>The eye of the enemy is moving.</tagline>
-  <runtime>201</runtime>
-  <genre>Adventure</genre>
-  <genre>Fantasy</genre>
-  <country>New Zealand</country>
-  <country>United States</country>
-  <studio>New Line Cinema</studio>
-  <director>Peter Jackson</director>
-  <credits>Fran Walsh</credits>
-  <fileinfo>
-    <streamdetails>
-      <video>
-        <codec>h264</codec>
-        <aspect>2.39</aspect>
-        <width>1920</width>
-        <height>800</height>
-      </video>
-      <audio>
-        <codec>ac3</codec>
-        <language>eng</language>
-        <channels>6</channels>
-      </audio>
-      <subtitle>
-        <language>eng</language>
-      </subtitle>
-    </streamdetails>
-  </fileinfo>
-  <imdb id="tt0167260"/>
-  <tmdb id="122"/>
-  <actor>
-    <name>Elijah Wood</name>
-    <role>Frodo</role>
-  </actor>
-</movie>
-"""
+sampleNfo =
+  """
+  <?xml version="1.0" encoding="UTF-8"?>
+  <movie>
+    <title>The Return of the King</title>
+    <originaltitle>The Return of the King</originaltitle>
+    <sorttitle>Lord of the Rings, The: The Return of the King</sorttitle>
+    <set>The Lord of the Rings Collection</set>
+    <year>2003</year>
+    <rating>8.9</rating>
+    <votes>12000</votes>
+    <mpaa>PG-13</mpaa>
+    <id>tt0167260</id>
+    <plot>Aragorn leads the World of Men.</plot>
+    <tagline>The eye of the enemy is moving.</tagline>
+    <runtime>201</runtime>
+    <genre>Adventure</genre>
+    <genre>Fantasy</genre>
+    <country>New Zealand</country>
+    <country>United States</country>
+    <studio>New Line Cinema</studio>
+    <director>Peter Jackson</director>
+    <credits>Fran Walsh</credits>
+    <fileinfo>
+      <streamdetails>
+        <video>
+          <codec>h264</codec>
+          <aspect>2.39</aspect>
+          <width>1920</width>
+          <height>800</height>
+        </video>
+        <audio>
+          <codec>ac3</codec>
+          <language>eng</language>
+          <channels>6</channels>
+        </audio>
+        <subtitle>
+          <language>eng</language>
+        </subtitle>
+      </streamdetails>
+    </fileinfo>
+    <imdb id="tt0167260"/>
+    <tmdb id="122"/>
+    <actor>
+      <name>Elijah Wood</name>
+      <role>Frodo</role>
+    </actor>
+  </movie>
+  """
 
 test> Nfo.parse.test =
   match Nfo.parse sampleNfo with
     Left err -> [Fail err]
-    Right m  -> check (Universal.eq (Title.display (Movie.title m))
-                                    "The Return of the King")
+    Right m ->
+      check
+        (Universal.eq (Title.display (Movie.title m)) "The Return of the King")
 
--- =====================================================================
--- Stage 4: IO glue.  Read config, walk dirs, parse NFOs, dedup, write.
--- =====================================================================
--- 
--- This is where abilities earn their keep.  Every function below that
--- touches the filesystem carries {IO, Exception} in its signature.
--- The ability gets handled exactly once, at the boundary where we
--- run `main`, by ucm's `run` command.  No more "did I forget to lift
--- this into IO" mistakes -- the typechecker tracks it for you.
--- 
--- Architecture changes vs the Haskell:
---   1. Single-pass dedup.  Original wrote NDJSON then re-read it for
---      dedup.  If pass two fits in memory, pass one did too.
---   2. No `head` partial functions.
---   3. extractChecksum kept (faithful port) but flagged: rip out in
---      production, replace with a proper parser or remove entirely.
 
--- =====================================================================
--- FilePath joining helper.  If lib.base.IO.FilePath exposes a real
--- `appendName` or `</>` operator, swap mine for it.  Pattern matching
--- on `FilePath` assumes the constructor is `FilePath Text`.
--- =====================================================================
+-- ====================================================================
+-- Filesystem helpers
+-- ====================================================================
 
 pathJoin : FilePath -> Text -> FilePath
-pathJoin base name = match base with
-  FilePath t -> FilePath (t Text.++ "/" Text.++ name)
+pathJoin base name =
+  use Text ++
+  (FilePath t) = base
+  FilePath (t ++ "/" ++ name)
 
 filePathText : FilePath -> Text
 filePathText = cases FilePath t -> t
 
--- Basename of a FilePath (last segment after splitting on '/').
 filePathBasename : FilePath -> Text
 filePathBasename fp = match List.reverse (Text.split ?/ (filePathText fp)) with
   last +: _ -> last
   []        -> filePathText fp
 
--- =====================================================================
--- Brittle checksum extraction, ported faithfully.  Folder name like
--- "MovieTitle~a3f1c9.something" -> Some "a3f1c9".  No `~` -> None.
--- =====================================================================
-
-Nfo.extractChecksum : Text -> Optional Text
-Nfo.extractChecksum _ = None
-
--- =====================================================================
--- File classification helpers.
--- =====================================================================
-
 videoExtensions : [Text]
 videoExtensions = [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv"]
 
 isNfo : Text -> Boolean
-isNfo name = Text.endsWith ".nfo" name
+isNfo name = endsWith ".nfo" name
 
 isVideo : Text -> Boolean
-isVideo name = List.any (ext -> Text.endsWith ext name) videoExtensions
+isVideo name = List.any (ext -> endsWith ext name) videoExtensions
 
 findFirstNfo : [Text] -> Optional Text
 findFirstNfo = List.find isNfo
 
 findFirstVideo : [Text] -> Optional Text
 findFirstVideo = List.find isVideo
-
--- =====================================================================
--- Per-folder processing.  Returns Left folderPath if no parseable NFO,
--- Right Movie otherwise.  videoFilePath and checksum are filled in
--- here -- they come from filesystem context, not the NFO XML.
--- =====================================================================
 
 Nfo.processFolder : FilePath ->{IO, Exception} Either FilePath Movie
 Nfo.processFolder folder =
@@ -885,166 +722,32 @@ Nfo.processFolder folder =
     None -> Left folder
     Some nfoName ->
       nfoFp = pathJoin folder nfoName
-      xml   = readFileUtf8 nfoFp
+      xml = readFileUtf8 nfoFp
       match Nfo.parse xml with
         Left _ -> Left folder
         Right m ->
-          videoPath = Optional.map
-                        (vf -> filePathText (pathJoin folder vf))
-                        (findFirstVideo files)
+          videoPath =
+            Optional.map
+              (vf -> filePathText (pathJoin folder vf)) (findFirstVideo files)
           folderName = filePathBasename folder
           folderMeta = Nfo.parseFolderName folderName
-          Right (m
-            |> Movie.videoFilePath.set videoPath
-            |> Movie.checksum.set      (FolderMeta.checksum folderMeta)
-            |> Movie.folderPath.set    (Some (filePathText folder))
-            |> Movie.nfoPath.set       (Some (filePathText nfoFp))
-            |> Movie.folderMeta.set    folderMeta)
-
--- =====================================================================
--- Walk one configured root directory: try to process each subfolder.
--- =====================================================================
-
-Nfo.processEntry : FilePath -> Text ->{IO, Exception} Either FilePath Movie
-Nfo.processEntry parent name =
-  fullPath = pathJoin parent name
-  if isDirectory fullPath then Nfo.processFolder fullPath
-  else Left fullPath
-
-Nfo.processDirectory : FilePath ->{IO, Exception} [Either FilePath Movie]
-Nfo.processDirectory parent =
-  basenames = directoryContents.texts parent
-  _ = printLine (Text.join " " ["Scanning:", filePathText parent, "->", Nat.toText (List.size basenames), "entries"])
-  List.map (Nfo.processEntry parent) basenames
-
--- =====================================================================
--- Dedup by MovieId.kodi.  Keep first occurrence; if a later duplicate
--- has a non-None collection and the first didn't, prefer the later
--- collection.  Simpler than the Haskell original and doesn't have its
--- "use title as collection name" misfeature.
--- =====================================================================
-
-Nfo.dedup : [Movie] -> [Movie]
-Nfo.dedup movies =
-  step : Map Text Movie -> Movie -> Map Text Movie
-  step acc m =
-    id = MovieId.kodi (Movie.id m)
-    match Map.lookup id acc with
-      None -> Map.insert id m acc
-      Some existing ->
-        merged = match (Movie.collection existing, Movie.collection m) with
-          (None, Some _) -> Movie.collection.set (Movie.collection m) existing
-          _              -> existing
-        Map.insert id merged acc
-  Map.values (List.foldLeft step Map.empty movies)
-
--- =====================================================================
--- NDJSON: one JSON value per line.  Movie.toNdjsonLine from Stage 2
--- already includes its own trailing newline.
--- =====================================================================
-
-Nfo.toNdjson : [Movie] -> Text
-Nfo.toNdjson ms = Text.join "" (List.map Movie.toNdjsonLine ms)
-
-Nfo.missingToNdjson : [FilePath] -> Text
-Nfo.missingToNdjson ps =
-  Text.join "" (List.map
-    (p -> Json.toText (Json.text (filePathText p)) Text.++ "\n")
-    ps)
-
--- =====================================================================
--- Top-level pipeline.
--- 
--- Run from ucm with:
---   uniDork/main> run uniDork.main "/abs/path/to/config.txt"
--- 
--- The config is one absolute directory path per line.
--- Writes ./dork_library/library.ndjson and unNamed.ndjson.
--- =====================================================================
+          Right
+            (m
+              |> Movie.videoFilePath.set videoPath
+              |> Movie.checksum.set (FolderMeta.checksum folderMeta)
+              |> Movie.folderPath.set (Some (filePathText folder))
+              |> Movie.nfoPath.set (Some (filePathText nfoFp))
+              |> Movie.folderMeta.set folderMeta)
 
 parseConfigLine : Text -> Optional FilePath
 parseConfigLine l =
-  trimmed = Text.trim l
-  if Universal.eq (Text.size trimmed) 0 then None
-  else Some (FilePath trimmed)
+  trimmed = trim l
+  if Universal.eq (Text.size trimmed) 0 then None else Some (FilePath trimmed)
 
-leftToOpt : Either a b -> Optional a
-leftToOpt = cases
-  Left p  -> Some p
-  Right _ -> None
 
-rightToOpt : Either a b -> Optional b
-rightToOpt = cases
-  Left _  -> None
-  Right m -> Some m
-
-uniDork.main : Text ->{IO, Exception} ()
-uniDork.main configPath =
-  _ = printLine "Reading config..."
-  configText  = readFileUtf8 (FilePath configPath)
-  dirs        = List.filterMap parseConfigLine (Text.lines configText)
-  results     = List.flatMap Nfo.processDirectory dirs
-  errors      = List.filterMap leftToOpt results
-  movies      = List.filterMap rightToOpt results
-  deduped     = Nfo.dedup movies
-  movieCount  = Nat.toText (List.size deduped)
-  errorCount  = Nat.toText (List.size errors)
-  libraryDir  = FilePath "dork_library"
-  _ = if isDirectory libraryDir then () else createDirectory libraryDir
-  _ = !Db.createSchema
-  _ = Db.upsertMovies deduped
-  _ = writeFileUtf8 (pathJoin libraryDir "library.ndjson") (Nfo.toNdjson deduped)
-  _ = writeFileUtf8 (pathJoin libraryDir "unNamed.ndjson") (Nfo.missingToNdjson errors)
-  msg = Text.join "" ["Done. ", movieCount, " unique movies, ", errorCount, " missing NFOs."]
-  printLine msg
-
-uniDork.run : '{IO, Exception} ()
-uniDork.run = do uniDork.main "/tmp/uniDork.conf"
-
--- =====================================================================
--- Streaming import.  Replaces uniDork.main when you want to avoid
--- holding the entire library in memory.
--- 
--- Memory ceiling per iteration: one NFO file's worth of text, the
--- Soup parse tree for it, one Movie value, 22 prepared commands.
--- All released before the next subfolder is touched.
--- 
--- What you lose vs uniDork.main:
---   * No dork_library/library.ndjson file.  Query the DB.
---   * No dork_library/unNamed.ndjson file.  Errors print to stdout.
---   * No in-memory dedup.  ON CONFLICT in the SQL covers it; if the
---     same kodi_id is in two folders, the later one wins.
--- 
--- Re-add NDJSON output later by opening one append-mode Handle 
--- outside the foreach and writing one line per Movie inside it.
--- =====================================================================
-
--- Process a single subfolder.  Parses NFO if present, upserts the
--- Movie, lets it go out of scope before returning.
-uniDork.streamEntry rootDir name =
-  fullPath = pathJoin rootDir name
-  if isDirectory fullPath then
-    match Nfo.processFolder fullPath with
-      Left _ ->
-        _ = printLine (Text.join "" ["  no nfo: ", filePathText fullPath])
-        ()
-      Right m ->
-        _ = Db.upsertOne m
-        ()
-  else ()
-
--- Walk one configured root directory.
-uniDork.streamRoot rootDir =
-  basenames = directoryContents.texts rootDir
-  _ = printLine
-        (Text.join ""
-          ["scanning: ", filePathText rootDir,
-           " (", Nat.toText (List.size basenames), " entries)"])
-  Db.foreach_ (uniDork.streamEntry rootDir) basenames
-
--- =====================================================================
--- Stage 5b: PostgreSQL persistence.
--- =====================================================================
+-- ====================================================================
+-- PostgreSQL: config, DDL, schema management
+-- ====================================================================
 
 Db.config : PostgresClientConfig
 Db.config =
@@ -1060,84 +763,78 @@ Db.runDDLList stmts =
   _ = List.map (s -> Db.runDDL (sql s |> buildCommand)) stmts
   ()
 
--- Db.foreach_ : (a ->{g} ()) -> [a] ->{g} ()
--- Db.foreach_ f = cases
---   []      -> ()
---   x +: xs -> let _ = f x in Db.foreach_ f xs
-
--- =====================================================================
--- DDL
--- =====================================================================
-
 Db.moviesDdl : Text
-Db.moviesDdl = Text.join "" [
-  "CREATE TABLE IF NOT EXISTS movies (",
-  "  id                 SERIAL PRIMARY KEY,",
-  "  kodi_id            TEXT NOT NULL UNIQUE,",
-  "  imdb_id            TEXT,",
-  "  tmdb_id            TEXT,",
-  "  title              TEXT NOT NULL DEFAULT '',",
-  "  original_title     TEXT NOT NULL DEFAULT '',",
-  "  sort_title         TEXT NOT NULL DEFAULT '',",
-  "  collection         TEXT,",
-  "  year               INTEGER,",
-  "  rating             DOUBLE PRECISION NOT NULL DEFAULT 0,",
-  "  votes              INTEGER NOT NULL DEFAULT 0,",
-  "  mpaa               TEXT NOT NULL DEFAULT '',",
-  "  runtime            INTEGER,",
-  "  plot               TEXT NOT NULL DEFAULT '',",
-  "  tagline            TEXT NOT NULL DEFAULT '',",
-  "  folder_path        TEXT,",
-  "  nfo_path           TEXT,",
-  "  video_file_path    TEXT,",
-  "  file_size_bytes    BIGINT,",
-  "  folder_checksum    TEXT,",
-  "  parsed_size_str    TEXT,",
-  "  parsed_resolution  TEXT,",
-  "  parsed_codec       TEXT,",
-  "  parsed_bit_depth   INTEGER,",
-  "  parsed_runtime_min INTEGER,",
-  "  imported_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),",
-  "  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-  ")"]
+Db.moviesDdl =
+  Text.join
+    ""
+    [ "CREATE TABLE IF NOT EXISTS movies ("
+    , "  id                 SERIAL PRIMARY KEY,"
+    , "  kodi_id            TEXT NOT NULL UNIQUE,"
+    , "  imdb_id            TEXT,"
+    , "  tmdb_id            TEXT,"
+    , "  title              TEXT NOT NULL DEFAULT '',"
+    , "  original_title     TEXT NOT NULL DEFAULT '',"
+    , "  sort_title         TEXT NOT NULL DEFAULT '',"
+    , "  collection         TEXT,"
+    , "  year               INTEGER,"
+    , "  rating             DOUBLE PRECISION NOT NULL DEFAULT 0,"
+    , "  votes              INTEGER NOT NULL DEFAULT 0,"
+    , "  mpaa               TEXT NOT NULL DEFAULT '',"
+    , "  runtime            INTEGER,"
+    , "  plot               TEXT NOT NULL DEFAULT '',"
+    , "  tagline            TEXT NOT NULL DEFAULT '',"
+    , "  folder_path        TEXT,"
+    , "  nfo_path           TEXT,"
+    , "  video_file_path    TEXT,"
+    , "  file_size_bytes    BIGINT,"
+    , "  folder_checksum    TEXT,"
+    , "  parsed_size_str    TEXT,"
+    , "  parsed_resolution  TEXT,"
+    , "  parsed_codec       TEXT,"
+    , "  parsed_bit_depth   INTEGER,"
+    , "  parsed_runtime_min INTEGER,"
+    , "  imported_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+    , "  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+    , ")"
+    ]
 
 Db.childDdl : [Text]
-Db.childDdl = [
-  "CREATE TABLE IF NOT EXISTS movie_video_streams (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, codec TEXT NOT NULL DEFAULT '', aspect DOUBLE PRECISION NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0)",
-  "CREATE TABLE IF NOT EXISTS movie_audio_tracks (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, codec TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT '', channels INTEGER NOT NULL DEFAULT 0)",
-  "CREATE TABLE IF NOT EXISTS movie_subtitles (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, language TEXT NOT NULL DEFAULT '')",
-  "CREATE TABLE IF NOT EXISTS movie_actors (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, sort_order INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '')",
-  "CREATE TABLE IF NOT EXISTS movie_genres (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, genre TEXT NOT NULL, PRIMARY KEY (kodi_id, genre))",
-  "CREATE TABLE IF NOT EXISTS movie_tags (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (kodi_id, tag))",
-  "CREATE TABLE IF NOT EXISTS movie_countries (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, country TEXT NOT NULL, PRIMARY KEY (kodi_id, country))",
-  "CREATE TABLE IF NOT EXISTS movie_studios (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, studio TEXT NOT NULL, PRIMARY KEY (kodi_id, studio))",
-  "CREATE TABLE IF NOT EXISTS movie_directors (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, director TEXT NOT NULL, PRIMARY KEY (kodi_id, director))",
-  "CREATE TABLE IF NOT EXISTS movie_credits (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, credit TEXT NOT NULL, PRIMARY KEY (kodi_id, credit))"
-]
+Db.childDdl =
+  [ "CREATE TABLE IF NOT EXISTS movie_video_streams (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, codec TEXT NOT NULL DEFAULT '', aspect DOUBLE PRECISION NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0)"
+  , "CREATE TABLE IF NOT EXISTS movie_audio_tracks (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, codec TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT '', channels INTEGER NOT NULL DEFAULT 0)"
+  , "CREATE TABLE IF NOT EXISTS movie_subtitles (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, language TEXT NOT NULL DEFAULT '')"
+  , "CREATE TABLE IF NOT EXISTS movie_actors (id SERIAL PRIMARY KEY, kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, sort_order INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '')"
+  , "CREATE TABLE IF NOT EXISTS movie_genres (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, genre TEXT NOT NULL, PRIMARY KEY (kodi_id, genre))"
+  , "CREATE TABLE IF NOT EXISTS movie_tags (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (kodi_id, tag))"
+  , "CREATE TABLE IF NOT EXISTS movie_countries (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, country TEXT NOT NULL, PRIMARY KEY (kodi_id, country))"
+  , "CREATE TABLE IF NOT EXISTS movie_studios (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, studio TEXT NOT NULL, PRIMARY KEY (kodi_id, studio))"
+  , "CREATE TABLE IF NOT EXISTS movie_directors (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, director TEXT NOT NULL, PRIMARY KEY (kodi_id, director))"
+  , "CREATE TABLE IF NOT EXISTS movie_credits (kodi_id TEXT NOT NULL REFERENCES movies(kodi_id) ON DELETE CASCADE, credit TEXT NOT NULL, PRIMARY KEY (kodi_id, credit))"
+  ]
 
 Db.indexDdl : [Text]
-Db.indexDdl = [
-  "CREATE INDEX IF NOT EXISTS idx_movies_imdb       ON movies(imdb_id)",
-  "CREATE INDEX IF NOT EXISTS idx_movies_year       ON movies(year)",
-  "CREATE INDEX IF NOT EXISTS idx_movies_title      ON movies(title)",
-  "CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)",
-  "CREATE INDEX IF NOT EXISTS idx_actors_name       ON movie_actors(name)"
-]
+Db.indexDdl =
+  [ "CREATE INDEX IF NOT EXISTS idx_movies_imdb       ON movies(imdb_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_year       ON movies(year)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_title      ON movies(title)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)"
+  , "CREATE INDEX IF NOT EXISTS idx_actors_name       ON movie_actors(name)"
+  ]
 
 Db.dropDdl : [Text]
-Db.dropDdl = [
-  "DROP TABLE IF EXISTS movie_credits        CASCADE",
-  "DROP TABLE IF EXISTS movie_directors      CASCADE",
-  "DROP TABLE IF EXISTS movie_studios        CASCADE",
-  "DROP TABLE IF EXISTS movie_countries      CASCADE",
-  "DROP TABLE IF EXISTS movie_tags           CASCADE",
-  "DROP TABLE IF EXISTS movie_genres         CASCADE",
-  "DROP TABLE IF EXISTS movie_actors         CASCADE",
-  "DROP TABLE IF EXISTS movie_subtitles      CASCADE",
-  "DROP TABLE IF EXISTS movie_audio_tracks   CASCADE",
-  "DROP TABLE IF EXISTS movie_video_streams  CASCADE",
-  "DROP TABLE IF EXISTS movies               CASCADE"
-]
+Db.dropDdl =
+  [ "DROP TABLE IF EXISTS movie_credits        CASCADE"
+  , "DROP TABLE IF EXISTS movie_directors      CASCADE"
+  , "DROP TABLE IF EXISTS movie_studios        CASCADE"
+  , "DROP TABLE IF EXISTS movie_countries      CASCADE"
+  , "DROP TABLE IF EXISTS movie_tags           CASCADE"
+  , "DROP TABLE IF EXISTS movie_genres         CASCADE"
+  , "DROP TABLE IF EXISTS movie_actors         CASCADE"
+  , "DROP TABLE IF EXISTS movie_subtitles      CASCADE"
+  , "DROP TABLE IF EXISTS movie_audio_tracks   CASCADE"
+  , "DROP TABLE IF EXISTS movie_video_streams  CASCADE"
+  , "DROP TABLE IF EXISTS movies               CASCADE"
+  ]
 
 Db.createSchema : '{IO, Exception} ()
 Db.createSchema = do
@@ -1154,85 +851,148 @@ Db.resetSchema = do
     _ = Db.runDDLList Db.childDdl
     Db.runDDLList Db.indexDdl
 
--- SQL definitions: standard optional codecs from the library.
--- These work correctly for Parse/Describe (proven earlier).
-Db.insertMovieSql =
-  sql "INSERT INTO movies (kodi_id) VALUES (" %% var Codec.text %% sql ") ON CONFLICT (kodi_id) DO NOTHING" |> buildCommand
 
-Db.updateMovieSql =
-  sql "UPDATE movies SET kodi_id = "
-    %% var Codec.text
-    %% sql ", imdb_id = "           %% var (Codec.optional Codec.text)
-    %% sql ", tmdb_id = "           %% var (Codec.optional Codec.text)
-    %% sql ", title = "             %% var Codec.text
-    %% sql ", original_title = "    %% var Codec.text
-    %% sql ", sort_title = "        %% var Codec.text
-    %% sql ", collection = "        %% var (Codec.optional Codec.text)
-    %% sql ", year = "              %% var (Codec.optional Codec.int4)
-    %% sql ", rating = "            %% var Codec.double
-    %% sql ", votes = "             %% var Codec.int4
-    %% sql ", mpaa = "              %% var Codec.text
-    %% sql ", runtime = "           %% var (Codec.optional Codec.int4)
-    %% sql ", plot = "              %% var Codec.text
-    %% sql ", tagline = "           %% var Codec.text
-    %% sql ", folder_path = "       %% var (Codec.optional Codec.text)
-    %% sql ", nfo_path = "          %% var (Codec.optional Codec.text)
-    %% sql ", video_file_path = "   %% var (Codec.optional Codec.text)
-    %% sql ", file_size_bytes = "   %% var (Codec.optional Codec.bigint)
-    %% sql ", folder_checksum = "   %% var (Codec.optional Codec.text)
-    %% sql ", parsed_size_str = "   %% var (Codec.optional Codec.text)
-    %% sql ", parsed_resolution = " %% var (Codec.optional Codec.text)
-    %% sql ", parsed_codec = "      %% var (Codec.optional Codec.text)
-    %% sql ", parsed_bit_depth = "  %% var (Codec.optional Codec.int4)
-    %% sql ", parsed_runtime_min = " %% var (Codec.optional Codec.int4)
-    %% sql ", updated_at = NOW() WHERE kodi_id = $1" |> buildCommand
+-- ====================================================================
+-- PostgreSQL: prepared statements
+-- ====================================================================
 
 Db.deleteChildSql table =
   q = Text.join "" ["DELETE FROM ", table, " WHERE kodi_id = "]
   sql q %% var Codec.text |> buildCommand
 
 Db.insertVideoSql =
-  sql "INSERT INTO movie_video_streams (kodi_id, codec, aspect, width, height) VALUES ("
-    %% var Codec.text %% sql ", " %% var Codec.text
-    %% sql ", " %% var Codec.double
-    %% sql ", " %% var Codec.int4 %% sql ", " %% var Codec.int4
-    %% sql ")" |> buildCommand
+  use Codec text
+  sql
+    "INSERT INTO movie_video_streams (kodi_id, codec, aspect, width, height) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var Codec.double
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var integer
+    %% sql ")"
+    |> buildCommand
 
 Db.insertAudioSql =
-  sql "INSERT INTO movie_audio_tracks (kodi_id, track_order, codec, language, channels) VALUES ("
-    %% var Codec.text %% sql ", " %% var Codec.int4
-    %% sql ", " %% var Codec.text %% sql ", " %% var Codec.text
-    %% sql ", " %% var Codec.int4
-    %% sql ")" |> buildCommand
+  use Codec text
+  sql
+    "INSERT INTO movie_audio_tracks (kodi_id, track_order, codec, language, channels) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ")"
+    |> buildCommand
 
 Db.insertSubSql =
+  use Codec text
   sql "INSERT INTO movie_subtitles (kodi_id, track_order, language) VALUES ("
-    %% var Codec.text %% sql ", " %% var Codec.int4
-    %% sql ", " %% var Codec.text
-    %% sql ")" |> buildCommand
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ")"
+    |> buildCommand
 
 Db.insertActorSql =
+  use Codec text
   sql "INSERT INTO movie_actors (kodi_id, sort_order, name, role) VALUES ("
-    %% var Codec.text %% sql ", " %% var Codec.int4
-    %% sql ", " %% var Codec.text %% sql ", " %% var Codec.text
-    %% sql ")" |> buildCommand
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ")"
+    |> buildCommand
 
 Db.insertPairSql table col =
+  use Codec text
   q = Text.join "" ["INSERT INTO ", table, " (kodi_id, ", col, ") VALUES ("]
-  sql q %% var Codec.text %% sql ", " %% var Codec.text
-    %% sql ") ON CONFLICT DO NOTHING" |> buildCommand
+  sql q %% var text %% sql ", " %% var text %% sql ") ON CONFLICT DO NOTHING"
+    |> buildCommand
 
-Db.insertGenreSql    = Db.insertPairSql "movie_genres"    "genre"
-Db.insertTagSql      = Db.insertPairSql "movie_tags"      "tag"
-Db.insertCountrySql  = Db.insertPairSql "movie_countries" "country"
-Db.insertStudioSql   = Db.insertPairSql "movie_studios"   "studio"
+Db.insertGenreSql = Db.insertPairSql "movie_genres" "genre"
+
+Db.insertTagSql = Db.insertPairSql "movie_tags" "tag"
+
+Db.insertCountrySql = Db.insertPairSql "movie_countries" "country"
+
+Db.insertStudioSql = Db.insertPairSql "movie_studios" "studio"
+
 Db.insertDirectorSql = Db.insertPairSql "movie_directors" "director"
-Db.insertCreditSql   = Db.insertPairSql "movie_credits"   "credit"
 
--- Encoding helpers.
--- Db.pot v = [v] is the critical fix: Optional Text wraps directly.
--- Codec.optional c None = [] (library bug); [v] gives [None] for None.
--- Non-optional helpers use Codec.encode which is correct.
+Db.insertCreditSql = Db.insertPairSql "movie_credits" "credit"
+
+Db.upsertMovieSql =
+  use Codec optional text
+  sql
+    "INSERT INTO movies (kodi_id, imdb_id, tmdb_id, title, original_title, sort_title, collection, year, rating, votes, mpaa, runtime, plot, tagline, folder_path, nfo_path, video_file_path, file_size_bytes, folder_checksum, parsed_size_str, parsed_resolution, parsed_codec, parsed_bit_depth, parsed_runtime_min) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ", "
+    %% var Codec.double
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional bigint)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ") ON CONFLICT (kodi_id) DO UPDATE SET imdb_id = EXCLUDED.imdb_id, tmdb_id = EXCLUDED.tmdb_id, title = EXCLUDED.title, original_title = EXCLUDED.original_title, sort_title = EXCLUDED.sort_title, collection = EXCLUDED.collection, year = EXCLUDED.year, rating = EXCLUDED.rating, votes = EXCLUDED.votes, mpaa = EXCLUDED.mpaa, runtime = EXCLUDED.runtime, plot = EXCLUDED.plot, tagline = EXCLUDED.tagline, folder_path = EXCLUDED.folder_path, nfo_path = EXCLUDED.nfo_path, video_file_path = EXCLUDED.video_file_path, file_size_bytes = EXCLUDED.file_size_bytes, folder_checksum = EXCLUDED.folder_checksum, parsed_size_str = EXCLUDED.parsed_size_str, parsed_resolution = EXCLUDED.parsed_resolution, parsed_codec = EXCLUDED.parsed_codec, parsed_bit_depth = EXCLUDED.parsed_bit_depth, parsed_runtime_min = EXCLUDED.parsed_runtime_min, updated_at = NOW()"
+    |> buildCommand
+
+
+-- ====================================================================
+-- PostgreSQL: encoding helpers and per-batch utilities
+-- ====================================================================
+
 Db.pt : Text -> [Optional Text]
 Db.pt t = Codec.encode Codec.text t
 
@@ -1240,12 +1000,12 @@ Db.pot : Optional Text -> [Optional Text]
 Db.pot v = [v]
 
 Db.pi : Int -> [Optional Text]
-Db.pi i = Codec.encode Codec.int4 i
+Db.pi i = Codec.encode integer i
 
 Db.poi : Optional Int -> [Optional Text]
 Db.poi = cases
   None   -> [None]
-  Some i -> Codec.encode Codec.int4 i
+  Some i -> Codec.encode integer i
 
 Db.pf : Float -> [Optional Text]
 Db.pf f = Codec.encode Codec.double f
@@ -1253,294 +1013,17 @@ Db.pf f = Codec.encode Codec.double f
 Db.pobi : Optional Int -> [Optional Text]
 Db.pobi = cases
   None   -> [None]
-  Some i -> Codec.encode Codec.bigint i
+  Some i -> Codec.encode bigint i
 
 Db.withIndex : [a] -> [(Nat, a)]
 Db.withIndex xs =
+  use List +:
+  use Nat +
   go acc i = cases
     []      -> List.reverse acc
-    x +: ys -> go ((i, x) +: acc) (i Nat.+ 1) ys
+    x +: ys -> go ((i, x) +: acc) (i + 1) ys
   go [] 0 xs
 
--- =====================================================================
--- Per-movie transaction.  Each movie commits independently so memory
--- never accumulates the whole library's worth of pending write state.
--- Slower per movie than one big txn, but the difference is small and
--- you get incremental progress on failure as a bonus.
--- =====================================================================
-
-Db.upsertOne m =
-  transaction do
-    pcIns  = prepareCommand Db.insertMovieSql
-    pcUpd  = prepareCommand Db.updateMovieSql
-    pcVid  = prepareCommand Db.insertVideoSql
-    pcDVid = prepareCommand (Db.deleteChildSql "movie_video_streams")
-    pcAud  = prepareCommand Db.insertAudioSql
-    pcDAud = prepareCommand (Db.deleteChildSql "movie_audio_tracks")
-    pcSub  = prepareCommand Db.insertSubSql
-    pcDSub = prepareCommand (Db.deleteChildSql "movie_subtitles")
-    pcAct  = prepareCommand Db.insertActorSql
-    pcDAct = prepareCommand (Db.deleteChildSql "movie_actors")
-    pcGen  = prepareCommand Db.insertGenreSql
-    pcDGen = prepareCommand (Db.deleteChildSql "movie_genres")
-    pcTag  = prepareCommand Db.insertTagSql
-    pcDTag = prepareCommand (Db.deleteChildSql "movie_tags")
-    pcCou  = prepareCommand Db.insertCountrySql
-    pcDCou = prepareCommand (Db.deleteChildSql "movie_countries")
-    pcStu  = prepareCommand Db.insertStudioSql
-    pcDStu = prepareCommand (Db.deleteChildSql "movie_studios")
-    pcDir  = prepareCommand Db.insertDirectorSql
-    pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
-    pcCre  = prepareCommand Db.insertCreditSql
-    pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
-
-    k             = MovieId.kodi (Movie.id m)
-    mid           = Movie.id m
-    t             = Movie.title m
-    s             = Movie.scoring m
-    sd            = FileInfo.streams (Movie.fileInfo m)
-    vid           = StreamDetails.video sd
-    tax           = Movie.taxonomy m
-    fm            = Movie.folderMeta m
-    indexedAudios = Db.withIndex (StreamDetails.audios sd)
-    indexedSubs   = Db.withIndex (StreamDetails.subtitles sd)
-    indexedActors = Db.withIndex (Movie.actors m)
-
-    del pc =
-      _ = bindAndExecuteCommand pc (Db.pt k)
-      ()
-
-    repList delPc insPc vals =
-      _ = del delPc
-      Db.foreach_ (v -> bindAndExecuteCommand insPc (Db.pt k ++ Db.pt v)) vals
-
-    _ = printLine (Text.join "" ["upserting: ", k])
-    _ = bindAndExecuteCommand pcIns (Db.pt k)
-    _ = bindAndExecuteCommand pcUpd
-          (Db.pt k
-          ++ Db.pot (MovieId.imdb mid)
-          ++ Db.pot (MovieId.tmdb mid)
-          ++ Db.pt (Title.display t)
-          ++ Db.pt (Title.original t)
-          ++ Db.pt (Title.sort t)
-          ++ Db.pot (Movie.collection m)
-          ++ Db.poi (Optional.map Nat.toInt (Scoring.year s))
-          ++ Db.pf (Scoring.rating s)
-          ++ Db.pi (Nat.toInt (Scoring.votes s))
-          ++ Db.pt (Scoring.mpaa s)
-          ++ Db.poi (Optional.map Nat.toInt (Movie.runtime m))
-          ++ Db.pt (Movie.plot m)
-          ++ Db.pt (Movie.tagline m)
-          ++ Db.pot (Movie.folderPath m)
-          ++ Db.pot (Movie.nfoPath m)
-          ++ Db.pot (Movie.videoFilePath m)
-          ++ Db.pobi (Optional.map Nat.toInt (Movie.fileSizeBytes m))
-          ++ Db.pot (Movie.checksum m)
-          ++ Db.pot (FolderMeta.rawSize fm)
-          ++ Db.pot (FolderMeta.resolution fm)
-          ++ Db.pot (FolderMeta.videoCodec fm)
-          ++ Db.poi (Optional.map Nat.toInt (FolderMeta.bitDepth fm))
-          ++ Db.poi (Optional.map Nat.toInt (FolderMeta.runtimeMin fm)))
-    _ = del pcDVid
-    _ = bindAndExecuteCommand pcVid
-          (Db.pt k ++ Db.pt (Video.codec vid) ++ Db.pf (Video.aspect vid)
-          ++ Db.pi (Nat.toInt (Video.width vid))
-          ++ Db.pi (Nat.toInt (Video.height vid)))
-    _ = del pcDAud
-    _ = Db.foreach_
-          (cases (i, a) ->
-            bindAndExecuteCommand pcAud
-              (Db.pt k ++ Db.pi (Nat.toInt i) ++ Db.pt (Audio.codec a)
-              ++ Db.pt (Audio.language a)
-              ++ Db.pi (Nat.toInt (Audio.channels a))))
-          indexedAudios
-    _ = del pcDSub
-    _ = Db.foreach_
-          (cases (i, sub) ->
-            bindAndExecuteCommand pcSub
-              (Db.pt k ++ Db.pi (Nat.toInt i)
-              ++ Db.pt (Subtitle.language sub)))
-          indexedSubs
-    _ = del pcDAct
-    _ = Db.foreach_
-          (cases (i, a) ->
-            bindAndExecuteCommand pcAct
-              (Db.pt k ++ Db.pi (Nat.toInt i) ++ Db.pt (Actor.name a)
-              ++ Db.pt (Actor.role a)))
-          indexedActors
-    _ = repList pcDGen pcGen (Taxonomy.genres tax)
-    _ = repList pcDTag pcTag (Taxonomy.tags tax)
-    _ = repList pcDCou pcCou (Taxonomy.countries tax)
-    _ = repList pcDStu pcStu (Taxonomy.studios tax)
-    _ = repList pcDDir pcDir (Taxonomy.directors tax)
-    _ = repList pcDCre pcCre (Taxonomy.credits tax)
-
-    _ = PreparedCommand.close pcIns
-    _ = PreparedCommand.close pcUpd
-    _ = PreparedCommand.close pcVid
-    _ = PreparedCommand.close pcDVid
-    _ = PreparedCommand.close pcAud
-    _ = PreparedCommand.close pcDAud
-    _ = PreparedCommand.close pcSub
-    _ = PreparedCommand.close pcDSub
-    _ = PreparedCommand.close pcAct
-    _ = PreparedCommand.close pcDAct
-    _ = PreparedCommand.close pcGen
-    _ = PreparedCommand.close pcDGen
-    _ = PreparedCommand.close pcTag
-    _ = PreparedCommand.close pcDTag
-    _ = PreparedCommand.close pcCou
-    _ = PreparedCommand.close pcDCou
-    _ = PreparedCommand.close pcStu
-    _ = PreparedCommand.close pcDStu
-    _ = PreparedCommand.close pcDir
-    _ = PreparedCommand.close pcDDir
-    _ = PreparedCommand.close pcCre
-    PreparedCommand.close pcDCre
-
-Db.upsertMovies : [Movie] ->{IO, Exception} ()
-Db.upsertMovies movies =
-  singleIO Db.config do
-    Db.foreach_ Db.upsertOne movies
-
-Db.smokeTest : '{IO, Exception} ()
-Db.smokeTest = do Db.upsertMovies [exampleMovie]
-
-Db.countMovies : '{IO, Exception} ()
-Db.countMovies = do
-  singleIO Db.config do
-    q = sql "SELECT COUNT(*) FROM movies" |> typedQuery Codec.int8
-    counts = Query.execute q
-    match counts with
-      n +: _ -> printLine (Text.join "" ["movies in db: ", Int.toText n])
-      []     -> printLine "no result"
-
--- Per-movie work using SHARED prepared commands.
--- Transaction boundary is per-movie so commits are independent,
--- but the prepared commands live for the whole singleIO session.
-Db.upsertWith
-  pcIns pcUpd pcVid pcDVid pcAud pcDAud pcSub pcDSub
-  pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-  pcStu pcDStu pcDir pcDDir pcCre pcDCre m =
-  transaction do
-    k             = MovieId.kodi (Movie.id m)
-    mid           = Movie.id m
-    t             = Movie.title m
-    s             = Movie.scoring m
-    sd            = FileInfo.streams (Movie.fileInfo m)
-    vid           = StreamDetails.video sd
-    tax           = Movie.taxonomy m
-    fm            = Movie.folderMeta m
-    indexedAudios = Db.withIndex (StreamDetails.audios sd)
-    indexedSubs   = Db.withIndex (StreamDetails.subtitles sd)
-    indexedActors = Db.withIndex (Movie.actors m)
-
-    del pc =
-      _ = bindAndExecuteCommand pc (Db.pt k)
-      ()
-
-    repList delPc insPc vals =
-      _ = del delPc
-      Db.foreach_ (v -> bindAndExecuteCommand insPc (Db.pt k ++ Db.pt v)) vals
-
-    _ = printLine (Text.join "" ["upserting: ", k])
-    _ = bindAndExecuteCommand pcIns (Db.pt k)
-    _ = bindAndExecuteCommand pcUpd
-          (Db.pt k
-          ++ Db.pot (MovieId.imdb mid)
-          ++ Db.pot (MovieId.tmdb mid)
-          ++ Db.pt (Title.display t)
-          ++ Db.pt (Title.original t)
-          ++ Db.pt (Title.sort t)
-          ++ Db.pot (Movie.collection m)
-          ++ Db.poi (Optional.map Nat.toInt (Scoring.year s))
-          ++ Db.pf (Scoring.rating s)
-          ++ Db.pi (Nat.toInt (Scoring.votes s))
-          ++ Db.pt (Scoring.mpaa s)
-          ++ Db.poi (Optional.map Nat.toInt (Movie.runtime m))
-          ++ Db.pt (Movie.plot m)
-          ++ Db.pt (Movie.tagline m)
-          ++ Db.pot (Movie.folderPath m)
-          ++ Db.pot (Movie.nfoPath m)
-          ++ Db.pot (Movie.videoFilePath m)
-          ++ Db.pobi (Optional.map Nat.toInt (Movie.fileSizeBytes m))
-          ++ Db.pot (Movie.checksum m)
-          ++ Db.pot (FolderMeta.rawSize fm)
-          ++ Db.pot (FolderMeta.resolution fm)
-          ++ Db.pot (FolderMeta.videoCodec fm)
-          ++ Db.poi (Optional.map Nat.toInt (FolderMeta.bitDepth fm))
-          ++ Db.poi (Optional.map Nat.toInt (FolderMeta.runtimeMin fm)))
-    _ = del pcDVid
-    _ = bindAndExecuteCommand pcVid
-          (Db.pt k ++ Db.pt (Video.codec vid) ++ Db.pf (Video.aspect vid)
-          ++ Db.pi (Nat.toInt (Video.width vid))
-          ++ Db.pi (Nat.toInt (Video.height vid)))
-    _ = del pcDAud
-    _ = Db.foreach_
-          (cases (i, a) ->
-            bindAndExecuteCommand pcAud
-              (Db.pt k ++ Db.pi (Nat.toInt i) ++ Db.pt (Audio.codec a)
-              ++ Db.pt (Audio.language a)
-              ++ Db.pi (Nat.toInt (Audio.channels a))))
-          indexedAudios
-    _ = del pcDSub
-    _ = Db.foreach_
-          (cases (i, sub) ->
-            bindAndExecuteCommand pcSub
-              (Db.pt k ++ Db.pi (Nat.toInt i)
-              ++ Db.pt (Subtitle.language sub)))
-          indexedSubs
-    _ = del pcDAct
-    _ = Db.foreach_
-          (cases (i, a) ->
-            bindAndExecuteCommand pcAct
-              (Db.pt k ++ Db.pi (Nat.toInt i) ++ Db.pt (Actor.name a)
-              ++ Db.pt (Actor.role a)))
-          indexedActors
-    _ = repList pcDGen pcGen (Taxonomy.genres tax)
-    _ = repList pcDTag pcTag (Taxonomy.tags tax)
-    _ = repList pcDCou pcCou (Taxonomy.countries tax)
-    _ = repList pcDStu pcStu (Taxonomy.studios tax)
-    _ = repList pcDDir pcDir (Taxonomy.directors tax)
-    _ = repList pcDCre pcCre (Taxonomy.credits tax)
-    ()
-
--- Process one subfolder; calls upsertWith with the shared commands.
-uniDork.streamEntryWith
-  pcIns pcUpd pcVid pcDVid pcAud pcDAud pcSub pcDSub
-  pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-  pcStu pcDStu pcDir pcDDir pcCre pcDCre rootDir name =
-  fullPath = pathJoin rootDir name
-  if isDirectory fullPath then
-    match Nfo.processFolder fullPath with
-      Left _ ->
-        _ = printLine (Text.join "" ["  no nfo: ", filePathText fullPath])
-        ()
-      Right m ->
-        Db.upsertWith
-          pcIns pcUpd pcVid pcDVid pcAud pcDAud pcSub pcDSub
-          pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-          pcStu pcDStu pcDir pcDDir pcCre pcDCre m
-  else ()
-
-uniDork.streamRootWith
-  pcIns pcUpd pcVid pcDVid pcAud pcDAud pcSub pcDSub
-  pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-  pcStu pcDStu pcDir pcDDir pcCre pcDCre rootDir =
-  basenames = directoryContents.texts rootDir
-  _ = printLine
-        (Text.join ""
-          ["scanning: ", filePathText rootDir,
-           " (", Nat.toText (List.size basenames), " entries)"])
-  Db.foreach_
-    (uniDork.streamEntryWith
-      pcIns pcUpd pcVid pcDVid pcAud pcDAud pcSub pcDSub
-      pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-      pcStu pcDStu pcDir pcDDir pcCre pcDCre rootDir)
-    basenames
-
--- Strict left fold style: presumed TCO'd by Unison stdlib.
--- Replaces the custom recursive Db.foreach_.
 Db.foreach_ : (a ->{g} b) -> [a] ->{g} ()
 Db.foreach_ f xs =
   step acc x =
@@ -1549,64 +1032,283 @@ Db.foreach_ f xs =
   _ = List.foldLeft step () xs
   ()
 
-uniDork.streamMain : Text ->{IO, Exception} ()
-uniDork.streamMain configPath =
-  configText = readFileUtf8 (FilePath configPath)
-  dirs       = List.filterMap parseConfigLine (Text.lines configText)
-  _ = !Db.createSchema
-  _ = printLine "starting streaming DB import"
+Db.countMovies : '{IO, Exception} ()
+Db.countMovies = do
   singleIO Db.config do
-    pcIns  = prepareCommand Db.insertMovieSql
-    pcUpd  = prepareCommand Db.updateMovieSql
-    pcVid  = prepareCommand Db.insertVideoSql
+    q = sql "SELECT COUNT(*) FROM movies" |> typedQuery bigint
+    counts = Query.execute q
+    match counts with
+      n +: _ -> printLine (Text.join "" ["movies in db: ", Int.toText n])
+      []     -> printLine "no result"
+
+
+-- ====================================================================
+-- Per-movie upsert. Wraps one movie's worth of work in a single
+-- PostgreSQL transaction using shared prepared commands from the
+-- enclosing singleIO batch.
+-- ====================================================================
+
+Db.upsertWith
+  pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
+  pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
+  pcStu pcDStu pcDir pcDDir pcCre pcDCre m =
+  transaction do
+    use Db foreach_
+    use List ++
+    use Nat toInt
+    use Optional map
+    k = MovieId.kodi (Movie.id m)
+    mid = Movie.id m
+    t = Movie.title m
+    s = Movie.scoring m
+    sd = FileInfo.streams (Movie.fileInfo m)
+    vid = StreamDetails.video sd
+    tax = Movie.taxonomy m
+    fm = Movie.folderMeta m
+    indexedAudios = Db.withIndex (StreamDetails.audios sd)
+    indexedSubs = Db.withIndex (StreamDetails.subtitles sd)
+    indexedActors = Db.withIndex (Movie.actors m)
+    del pc =
+      _ = bindAndExecuteCommand pc (Db.pt k)
+      ()
+    repList delPc insPc vals =
+      _ = del delPc
+      foreach_ (v -> bindAndExecuteCommand insPc (Db.pt k ++ Db.pt v)) vals
+    _ = printLine (Text.join "" ["upserting: ", k])
+    _ =
+      bindAndExecuteCommand
+        pcUpsert
+        (Db.pt k
+          ++ Db.pot (MovieId.imdb mid)
+          ++ Db.pot (MovieId.tmdb mid)
+          ++ Db.pt (Title.display t)
+          ++ Db.pt (Title.original t)
+          ++ Db.pt (Title.sort t)
+          ++ Db.pot (Movie.collection m)
+          ++ Db.poi (map toInt (Scoring.year s))
+          ++ Db.pf (Scoring.rating s)
+          ++ Db.pi (toInt (Scoring.votes s))
+          ++ Db.pt (Scoring.mpaa s)
+          ++ Db.poi (map toInt (Movie.runtime m))
+          ++ Db.pt (Movie.plot m)
+          ++ Db.pt (Movie.tagline m)
+          ++ Db.pot (Movie.folderPath m)
+          ++ Db.pot (Movie.nfoPath m)
+          ++ Db.pot (Movie.videoFilePath m)
+          ++ Db.pobi (map toInt (Movie.fileSizeBytes m))
+          ++ Db.pot (Movie.checksum m)
+          ++ Db.pot (FolderMeta.rawSize fm)
+          ++ Db.pot (FolderMeta.resolution fm)
+          ++ Db.pot (FolderMeta.videoCodec fm)
+          ++ Db.poi (map toInt (FolderMeta.bitDepth fm))
+          ++ Db.poi (map toInt (FolderMeta.runtimeMin fm)))
+    _ = del pcDVid
+    _ =
+      bindAndExecuteCommand
+        pcVid
+        (Db.pt k
+          ++ Db.pt (Video.codec vid)
+          ++ Db.pf (Video.aspect vid)
+          ++ Db.pi (toInt (Video.width vid))
+          ++ Db.pi (toInt (Video.height vid)))
+    _ = del pcDAud
+    _ =
+      foreach_
+        (cases
+          (i, a) ->
+            bindAndExecuteCommand
+              pcAud
+              (Db.pt k
+                ++ Db.pi (toInt i)
+                ++ Db.pt (Audio.codec a)
+                ++ Db.pt (Audio.language a)
+                ++ Db.pi (toInt (Audio.channels a))))
+        indexedAudios
+    _ = del pcDSub
+    _ =
+      foreach_
+        (cases
+          (i, sub) ->
+            bindAndExecuteCommand
+              pcSub
+              (Db.pt k ++ Db.pi (toInt i) ++ Db.pt (Subtitle.language sub)))
+        indexedSubs
+    _ = del pcDAct
+    _ =
+      foreach_
+        (cases
+          (i, a) ->
+            bindAndExecuteCommand
+              pcAct
+              (Db.pt k
+                ++ Db.pi (toInt i)
+                ++ Db.pt (Actor.name a)
+                ++ Db.pt (Actor.role a)))
+        indexedActors
+    _ = repList pcDGen pcGen (Taxonomy.genres tax)
+    _ = repList pcDTag pcTag (Taxonomy.tags tax)
+    _ = repList pcDCou pcCou (Taxonomy.countries tax)
+    _ = repList pcDStu pcStu (Taxonomy.studios tax)
+    _ = repList pcDDir pcDir (Taxonomy.directors tax)
+    _ = repList pcDCre pcCre (Taxonomy.credits tax)
+    ()
+
+
+-- ====================================================================
+-- Batched import pipeline. Top-level entry point: uniDork.batchedRun
+-- ====================================================================
+
+uniDork.batchSize : Nat
+uniDork.batchSize = 50
+
+List.chunk : Nat -> [a] -> [[a]]
+List.chunk n xs =
+  use List +: size
+  use Nat <=
+  if Universal.eq (size xs) 0 then []
+  else
+    if size xs <= n then [xs]
+    else List.take n xs +: List.chunk n (List.drop n xs)
+
+uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
+uniDork.collectFolders roots =
+  addIfDir : FilePath -> [FilePath] -> Text ->{IO, Exception} [FilePath]
+  addIfDir root acc name =
+    use List +:
+    fp = pathJoin root name
+    if isDirectory fp then fp +: acc else acc
+  perRoot root =
+    basenames = directoryContents.texts root
+    _ =
+      printLine
+        (Text.join
+          ""
+          [ "scanning: "
+          , filePathText root
+          , " ("
+          , Nat.toText (List.size basenames)
+          , " entries)"
+          ])
+    List.reverse (List.foldLeft (addIfDir root) [] basenames)
+  List.flatMap perRoot roots
+
+uniDork.processOne
+  pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
+  pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
+  pcStu pcDStu pcDir pcDDir pcCre pcDCre folder =
+  match Nfo.processFolder folder with
+    Left _ ->
+      _ = printLine (Text.join "" ["  no nfo: ", filePathText folder])
+      ()
+    Right m ->
+      Db.upsertWith
+        pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
+        pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
+        pcStu pcDStu pcDir pcDDir pcCre pcDCre m
+
+uniDork.processBatch : [FilePath] ->{IO, Exception} ()
+uniDork.processBatch folders =
+  singleIO Db.config do
+    use PreparedCommand close
+    pcUpsert = prepareCommand Db.upsertMovieSql
+    pcVid = prepareCommand Db.insertVideoSql
     pcDVid = prepareCommand (Db.deleteChildSql "movie_video_streams")
-    pcAud  = prepareCommand Db.insertAudioSql
+    pcAud = prepareCommand Db.insertAudioSql
     pcDAud = prepareCommand (Db.deleteChildSql "movie_audio_tracks")
-    pcSub  = prepareCommand Db.insertSubSql
+    pcSub = prepareCommand Db.insertSubSql
     pcDSub = prepareCommand (Db.deleteChildSql "movie_subtitles")
-    pcAct  = prepareCommand Db.insertActorSql
+    pcAct = prepareCommand Db.insertActorSql
     pcDAct = prepareCommand (Db.deleteChildSql "movie_actors")
-    pcGen  = prepareCommand Db.insertGenreSql
+    pcGen = prepareCommand Db.insertGenreSql
     pcDGen = prepareCommand (Db.deleteChildSql "movie_genres")
-    pcTag  = prepareCommand Db.insertTagSql
+    pcTag = prepareCommand Db.insertTagSql
     pcDTag = prepareCommand (Db.deleteChildSql "movie_tags")
-    pcCou  = prepareCommand Db.insertCountrySql
+    pcCou = prepareCommand Db.insertCountrySql
     pcDCou = prepareCommand (Db.deleteChildSql "movie_countries")
-    pcStu  = prepareCommand Db.insertStudioSql
+    pcStu = prepareCommand Db.insertStudioSql
     pcDStu = prepareCommand (Db.deleteChildSql "movie_studios")
-    pcDir  = prepareCommand Db.insertDirectorSql
+    pcDir = prepareCommand Db.insertDirectorSql
     pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
-    pcCre  = prepareCommand Db.insertCreditSql
+    pcCre = prepareCommand Db.insertCreditSql
     pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
-    _ = Db.foreach_
-          (uniDork.streamRootWith
-            pcIns pcUpd pcVid pcDVid pcAud pcDAud pcSub pcDSub
-            pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-            pcStu pcDStu pcDir pcDDir pcCre pcDCre)
-          dirs
-    _ = PreparedCommand.close pcIns
-    _ = PreparedCommand.close pcUpd
-    _ = PreparedCommand.close pcVid
-    _ = PreparedCommand.close pcDVid
-    _ = PreparedCommand.close pcAud
-    _ = PreparedCommand.close pcDAud
-    _ = PreparedCommand.close pcSub
-    _ = PreparedCommand.close pcDSub
-    _ = PreparedCommand.close pcAct
-    _ = PreparedCommand.close pcDAct
-    _ = PreparedCommand.close pcGen
-    _ = PreparedCommand.close pcDGen
-    _ = PreparedCommand.close pcTag
-    _ = PreparedCommand.close pcDTag
-    _ = PreparedCommand.close pcCou
-    _ = PreparedCommand.close pcDCou
-    _ = PreparedCommand.close pcStu
-    _ = PreparedCommand.close pcDStu
-    _ = PreparedCommand.close pcDir
-    _ = PreparedCommand.close pcDDir
-    _ = PreparedCommand.close pcCre
-    PreparedCommand.close pcDCre
+    _ =
+      Db.foreach_
+        (uniDork.processOne
+          pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
+          pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
+          pcStu pcDStu pcDir pcDDir pcCre pcDCre)
+        folders
+    _ = close pcUpsert
+    _ = close pcVid
+    _ = close pcDVid
+    _ = close pcAud
+    _ = close pcDAud
+    _ = close pcSub
+    _ = close pcDSub
+    _ = close pcAct
+    _ = close pcDAct
+    _ = close pcGen
+    _ = close pcDGen
+    _ = close pcTag
+    _ = close pcDTag
+    _ = close pcCou
+    _ = close pcDCou
+    _ = close pcStu
+    _ = close pcDStu
+    _ = close pcDir
+    _ = close pcDDir
+    _ = close pcCre
+    close pcDCre
+
+uniDork.runBatchSafe : Nat -> Nat -> [FilePath] ->{IO, Exception} ()
+uniDork.runBatchSafe i n batch =
+  use Nat toText
+  use Text join
+  _ =
+    printLine
+      (join
+        ""
+        [ "batch "
+        , toText i
+        , "/"
+        , toText n
+        , " ("
+        , toText (List.size batch)
+        , " folders)"
+        ])
+  match catch do uniDork.processBatch batch with
+    Right _ -> ()
+    Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
+
+uniDork.batchedMain : Text ->{IO, Exception} ()
+uniDork.batchedMain configPath =
+  use List size
+  use Nat toText
+  use Text join
+  configText = readFileUtf8 (FilePath configPath)
+  dirs = List.filterMap parseConfigLine (lines configText)
+  _ = Db.createSchema()
+  _ = printLine "collecting folders..."
+  folders = uniDork.collectFolders dirs
+  total = size folders
+  _ = printLine (join "" ["found ", toText total, " folders to process"])
+  batches = List.chunk uniDork.batchSize folders
+  nBatches = size batches
+  _ =
+    printLine
+      (join
+        ""
+        [ "processing in "
+        , toText nBatches
+        , " batches of (up to) "
+        , toText uniDork.batchSize
+        ])
+  step i batch =
+    use Nat +
+    _ = uniDork.runBatchSafe i nBatches batch
+    i + 1
+  _ = List.foldLeft step 1 batches
   printLine "done"
 
-uniDork.streamRun : '{IO, Exception} ()
-uniDork.streamRun = do uniDork.streamMain "/tmp/uniDork.conf"
+uniDork.batchedRun : '{IO, Exception} ()
+uniDork.batchedRun = do uniDork.batchedMain "./uniDork.conf"
