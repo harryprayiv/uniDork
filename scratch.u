@@ -787,6 +787,7 @@ Db.moviesDdl =
     , "  parsed_codec       TEXT,"
     , "  parsed_bit_depth   INTEGER,"
     , "  parsed_runtime_min INTEGER,"
+    , "  actual_runtime_sec INTEGER,"
     , "  imported_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
     , "  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()"
     , ")"
@@ -936,7 +937,7 @@ Db.insertCreditSql = Db.insertPairSql "movie_credits" "credit"
 Db.upsertMovieSql =
   use Codec optional text
   sql
-    "INSERT INTO movies (kodi_id, imdb_id, tmdb_id, tvdb_id, title, original_title, sort_title, collection, year, rating, votes, mpaa, runtime, plot, tagline, folder_path, nfo_path, video_file_path, file_size_bytes, folder_checksum, parsed_size_str, parsed_resolution, parsed_codec, parsed_bit_depth, parsed_runtime_min) VALUES ("
+    "INSERT INTO movies (kodi_id, imdb_id, tmdb_id, tvdb_id, title, original_title, sort_title, collection, year, rating, votes, mpaa, runtime, plot, tagline, folder_path, nfo_path, video_file_path, file_size_bytes, folder_checksum, parsed_size_str, parsed_resolution, parsed_codec, parsed_bit_depth, parsed_runtime_min, actual_runtime_sec) VALUES ("
     %% var text
     %% sql ", "
     %% var (optional text)
@@ -986,8 +987,9 @@ Db.upsertMovieSql =
     %% var (optional integer)
     %% sql ", "
     %% var (optional integer)
-    %% sql ") ON CONFLICT (folder_checksum) DO UPDATE SET kodi_id = EXCLUDED.kodi_id, imdb_id = EXCLUDED.imdb_id, tmdb_id = EXCLUDED.tmdb_id, tvdb_id = EXCLUDED.tvdb_id, title = EXCLUDED.title, original_title = EXCLUDED.original_title, sort_title = EXCLUDED.sort_title, collection = EXCLUDED.collection, year = EXCLUDED.year, rating = EXCLUDED.rating, votes = EXCLUDED.votes, mpaa = EXCLUDED.mpaa, runtime = EXCLUDED.runtime, plot = EXCLUDED.plot, tagline = EXCLUDED.tagline, folder_path = EXCLUDED.folder_path, nfo_path = EXCLUDED.nfo_path, video_file_path = EXCLUDED.video_file_path, file_size_bytes = EXCLUDED.file_size_bytes, parsed_size_str = EXCLUDED.parsed_size_str, parsed_resolution = EXCLUDED.parsed_resolution, parsed_codec = EXCLUDED.parsed_codec, parsed_bit_depth = EXCLUDED.parsed_bit_depth, parsed_runtime_min = EXCLUDED.parsed_runtime_min, updated_at = NOW()" |> buildCommand
-
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ") ON CONFLICT (folder_checksum) DO UPDATE SET kodi_id = EXCLUDED.kodi_id, imdb_id = EXCLUDED.imdb_id, tmdb_id = EXCLUDED.tmdb_id, tvdb_id = EXCLUDED.tvdb_id, title = EXCLUDED.title, original_title = EXCLUDED.original_title, sort_title = EXCLUDED.sort_title, collection = EXCLUDED.collection, year = EXCLUDED.year, rating = EXCLUDED.rating, votes = EXCLUDED.votes, mpaa = EXCLUDED.mpaa, runtime = EXCLUDED.runtime, plot = EXCLUDED.plot, tagline = EXCLUDED.tagline, folder_path = EXCLUDED.folder_path, nfo_path = EXCLUDED.nfo_path, video_file_path = EXCLUDED.video_file_path, file_size_bytes = EXCLUDED.file_size_bytes, parsed_size_str = EXCLUDED.parsed_size_str, parsed_resolution = EXCLUDED.parsed_resolution, parsed_codec = EXCLUDED.parsed_codec, parsed_bit_depth = EXCLUDED.parsed_bit_depth, parsed_runtime_min = EXCLUDED.parsed_runtime_min, actual_runtime_sec = COALESCE(EXCLUDED.actual_runtime_sec, movies.actual_runtime_sec), updated_at = NOW()" |> buildCommand
 
 -- ====================================================================
 -- PostgreSQL: helpers and utilities
@@ -1049,7 +1051,7 @@ Db.countMovies = do
 Db.upsertWith
   pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
   pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-  pcStu pcDStu pcDir pcDDir pcCre pcDCre m =
+  pcStu pcDStu pcDir pcDDir pcCre pcDCre actualRuntimeSec m =
   transaction do
     use Db foreach_
     use List ++
@@ -1101,7 +1103,8 @@ Db.upsertWith
           ++ Db.pot (FolderMeta.resolution fm)
           ++ Db.pot (FolderMeta.videoCodec fm)
           ++ Db.poi (map toInt (FolderMeta.bitDepth fm))
-          ++ Db.poi (map toInt (FolderMeta.runtimeMin fm)))
+          ++ Db.poi (map toInt (FolderMeta.runtimeMin fm))
+          ++ Db.poi (map toInt actualRuntimeSec))
     _ = del pcDVid
     _ =
       bindAndExecuteCommand
@@ -1201,10 +1204,16 @@ uniDork.processOne
       _ = printLine (Text.join "" ["  no nfo: ", filePathText folder])
       ()
     Right m ->
+      actualRuntime = match Movie.videoFilePath m with
+        None         -> None
+        Some vidPath ->
+          match Probe.readSidecar vidPath with
+            None   -> None
+            Some r -> Some (Probe.runtimeSec r)
       Db.upsertWith
         pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
         pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-        pcStu pcDStu pcDir pcDDir pcCre pcDCre m
+        pcStu pcDStu pcDir pcDDir pcCre pcDCre actualRuntime m
 
 uniDork.processBatch : [FilePath] ->{IO, Exception} ()
 uniDork.processBatch folders =
@@ -1312,3 +1321,83 @@ uniDork.batchedMain configPath =
 
 uniDork.batchedRun : '{IO, Exception} ()
 uniDork.batchedRun = do uniDork.batchedMain "./uniDork.conf"
+
+-- ====================================================================
+-- ffprobe sidecar JSON: parse <video>.ffprobe.json files produced by
+-- the probe-library.fish pre-pass. Phase 1 reads only format.duration.
+-- ====================================================================
+
+type Probe.Format =
+  { duration : Float,
+    sizeBytes : Optional Nat,
+    bitRate : Optional Nat }
+
+type Probe.Result = { format : Probe.Format }
+
+Probe.parseFloat : Text -> Float
+Probe.parseFloat t = Optional.getOrElse 0.0 (Float.fromText (Text.trim t))
+
+-- ffprobe encodes numeric fields like "size" and "bit_rate" as strings.
+-- This helper reads an optional string field and parses it to a Nat.
+Probe.optNatStringAt : Text ->{unison_json_1_4_2.Decoder} Optional Nat
+Probe.optNatStringAt key =
+  match Decoder.optional! (object.at key Decoder.text) with
+    None   -> None
+    Some s -> Nat.fromText (Text.trim s)
+
+Probe.Format.fromJson : '{unison_json_1_4_2.Decoder} Probe.Format
+Probe.Format.fromJson = do
+  durStr = object.at! "duration" Decoder.text
+  duration = Probe.parseFloat durStr
+  sizeBytes = Probe.optNatStringAt "size"
+  bitRate = Probe.optNatStringAt "bit_rate"
+  Probe.Format.Format duration sizeBytes bitRate
+
+Probe.Result.fromJson : '{unison_json_1_4_2.Decoder} Probe.Result
+Probe.Result.fromJson = do
+  format = object.at! "format" Probe.Format.fromJson
+  Probe.Result.Result format
+
+-- Must agree with UNIDORK_FFPROBE_CACHE in the dev shell. The cache mirrors
+-- the source-path layout: a video at /a/b.mkv has its JSON at
+-- <cacheRoot>/a/b.mkv.json.
+Probe.cacheRoot : Text
+Probe.cacheRoot = "/home/bismuth/.cache/uniDork/ffprobe"
+
+Probe.readSidecar : Text ->{IO, Exception} Optional Probe.Result
+Probe.readSidecar videoPath =
+  use Text ++
+  jsonPath = FilePath (Probe.cacheRoot ++ videoPath ++ ".json")
+  match catch do
+    raw = readFileUtf8 jsonPath
+    Decoder.run Probe.Result.fromJson raw
+  with
+    Left _  -> None
+    Right r -> Some r
+
+-- Float seconds → Nat seconds (round to nearest, clamp negatives to 0).
+Probe.runtimeSec : Probe.Result -> Nat
+Probe.runtimeSec r =
+  d = Probe.Format.duration (Probe.Result.format r)
+  if Float.lt d 0.0 then 0
+  else
+    asText = Float.toText d
+    intPart = match Text.indexOf "." asText with
+      Some i -> Text.take i asText
+      None   -> asText
+    Optional.getOrElse 0 (Nat.fromText intPart)
+
+-- ====================================================================
+-- Schema migration: add the actual_runtime_sec column without dropping
+-- existing data. Safe to run repeatedly.
+-- ====================================================================
+
+Db.migrate : '{IO, Exception} ()
+Db.migrate = do
+  singleIO Db.config do
+    _ = Db.runDDLList [Db.moviesDdl]
+    _ = Db.runDDLList Db.childDdl
+    _ = Db.runDDLList Db.indexDdl
+    Db.runDDLList
+      [ "ALTER TABLE movies ADD COLUMN IF NOT EXISTS actual_runtime_sec INTEGER"
+      ]
