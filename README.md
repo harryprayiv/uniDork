@@ -24,7 +24,6 @@ This is a work in progress. The library import path works. The TMDB identificati
 - Writing NFO files from a HIGH-confidence TMDB match
 - Renaming files into a canonical layout
 - Incremental import (every run currently re-upserts every folder)
-- Long ucm sessions occasionally crash on large imports; running the compiled binary outside ucm is more stable
 
 ## Stack
 
@@ -32,7 +31,7 @@ Unison (`@unison/base`, `@unison/json`, `@unison/xml`, `@unison/http`, `@runaror
 
 ## Usage
 
-```fish
+```bash
 nix develop
 pg-start
 ffprobe-cache
@@ -49,11 +48,11 @@ Caches live under `~/.cache/uniDork/`. PostgreSQL data lives under `~/.local/sha
 
 ## Build
 
-```fish
+```bash
 nix build
 ```
 
-First build fails with a hash mismatch — copy the `got:` hash into `nix/build.nix` and rerun. After that, `./result/bin/unidork-import` runs the compiled pipeline without ucm.
+`./result/bin/unidork-import` runs the compiled pipeline without ucm.
 
 ## License
 

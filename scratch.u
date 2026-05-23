@@ -1187,172 +1187,6 @@ Db.upsertWith
     _ = repList pcDCre pcCre (Taxonomy.credits tax)
     ()
 
-
--- ====================================================================
--- Batched import pipeline. Entry point: uniDork.batchedRun
--- ====================================================================
-
-uniDork.batchSize : Nat
-uniDork.batchSize = 50
-
-List.chunk : Nat -> [a] -> [[a]]
-List.chunk n xs =
-  use List +: size
-  use Nat <=
-  if Universal.eq (size xs) 0 then []
-  else
-    if size xs <= n then [xs]
-    else List.take n xs +: List.chunk n (List.drop n xs)
-
-uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
-uniDork.collectFolders roots =
-  addIfDir : FilePath -> [FilePath] -> Text ->{IO, Exception} [FilePath]
-  addIfDir root acc name =
-    use List +:
-    fp = pathJoin root name
-    if isDirectory fp then fp +: acc else acc
-  perRoot root =
-    basenames = directoryContents.texts root
-    _ =
-      printLine
-        (Text.join
-          ""
-          [ "scanning: "
-          , filePathText root
-          , " ("
-          , Nat.toText (List.size basenames)
-          , " entries)"
-          ])
-    List.reverse (List.foldLeft (addIfDir root) [] basenames)
-  List.flatMap perRoot roots
-
-uniDork.processOne
-  pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
-  pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-  pcStu pcDStu pcDir pcDDir pcCre pcDCre folder =
-  match Nfo.processFolder folder with
-    Left _ ->
-      _ = printLine (Text.join "" ["  no nfo: ", filePathText folder])
-      ()
-    Right m ->
-      actualRuntime = match Movie.videoFilePath m with
-        None         -> None
-        Some vidPath ->
-          match Probe.readSidecar vidPath with
-            None   -> None
-            Some r -> Some (Probe.runtimeSec r)
-      Db.upsertWith
-        pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
-        pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-        pcStu pcDStu pcDir pcDDir pcCre pcDCre actualRuntime m
-
-uniDork.processBatch : [FilePath] ->{IO, Exception} ()
-uniDork.processBatch folders =
-  singleIO Db.config do
-    use PreparedCommand close
-    pcUpsert = prepareCommand Db.upsertMovieSql
-    pcVid = prepareCommand Db.insertVideoSql
-    pcDVid = prepareCommand (Db.deleteChildSql "movie_video_streams")
-    pcAud = prepareCommand Db.insertAudioSql
-    pcDAud = prepareCommand (Db.deleteChildSql "movie_audio_tracks")
-    pcSub = prepareCommand Db.insertSubSql
-    pcDSub = prepareCommand (Db.deleteChildSql "movie_subtitles")
-    pcAct = prepareCommand Db.insertActorSql
-    pcDAct = prepareCommand (Db.deleteChildSql "movie_actors")
-    pcGen = prepareCommand Db.insertGenreSql
-    pcDGen = prepareCommand (Db.deleteChildSql "movie_genres")
-    pcTag = prepareCommand Db.insertTagSql
-    pcDTag = prepareCommand (Db.deleteChildSql "movie_tags")
-    pcCou = prepareCommand Db.insertCountrySql
-    pcDCou = prepareCommand (Db.deleteChildSql "movie_countries")
-    pcStu = prepareCommand Db.insertStudioSql
-    pcDStu = prepareCommand (Db.deleteChildSql "movie_studios")
-    pcDir = prepareCommand Db.insertDirectorSql
-    pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
-    pcCre = prepareCommand Db.insertCreditSql
-    pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
-    _ =
-      Db.foreach_
-        (uniDork.processOne
-          pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
-          pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
-          pcStu pcDStu pcDir pcDDir pcCre pcDCre)
-        folders
-    _ = close pcUpsert
-    _ = close pcVid
-    _ = close pcDVid
-    _ = close pcAud
-    _ = close pcDAud
-    _ = close pcSub
-    _ = close pcDSub
-    _ = close pcAct
-    _ = close pcDAct
-    _ = close pcGen
-    _ = close pcDGen
-    _ = close pcTag
-    _ = close pcDTag
-    _ = close pcCou
-    _ = close pcDCou
-    _ = close pcStu
-    _ = close pcDStu
-    _ = close pcDir
-    _ = close pcDDir
-    _ = close pcCre
-    close pcDCre
-
-uniDork.runBatchSafe : Nat -> Nat -> [FilePath] ->{IO, Exception} ()
-uniDork.runBatchSafe i n batch =
-  use Nat toText
-  use Text join
-  _ =
-    printLine
-      (join
-        ""
-        [ "batch "
-        , toText i
-        , "/"
-        , toText n
-        , " ("
-        , toText (List.size batch)
-        , " folders)"
-        ])
-  match catch do uniDork.processBatch batch with
-    Right _ -> ()
-    Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
-
-uniDork.batchedMain : Text ->{IO, Exception} ()
-uniDork.batchedMain configPath =
-  use List size
-  use Nat toText
-  use Text join
-  configText = readFileUtf8 (FilePath configPath)
-  dirs = List.filterMap parseConfigLine (lines configText)
-  _ = Db.createSchema()
-  _ = printLine "collecting folders..."
-  folders = uniDork.collectFolders dirs
-  total = size folders
-  _ = printLine (join "" ["found ", toText total, " folders to process"])
-  batches = List.chunk uniDork.batchSize folders
-  nBatches = size batches
-  _ =
-    printLine
-      (join
-        ""
-        [ "processing in "
-        , toText nBatches
-        , " batches of (up to) "
-        , toText uniDork.batchSize
-        ])
-  step i batch =
-    use Nat +
-    _ = uniDork.runBatchSafe i nBatches batch
-    i + 1
-  _ = List.foldLeft step 1 batches
-  printLine "done"
-
-uniDork.batchedRun : '{IO, Exception} ()
-uniDork.batchedRun = do uniDork.batchedMain "./uniDork.conf"
-
 -- ====================================================================
 -- ffprobe sidecar JSON: parse <video>.ffprobe.json files produced by
 -- the probe-library.fish pre-pass. Phase 1 reads only format.duration.
@@ -1700,7 +1534,6 @@ Tmdb.readCache folderName =
     Left _  -> None
     Right s -> Some s
 
-
 -- ============================================================
 -- Report (Phase 1 entry point)
 -- ============================================================
@@ -1783,32 +1616,6 @@ Tmdb.reportFolder token folderName =
                 printLine
                   "  verdict: SKIP (no single high-confidence match)"
           printLine ""
-
-uniDork.identify : '{IO, Exception} ()
-uniDork.identify = do
-  use Text join
-  staging = FilePath Tmdb.stagingDir
-  if isDirectory staging then
-    token = Tmdb.readToken()
-    entries = directoryContents.texts staging
-    folderNames =
-      List.filter
-        (n ->
-          if Universal.eq n "." then false
-          else if Universal.eq n ".." then false
-          else isDirectory (pathJoin staging n))
-        entries
-    _ =
-      printLine
-        (join ""
-          [ "scanning "
-          , Nat.toText (List.size folderNames)
-          , " folder(s) under "
-          , Tmdb.stagingDir ])
-    _ = printLine ""
-    Db.foreach_ (Tmdb.reportFolder token) folderNames
-  else
-    printLine (join "" ["staging not found: ", Tmdb.stagingDir])
 
 -- Title cleanup: replace dots/underscores with spaces, collapse, trim.
 -- Used after extracting a title prefix from a folder name.
@@ -1900,3 +1707,194 @@ Tmdb.search token title year =
   with
     Right v -> Right v
     Left f  -> Left (Failure.message f)
+
+uniDork.identify : '{IO, Exception} ()
+uniDork.identify = do
+  use Text join
+  staging = FilePath Tmdb.stagingDir
+  if isDirectory staging then
+    token = Tmdb.readToken()
+    entries = directoryContents.texts staging
+    folderNames =
+      List.filter
+        (n ->
+          if Universal.eq n "." then false
+          else if Universal.eq n ".." then false
+          else isDirectory (pathJoin staging n))
+        entries
+    _ =
+      printLine
+        (join ""
+          [ "scanning "
+          , Nat.toText (List.size folderNames)
+          , " folder(s) under "
+          , Tmdb.stagingDir ])
+    _ = printLine ""
+    Db.foreach_ (Tmdb.reportFolder token) folderNames
+  else
+    printLine (join "" ["staging not found: ", Tmdb.stagingDir])
+
+-- ====================================================================
+-- Batched import pipeline. Entry point: uniDork.batchedRun
+-- ====================================================================
+
+uniDork.batchSize : Nat
+uniDork.batchSize = 50
+
+List.chunk : Nat -> [a] -> [[a]]
+List.chunk n xs =
+  use List +: size
+  use Nat <=
+  if Universal.eq (size xs) 0 then []
+  else
+    if size xs <= n then [xs]
+    else List.take n xs +: List.chunk n (List.drop n xs)
+
+uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
+uniDork.collectFolders roots =
+  addIfDir : FilePath -> [FilePath] -> Text ->{IO, Exception} [FilePath]
+  addIfDir root acc name =
+    use List +:
+    fp = pathJoin root name
+    if isDirectory fp then fp +: acc else acc
+  perRoot root =
+    basenames = directoryContents.texts root
+    _ =
+      printLine
+        (Text.join
+          ""
+          [ "scanning: "
+          , filePathText root
+          , " ("
+          , Nat.toText (List.size basenames)
+          , " entries)"
+          ])
+    List.reverse (List.foldLeft (addIfDir root) [] basenames)
+  List.flatMap perRoot roots
+
+uniDork.processOne
+  pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
+  pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
+  pcStu pcDStu pcDir pcDDir pcCre pcDCre folder =
+  match Nfo.processFolder folder with
+    Left _ ->
+      _ = printLine (Text.join "" ["  no nfo: ", filePathText folder])
+      ()
+    Right m ->
+      actualRuntime = match Movie.videoFilePath m with
+        None         -> None
+        Some vidPath ->
+          match Probe.readSidecar vidPath with
+            None   -> None
+            Some r -> Some (Probe.runtimeSec r)
+      Db.upsertWith
+        pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
+        pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
+        pcStu pcDStu pcDir pcDDir pcCre pcDCre actualRuntime m
+
+uniDork.processBatch : [FilePath] ->{IO, Exception} ()
+uniDork.processBatch folders =
+  singleIO Db.config do
+    use PreparedCommand close
+    pcUpsert = prepareCommand Db.upsertMovieSql
+    pcVid = prepareCommand Db.insertVideoSql
+    pcDVid = prepareCommand (Db.deleteChildSql "movie_video_streams")
+    pcAud = prepareCommand Db.insertAudioSql
+    pcDAud = prepareCommand (Db.deleteChildSql "movie_audio_tracks")
+    pcSub = prepareCommand Db.insertSubSql
+    pcDSub = prepareCommand (Db.deleteChildSql "movie_subtitles")
+    pcAct = prepareCommand Db.insertActorSql
+    pcDAct = prepareCommand (Db.deleteChildSql "movie_actors")
+    pcGen = prepareCommand Db.insertGenreSql
+    pcDGen = prepareCommand (Db.deleteChildSql "movie_genres")
+    pcTag = prepareCommand Db.insertTagSql
+    pcDTag = prepareCommand (Db.deleteChildSql "movie_tags")
+    pcCou = prepareCommand Db.insertCountrySql
+    pcDCou = prepareCommand (Db.deleteChildSql "movie_countries")
+    pcStu = prepareCommand Db.insertStudioSql
+    pcDStu = prepareCommand (Db.deleteChildSql "movie_studios")
+    pcDir = prepareCommand Db.insertDirectorSql
+    pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
+    pcCre = prepareCommand Db.insertCreditSql
+    pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
+    _ =
+      Db.foreach_
+        (uniDork.processOne
+          pcUpsert pcVid pcDVid pcAud pcDAud pcSub pcDSub
+          pcAct pcDAct pcGen pcDGen pcTag pcDTag pcCou pcDCou
+          pcStu pcDStu pcDir pcDDir pcCre pcDCre)
+        folders
+    _ = close pcUpsert
+    _ = close pcVid
+    _ = close pcDVid
+    _ = close pcAud
+    _ = close pcDAud
+    _ = close pcSub
+    _ = close pcDSub
+    _ = close pcAct
+    _ = close pcDAct
+    _ = close pcGen
+    _ = close pcDGen
+    _ = close pcTag
+    _ = close pcDTag
+    _ = close pcCou
+    _ = close pcDCou
+    _ = close pcStu
+    _ = close pcDStu
+    _ = close pcDir
+    _ = close pcDDir
+    _ = close pcCre
+    close pcDCre
+
+uniDork.runBatchSafe : Nat -> Nat -> [FilePath] ->{IO, Exception} ()
+uniDork.runBatchSafe i n batch =
+  use Nat toText
+  use Text join
+  _ =
+    printLine
+      (join
+        ""
+        [ "batch "
+        , toText i
+        , "/"
+        , toText n
+        , " ("
+        , toText (List.size batch)
+        , " folders)"
+        ])
+  match catch do uniDork.processBatch batch with
+    Right _ -> ()
+    Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
+
+uniDork.batchedMain : Text ->{IO, Exception} ()
+uniDork.batchedMain configPath =
+  use List size
+  use Nat toText
+  use Text join
+  configText = readFileUtf8 (FilePath configPath)
+  dirs = List.filterMap parseConfigLine (lines configText)
+  _ = Db.createSchema()
+  _ = printLine "collecting folders..."
+  folders = uniDork.collectFolders dirs
+  total = size folders
+  _ = printLine (join "" ["found ", toText total, " folders to process"])
+  batches = List.chunk uniDork.batchSize folders
+  nBatches = size batches
+  _ =
+    printLine
+      (join
+        ""
+        [ "processing in "
+        , toText nBatches
+        , " batches of (up to) "
+        , toText uniDork.batchSize
+        ])
+  step i batch =
+    use Nat +
+    _ = uniDork.runBatchSafe i nBatches batch
+    i + 1
+  _ = List.foldLeft step 1 batches
+  printLine "done"
+
+uniDork.batchedRun : '{IO, Exception} ()
+uniDork.batchedRun = do uniDork.batchedMain "./uniDork.conf"
