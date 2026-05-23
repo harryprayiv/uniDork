@@ -1894,14 +1894,6 @@ Rename.acTag raw =
   else if Universal.eq upper "MP3" then "MP3"
   else upper
 
-Rename.titleYear : Tmdb.Result -> Text
-Rename.titleYear r =
-  use Text ++
-  yearText = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
-    Some y -> Nat.toText y
-    None   -> "0000"
-  Tmdb.Result.title r ++ " (" ++ yearText ++ ")"
-
 Rename.fileExt : Text -> Text
 Rename.fileExt path =
   lower = Text.toLowercase path
@@ -1913,53 +1905,6 @@ Rename.fileExt path =
   else if endsWith ".flv" lower then ".flv"
   else ""
 
--- {ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}
-Rename.folderName : Tmdb.Result -> Stage.ProbeResult -> Text
-Rename.folderName tr pr =
-  use Text ++
-  vid = Stage.ProbeResult.video pr
-  ny = Rename.titleYear tr
-  parts =
-    Rename.gigabytes (Stage.ProbeResult.sizeBytes pr)
-      ++ "."
-      ++ Rename.vfTag (Stage.VideoInfo.height vid)
-      ++ "."
-      ++ Rename.vcTag (Stage.VideoInfo.codec vid)
-      ++ "."
-      ++ Nat.toText (Stage.VideoInfo.bitDepth vid)
-      ++ "b."
-      ++ Nat.toText (Rename.minutes (Stage.ProbeResult.durationSec pr))
-      ++ "min"
-  ny ++ " [" ++ parts ++ "] ~" ++ Stage.ProbeResult.crc32 pr
-
--- {ny} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}
--- (tags and group dropped pending dedicated parsers.)
-Rename.fileBaseName : Tmdb.Result -> Stage.ProbeResult -> Text
-Rename.fileBaseName tr pr =
-  use Text ++
-  vid = Stage.ProbeResult.video pr
-  ny = Rename.titleYear tr
-  audioPart = match Stage.ProbeResult.audio pr with
-    None -> "noaudio-0"
-    Some a ->
-      Rename.acTag (Stage.AudioInfo.codec a)
-        ++ "-"
-        ++ Rename.channelsTag (Stage.AudioInfo.channels a)
-  bracketed =
-    Rename.vcTag (Stage.VideoInfo.codec vid)
-      ++ "_"
-      ++ Nat.toText (Stage.VideoInfo.bitDepth vid)
-      ++ "b_"
-      ++ Rename.resolutionStr
-          (Stage.VideoInfo.width vid)
-          (Stage.VideoInfo.height vid)
-      ++ "_"
-      ++ Rename.mbps (Stage.VideoInfo.bitRate vid)
-      ++ "_"
-      ++ audioPart
-  ny ++ " [" ++ bracketed ++ "] ~" ++ Stage.ProbeResult.crc32 pr
-
-
 -- ============================================================
 -- NFO builder (Kodi-compatible minimal).
 -- ============================================================
@@ -1970,54 +1915,6 @@ Rename.escapeXml t =
     |> replaceAll "&" "&amp;"
     |> replaceAll "<" "&lt;"
     |> replaceAll ">" "&gt;"
-
-Rename.buildNfo : Tmdb.Result -> Stage.ProbeResult -> Text
-Rename.buildNfo tr pr =
-  use Text ++
-  esc = Rename.escapeXml
-  yearText = match Tmdb.releaseYear (Tmdb.Result.releaseDate tr) with
-    Some y -> Nat.toText y
-    None   -> ""
-  vid = Stage.ProbeResult.video pr
-  audioLines = match Stage.ProbeResult.audio pr with
-    None -> []
-    Some a ->
-      [ "      <audio>"
-      , "        <codec>" ++ esc (Stage.AudioInfo.codec a) ++ "</codec>"
-      , "        <channels>"
-          ++ Nat.toText (Stage.AudioInfo.channels a)
-          ++ "</channels>"
-      , "      </audio>" ]
-  baseLines =
-    [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-    , "<movie>"
-    , "  <title>" ++ esc (Tmdb.Result.title tr) ++ "</title>"
-    , "  <originaltitle>"
-        ++ esc (Tmdb.Result.originalTitle tr)
-        ++ "</originaltitle>"
-    , "  <year>" ++ yearText ++ "</year>"
-    , "  <plot>" ++ esc (Tmdb.Result.overview tr) ++ "</plot>"
-    , "  <uniqueid type=\"tmdb\" default=\"true\">"
-        ++ Nat.toText (Tmdb.Result.tmdbId tr)
-        ++ "</uniqueid>"
-    , "  <fileinfo>"
-    , "    <streamdetails>"
-    , "      <video>"
-    , "        <codec>" ++ esc (Stage.VideoInfo.codec vid) ++ "</codec>"
-    , "        <width>"
-        ++ Nat.toText (Stage.VideoInfo.width vid)
-        ++ "</width>"
-    , "        <height>"
-        ++ Nat.toText (Stage.VideoInfo.height vid)
-        ++ "</height>"
-    , "      </video>" ]
-  tailLines =
-    [ "    </streamdetails>"
-    , "  </fileinfo>"
-    , "</movie>"
-    , "" ]
-  Text.join "\n" (baseLines List.++ audioLines List.++ tailLines)
-
 
 -- ============================================================
 -- Outcome type + per-folder log file.
@@ -2076,71 +1973,6 @@ Rename.writeOutcome folderName o =
 -- the absence of a video on a future run is the "already done" signal.
 -- ============================================================
 
-Rename.executeMove
-  : FilePath
-  -> Tmdb.Result
-  -> Stage.ProbeResult
-  ->{IO, Exception} Rename.Outcome
-Rename.executeMove sourceFolder tr pr =
-  use Text ++
-  sourceText = filePathText sourceFolder
-  sourceVideo = FilePath (Stage.ProbeResult.videoPath pr)
-  videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
-  base = Rename.fileBaseName tr pr
-  targetFolderText = Rename.targetRoot ++ "/" ++ Rename.folderName tr pr
-  targetFolder = FilePath targetFolderText
-  targetVideo = pathJoin targetFolder (base ++ videoExt)
-  targetNfo = pathJoin targetFolder (base ++ ".nfo")
-  if isDirectory targetFolder then
-    Rename.Outcome.Conflict sourceText targetFolderText
-  else
-    match catch do
-      _ = createDirectory targetFolder
-      _ = writeFileUtf8 targetNfo (Rename.buildNfo tr pr)
-      renameFile sourceVideo targetVideo
-    with
-      Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
-      Left f  ->
-        Rename.Outcome.RenameError sourceText (Failure.message f)
-
-Rename.processFolder
-  : Text -> FilePath ->{IO, Exception} Rename.Outcome
-Rename.processFolder token folder =
-  folderName = filePathBasename folder
-  folderText = filePathText folder
-  files = directoryContents.texts folder
-  match findFirstVideo files with
-    None -> Rename.Outcome.NoVideo folderText
-    Some _ ->
-      match Tmdb.parseReleaseName folderName with
-        None ->
-          Rename.Outcome.NoMatch
-            folderText "parse failed (no year + quality token)"
-        Some p ->
-          searchResult =
-            Tmdb.cachedSearch
-              token
-              folderName
-              (Tmdb.ParsedRelease.title p)
-              (Tmdb.ParsedRelease.year p)
-          match searchResult with
-            Left err ->
-              Rename.Outcome.NoMatch
-                folderText (Text.join "" ["search: ", err])
-            Right resp ->
-              candidates = Tmdb.SearchResponse.results resp
-              scored =
-                List.map
-                  (r -> (r, Tmdb.scoreCandidate p r)) candidates
-              match Tmdb.pickBest scored with
-                None ->
-                  Rename.Outcome.NoMatch
-                    folderText "no single high-confidence match"
-                Some (r, _) ->
-                  match Stage.readSidecar folderName with
-                    None    -> Rename.Outcome.NoProbe folderText
-                    Some pr -> Rename.executeMove folder r pr
-
 Rename.runOne : Text -> FilePath ->{IO, Exception} ()
 Rename.runOne token folder =
   use Text ++
@@ -2161,30 +1993,6 @@ Rename.runOne token folder =
     Rename.Outcome.RenameError _ msg ->
       printLine ("  ERROR: " ++ msg)
   Rename.writeOutcome folderName outcome
-
--- uniDork.rename : '{IO, Exception} ()
--- uniDork.rename = do
---   use Text ++
---   staging = FilePath Tmdb.stagingDir
---   if isDirectory staging then
---     token = Tmdb.readToken()
---     entries = directoryContents.texts staging
---     folderNames =
---       List.filter
---         (n ->
---           if Universal.eq n "." then false
---           else if Universal.eq n ".." then false
---           else isDirectory (pathJoin staging n))
---         entries
---     folders = List.map (n -> pathJoin staging n) folderNames
---     _ =
---       printLine
---         ("scanning " ++ Nat.toText (List.size folders)
---           ++ " folder(s) under " ++ Tmdb.stagingDir)
---     _ = printLine ""
---     Db.foreach_ (Rename.runOne token) folders
---   else
---     printLine ("staging not found: " ++ Tmdb.stagingDir)
 
 
 -- ============================================================
@@ -2248,40 +2056,40 @@ Rename.looseVideos dir =
     if isDirectory fp then acc else List.snoc acc fp
   List.foldLeft step [] videoNames
 
-Rename.processLooseVideo
-  : Text -> FilePath ->{IO, Exception} Rename.Outcome
-Rename.processLooseVideo token videoFile =
-  filename = filePathBasename videoFile
-  name = Rename.basenameNoExt filename
-  sourceText = filePathText videoFile
-  match Tmdb.parseReleaseName name with
-    None ->
-      Rename.Outcome.NoMatch
-        sourceText "parse failed (no year + quality token)"
-    Some p ->
-      searchResult =
-        Tmdb.cachedSearch
-          token
-          name
-          (Tmdb.ParsedRelease.title p)
-          (Tmdb.ParsedRelease.year p)
-      match searchResult with
-        Left err ->
-          Rename.Outcome.NoMatch
-            sourceText (Text.join "" ["search: ", err])
-        Right resp ->
-          candidates = Tmdb.SearchResponse.results resp
-          scored =
-            List.map
-              (r -> (r, Tmdb.scoreCandidate p r)) candidates
-          match Tmdb.pickBest scored with
-            None ->
-              Rename.Outcome.NoMatch
-                sourceText "no single high-confidence match"
-            Some (r, _) ->
-              match Stage.readSidecar name with
-                None    -> Rename.Outcome.NoProbe sourceText
-                Some pr -> Rename.executeMove videoFile r pr
+-- Rename.processLooseVideo
+--   : Text -> FilePath ->{IO, Exception} Rename.Outcome
+-- Rename.processLooseVideo token videoFile =
+--   filename = filePathBasename videoFile
+--   name = Rename.basenameNoExt filename
+--   sourceText = filePathText videoFile
+--   match Tmdb.parseReleaseName name with
+--     None ->
+--       Rename.Outcome.NoMatch
+--         sourceText "parse failed (no year + quality token)"
+--     Some p ->
+--       searchResult =
+--         Tmdb.cachedSearch
+--           token
+--           name
+--           (Tmdb.ParsedRelease.title p)
+--           (Tmdb.ParsedRelease.year p)
+--       match searchResult with
+--         Left err ->
+--           Rename.Outcome.NoMatch
+--             sourceText (Text.join "" ["search: ", err])
+--         Right resp ->
+--           candidates = Tmdb.SearchResponse.results resp
+--           scored =
+--             List.map
+--               (r -> (r, Tmdb.scoreCandidate p r)) candidates
+--           match Tmdb.pickBest scored with
+--             None ->
+--               Rename.Outcome.NoMatch
+--                 sourceText "no single high-confidence match"
+--             Some (r, _) ->
+--               match Stage.readSidecar name with
+--                 None    -> Rename.Outcome.NoProbe sourceText
+--                 Some pr -> Rename.executeMove videoFile r pr
 
 Rename.runOneLoose : Text -> FilePath ->{IO, Exception} ()
 Rename.runOneLoose token videoFile =
@@ -2527,3 +2335,242 @@ uniDork.batchedMain configPath =
 
 uniDork.batchedRun : '{IO, Exception} ()
 uniDork.batchedRun = do uniDork.batchedMain "./uniDork.conf"
+
+
+
+-- ====================================================================
+-- NFO-aware rename: prefer existing NFO metadata over folder-name
+-- regex parsing for identification.
+-- ====================================================================
+
+-- Read the first .nfo file inside a folder and parse it.
+Nfo.tryReadFolder : FilePath ->{IO, Exception} Optional Movie
+Nfo.tryReadFolder folder =
+  files = directoryContents.texts folder
+  match findFirstNfo files with
+    None -> None
+    Some nfoName ->
+      nfoPath = pathJoin folder nfoName
+      match catch do readFileUtf8 nfoPath with
+        Left _ -> None
+        Right xml ->
+          match Nfo.parse xml with
+            Left _  -> None
+            Right m -> Some m
+
+Nfo.extractTmdbId : Movie -> Optional Nat
+Nfo.extractTmdbId m =
+  match MovieId.tmdb (Movie.id m) with
+    None   -> None
+    Some s -> Nat.fromText (Text.trim s)
+
+Nfo.extractImdbId : Movie -> Optional Text
+Nfo.extractImdbId m = MovieId.imdb (Movie.id m)
+
+Nfo.extractTitle : Movie -> Optional Text
+Nfo.extractTitle m =
+  t = Title.display (Movie.title m)
+  if Universal.eq (Text.size t) 0 then None
+  else Some t
+
+Nfo.extractYear : Movie -> Optional Nat
+Nfo.extractYear m = Scoring.year (Movie.scoring m)
+
+-- Decide (title, year) for TMDB search: NFO wins if complete,
+-- else regex parse of the folder name, else nothing.
+Rename.deriveTitleYear
+  : Optional Movie -> Text -> Optional (Text, Nat)
+Rename.deriveTitleYear maybeNfo folderName =
+  fromNfo = match maybeNfo with
+    None -> None
+    Some m ->
+      match (Nfo.extractTitle m, Nfo.extractYear m) with
+        (Some t, Some y) -> Some (t, y)
+        _                -> None
+  match fromNfo with
+    Some r -> Some r
+    None ->
+      match Tmdb.parseReleaseName folderName with
+        None   -> None
+        Some p ->
+          Some
+            ( Tmdb.ParsedRelease.title p
+            , Tmdb.ParsedRelease.year p )
+
+-- Print a warning if NFO and folder-name regex disagree on title/year.
+-- Diagnostic only; we still proceed using NFO.
+Rename.checkAgreement
+  : Optional Movie -> Text ->{IO, Exception} ()
+Rename.checkAgreement maybeNfo folderName =
+  match maybeNfo with
+    None -> ()
+    Some m ->
+      match Tmdb.parseReleaseName folderName with
+        None -> ()
+        Some p ->
+          match (Nfo.extractTitle m, Nfo.extractYear m) with
+            (Some nfoTitle, Some nfoYear) ->
+              regexTitle = Tmdb.ParsedRelease.title p
+              regexYear = Tmdb.ParsedRelease.year p
+              sameTitle =
+                Universal.eq
+                  (Tmdb.normalize nfoTitle)
+                  (Tmdb.normalize regexTitle)
+              sameYear = Universal.eq nfoYear regexYear
+              if sameTitle && sameYear then ()
+              else
+                printLine
+                  (Text.join ""
+                    [ "  DISAGREE: nfo=\""
+                    , nfoTitle
+                    , "\" ("
+                    , Nat.toText nfoYear
+                    , ") vs regex=\""
+                    , regexTitle
+                    , "\" ("
+                    , Nat.toText regexYear
+                    , ")" ])
+            _ -> ()
+
+
+-- ====================================================================
+-- Rename.executeMove takes a Nat tmdbId now (not a Tmdb.Result) so
+-- both the search-result and the NFO-direct paths share one function.
+-- ====================================================================
+
+Rename.executeMove
+  : Text
+  -> FilePath
+  -> Nat
+  -> Stage.ProbeResult
+  ->{IO, Exception} Rename.Outcome
+Rename.executeMove token sourceFolder tmdbId pr =
+  use Text ++
+  sourceText = filePathText sourceFolder
+  match Tmdb.cachedDetails token tmdbId with
+    Left err ->
+      Rename.Outcome.RenameError
+        sourceText (Text.join "" ["details fetch: ", err])
+    Right d ->
+      sourceVideo = FilePath (Stage.ProbeResult.videoPath pr)
+      videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
+      base = Rename.fileBaseName d pr
+      targetFolderText =
+        Rename.targetRoot ++ "/" ++ Rename.folderName d pr
+      targetFolder = FilePath targetFolderText
+      targetVideo = pathJoin targetFolder (base ++ videoExt)
+      targetNfo = pathJoin targetFolder (base ++ ".nfo")
+      if isDirectory targetFolder then
+        Rename.Outcome.Conflict sourceText targetFolderText
+      else
+        match catch do
+          _ = createDirectory targetFolder
+          _ = writeFileUtf8 targetNfo (Rename.buildNfo d pr)
+          renameFile sourceVideo targetVideo
+        with
+          Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
+          Left f  ->
+            Rename.Outcome.RenameError sourceText (Failure.message f)
+
+
+-- ====================================================================
+-- NFO-aware folder processing.
+--   Path A: NFO has TMDB ID -> skip search, fetch details directly.
+--   Path B: NFO has title+year -> use those for search.
+--   Path C: no NFO or NFO incomplete -> regex parse of folder name.
+-- ====================================================================
+
+Rename.processFolder
+  : Text -> FilePath ->{IO, Exception} Rename.Outcome
+Rename.processFolder token folder =
+  use Text ++
+  folderName = filePathBasename folder
+  folderText = filePathText folder
+  files = directoryContents.texts folder
+  match findFirstVideo files with
+    None -> Rename.Outcome.NoVideo folderText
+    Some _ ->
+      maybeNfo = Nfo.tryReadFolder folder
+      _ = match maybeNfo with
+        Some _ -> printLine "  found NFO in folder"
+        None   -> ()
+      _ = Rename.checkAgreement maybeNfo folderName
+      directId = match maybeNfo with
+        Some m -> Nfo.extractTmdbId m
+        None   -> None
+      match directId with
+        Some tmdbId ->
+          _ = printLine ("  using TMDB ID from NFO: " ++ Nat.toText tmdbId)
+          match Stage.readSidecar folderName with
+            None    -> Rename.Outcome.NoProbe folderText
+            Some pr -> Rename.executeMove token folder tmdbId pr
+        None ->
+          match Rename.deriveTitleYear maybeNfo folderName with
+            None ->
+              Rename.Outcome.NoMatch
+                folderText "no title/year from NFO or folder name"
+            Some (title, year) ->
+              searchResult =
+                Tmdb.cachedSearch token folderName title year
+              match searchResult with
+                Left err ->
+                  Rename.Outcome.NoMatch
+                    folderText (Text.join "" ["search: ", err])
+                Right resp ->
+                  candidates = Tmdb.SearchResponse.results resp
+                  pseudoParse =
+                    Tmdb.ParsedRelease.ParsedRelease folderName title year
+                  scored =
+                    List.map
+                      (r -> (r, Tmdb.scoreCandidate pseudoParse r))
+                      candidates
+                  match Tmdb.pickBest scored with
+                    None ->
+                      Rename.Outcome.NoMatch
+                        folderText "no single high-confidence match"
+                    Some (r, _) ->
+                      match Stage.readSidecar folderName with
+                        None ->
+                          Rename.Outcome.NoProbe folderText
+                        Some pr ->
+                          Rename.executeMove
+                            token folder (Tmdb.Result.tmdbId r) pr
+
+
+-- Loose videos can't have NFOs; just thread the new executeMove signature.
+Rename.processLooseVideo
+  : Text -> FilePath ->{IO, Exception} Rename.Outcome
+Rename.processLooseVideo token videoFile =
+  filename = filePathBasename videoFile
+  name = Rename.basenameNoExt filename
+  sourceText = filePathText videoFile
+  match Tmdb.parseReleaseName name with
+    None ->
+      Rename.Outcome.NoMatch
+        sourceText "parse failed (no year + quality token)"
+    Some p ->
+      searchResult =
+        Tmdb.cachedSearch
+          token
+          name
+          (Tmdb.ParsedRelease.title p)
+          (Tmdb.ParsedRelease.year p)
+      match searchResult with
+        Left err ->
+          Rename.Outcome.NoMatch
+            sourceText (Text.join "" ["search: ", err])
+        Right resp ->
+          candidates = Tmdb.SearchResponse.results resp
+          scored =
+            List.map
+              (r -> (r, Tmdb.scoreCandidate p r)) candidates
+          match Tmdb.pickBest scored with
+            None ->
+              Rename.Outcome.NoMatch
+                sourceText "no single high-confidence match"
+            Some (r, _) ->
+              match Stage.readSidecar name with
+                None    -> Rename.Outcome.NoProbe sourceText
+                Some pr ->
+                  Rename.executeMove
+                    token videoFile (Tmdb.Result.tmdbId r) pr

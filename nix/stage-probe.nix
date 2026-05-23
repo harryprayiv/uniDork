@@ -15,6 +15,7 @@
     text = ''
       stage_root="''${UNIDORK_STAGING:-${staging.movies}}"
       cache_root="''${UNIDORK_STAGE_CACHE:-${stageCache}}"
+      delete_empty="''${UNIDORK_DELETE_EMPTY:-1}"
 
       if [ ! -d "$stage_root" ]; then
         echo "staging not found: $stage_root" >&2
@@ -23,8 +24,9 @@
 
       mkdir -p "$cache_root"
 
-      echo "staging: $stage_root"
-      echo "cache:   $cache_root"
+      echo "staging:       $stage_root"
+      echo "cache:         $cache_root"
+      echo "delete empty:  $delete_empty (set UNIDORK_DELETE_EMPTY=0 to disable)"
 
       shopt -s nullglob
       folders=("$stage_root"/*/)
@@ -36,16 +38,16 @@
         '(' -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
           -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print0)
 
-      echo "folders: ''${#folders[@]}"
-      echo "loose:   ''${#loose_videos[@]}"
+      echo "folders:       ''${#folders[@]}"
+      echo "loose:         ''${#loose_videos[@]}"
       echo ""
 
       processed=0
       skipped_done=0
-      skipped_novideo=0
+      skipped_subdir=0
+      deleted=0
       failed=0
 
-      # Probe one video. Args: video path, sidecar output path.
       probe_one() {
         local video="$1"
         local out="$2"
@@ -108,7 +110,6 @@
         return 0
       }
 
-      # Folders: find largest video inside, key sidecar by folder name.
       for folder in "''${folders[@]}"; do
         name="$(basename "$folder")"
         out="$cache_root/$name.json"
@@ -126,8 +127,26 @@
             -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print0)
 
         if [ -z "$video" ]; then
-          echo "no video:  $name"
-          skipped_novideo=$((skipped_novideo + 1))
+          # check recursively: any video anywhere in the tree?
+          subdir_video="$(find "$folder" -type f \
+            '(' -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
+              -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' \
+            -print -quit 2>/dev/null)"
+
+          if [ -z "$subdir_video" ]; then
+            if [ "$delete_empty" = "1" ]; then
+              echo "DELETING:  $name"
+              rm -rf "$folder"
+              # also drop a stale sidecar
+              rm -f "$out"
+              deleted=$((deleted + 1))
+            else
+              echo "no video:  $name (would delete; DELETE_EMPTY=0)"
+            fi
+          else
+            echo "subdir vid: $name (video only in subdir; left alone)"
+            skipped_subdir=$((skipped_subdir + 1))
+          fi
           continue
         fi
 
@@ -146,7 +165,6 @@
         fi
       done
 
-      # Loose top-level videos: key sidecar by basename-without-extension.
       for video in "''${loose_videos[@]}"; do
         bn="$(basename "$video")"
         name="''${bn%.*}"
@@ -168,10 +186,11 @@
       done
 
       echo ""
-      echo "processed:        $processed"
-      echo "skipped (cached): $skipped_done"
-      echo "skipped (no vid): $skipped_novideo"
-      echo "failed:           $failed"
+      echo "processed:           $processed"
+      echo "skipped (cached):    $skipped_done"
+      echo "skipped (subdir vid): $skipped_subdir"
+      echo "deleted (empty):     $deleted"
+      echo "failed:              $failed"
     '';
   };
 
