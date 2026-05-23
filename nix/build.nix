@@ -11,8 +11,6 @@ pkgs.unison.lib.buildFromTranscript {
 
   transcript = ../compile.md;
 
-  # First build will fail with a hash mismatch. Copy the "got: sha256-..."
-  # from the error and paste it here.
   compiledHash = "sha256-fRDQxQDx7SnWh0hlrZCTfQ10xMyOKd3WYPo+2oQpICs=";
 
   meta = {
