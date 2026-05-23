@@ -28,7 +28,16 @@
 
       shopt -s nullglob
       folders=("$stage_root"/*/)
+
+      loose_videos=()
+      while IFS= read -r -d "" v; do
+        loose_videos+=("$v")
+      done < <(find "$stage_root" -maxdepth 1 -type f \
+        '(' -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
+          -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print0)
+
       echo "folders: ''${#folders[@]}"
+      echo "loose:   ''${#loose_videos[@]}"
       echo ""
 
       processed=0
@@ -36,57 +45,26 @@
       skipped_novideo=0
       failed=0
 
-      for folder in "''${folders[@]}"; do
-        name="$(basename "$folder")"
-        out="$cache_root/$name.json"
+      # Probe one video. Args: video path, sidecar output path.
+      probe_one() {
+        local video="$1"
+        local out="$2"
 
-        # pick largest video in the folder (top-level only)
-        video=""
-        max_size=0
-        while IFS= read -r -d "" v; do
-          sz=$(stat -c '%s' "$v")
-          if [ "$sz" -gt "$max_size" ]; then
-            max_size="$sz"
-            video="$v"
-          fi
-        done < <(find "$folder" -maxdepth 1 -type f \
-          '(' -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
-            -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print0)
-
-        if [ -z "$video" ]; then
-          echo "no video:  $name"
-          skipped_novideo=$((skipped_novideo + 1))
-          continue
-        fi
-
-        # skip if cached and not stale; still print the cached crc
-        if [ -f "$out" ] && [ "$out" -nt "$video" ]; then
-          cached_crc="$(jq -r '.crc32 // "????????"' "$out" 2>/dev/null || echo "????????")"
-          echo "cached:    $cached_crc  $name"
-          skipped_done=$((skipped_done + 1))
-          continue
-        fi
-
-        echo "probing:   $name"
-
-        # CRC32 (uppercase, matches Java util.zip.CRC32)
+        local crc
         crc="$(rhash --crc32 -p '%C' "$video" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
         if [ -z "$crc" ]; then
           echo "  crc failed" >&2
-          failed=$((failed + 1))
-          continue
+          return 1
         fi
         echo "  crc32:   $crc"
 
-        # ffprobe JSON
+        local probe_json
         probe_json="$(ffprobe -v quiet -print_format json -show_format -show_streams "$video" 2>/dev/null || true)"
         if [ -z "$probe_json" ]; then
           echo "  ffprobe failed" >&2
-          failed=$((failed + 1))
-          continue
+          return 1
         fi
 
-        # extract everything via jq, build canonical sidecar
         if ! jq -n \
           --arg vp "$video" \
           --arg crc "$crc" \
@@ -123,12 +101,70 @@
               }
           ' > "$out"; then
           echo "  jq failed" >&2
-          failed=$((failed + 1))
           rm -f "$out"
+          return 1
+        fi
+
+        return 0
+      }
+
+      # Folders: find largest video inside, key sidecar by folder name.
+      for folder in "''${folders[@]}"; do
+        name="$(basename "$folder")"
+        out="$cache_root/$name.json"
+
+        video=""
+        max_size=0
+        while IFS= read -r -d "" v; do
+          sz=$(stat -c '%s' "$v")
+          if [ "$sz" -gt "$max_size" ]; then
+            max_size="$sz"
+            video="$v"
+          fi
+        done < <(find "$folder" -maxdepth 1 -type f \
+          '(' -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
+            -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print0)
+
+        if [ -z "$video" ]; then
+          echo "no video:  $name"
+          skipped_novideo=$((skipped_novideo + 1))
           continue
         fi
 
-        processed=$((processed + 1))
+        if [ -f "$out" ] && [ "$out" -nt "$video" ]; then
+          cached_crc="$(jq -r '.crc32 // "????????"' "$out" 2>/dev/null || echo "????????")"
+          echo "cached:    $cached_crc  $name"
+          skipped_done=$((skipped_done + 1))
+          continue
+        fi
+
+        echo "probing:   $name"
+        if probe_one "$video" "$out"; then
+          processed=$((processed + 1))
+        else
+          failed=$((failed + 1))
+        fi
+      done
+
+      # Loose top-level videos: key sidecar by basename-without-extension.
+      for video in "''${loose_videos[@]}"; do
+        bn="$(basename "$video")"
+        name="''${bn%.*}"
+        out="$cache_root/$name.json"
+
+        if [ -f "$out" ] && [ "$out" -nt "$video" ]; then
+          cached_crc="$(jq -r '.crc32 // "????????"' "$out" 2>/dev/null || echo "????????")"
+          echo "cached:    $cached_crc  $name (loose)"
+          skipped_done=$((skipped_done + 1))
+          continue
+        fi
+
+        echo "probing:   $name (loose)"
+        if probe_one "$video" "$out"; then
+          processed=$((processed + 1))
+        else
+          failed=$((failed + 1))
+        fi
       done
 
       echo ""

@@ -2162,29 +2162,29 @@ Rename.runOne token folder =
       printLine ("  ERROR: " ++ msg)
   Rename.writeOutcome folderName outcome
 
-uniDork.rename : '{IO, Exception} ()
-uniDork.rename = do
-  use Text ++
-  staging = FilePath Tmdb.stagingDir
-  if isDirectory staging then
-    token = Tmdb.readToken()
-    entries = directoryContents.texts staging
-    folderNames =
-      List.filter
-        (n ->
-          if Universal.eq n "." then false
-          else if Universal.eq n ".." then false
-          else isDirectory (pathJoin staging n))
-        entries
-    folders = List.map (n -> pathJoin staging n) folderNames
-    _ =
-      printLine
-        ("scanning " ++ Nat.toText (List.size folders)
-          ++ " folder(s) under " ++ Tmdb.stagingDir)
-    _ = printLine ""
-    Db.foreach_ (Rename.runOne token) folders
-  else
-    printLine ("staging not found: " ++ Tmdb.stagingDir)
+-- uniDork.rename : '{IO, Exception} ()
+-- uniDork.rename = do
+--   use Text ++
+--   staging = FilePath Tmdb.stagingDir
+--   if isDirectory staging then
+--     token = Tmdb.readToken()
+--     entries = directoryContents.texts staging
+--     folderNames =
+--       List.filter
+--         (n ->
+--           if Universal.eq n "." then false
+--           else if Universal.eq n ".." then false
+--           else isDirectory (pathJoin staging n))
+--         entries
+--     folders = List.map (n -> pathJoin staging n) folderNames
+--     _ =
+--       printLine
+--         ("scanning " ++ Nat.toText (List.size folders)
+--           ++ " folder(s) under " ++ Tmdb.stagingDir)
+--     _ = printLine ""
+--     Db.foreach_ (Rename.runOne token) folders
+--   else
+--     printLine ("staging not found: " ++ Tmdb.stagingDir)
 
 
 -- ============================================================
@@ -2224,6 +2224,117 @@ test> Rename.channelsTag.test =
     , Universal.eq (Rename.channelsTag 6) "5.1"
     , Universal.eq (Rename.channelsTag 8) "7.1"
     , Universal.eq (Rename.channelsTag 3) "3" ]
+
+-- ====================================================================
+-- Loose-video support: handle videos sitting at the top of staging,
+-- not inside a folder. Sidecar key is the file's basename without
+-- extension (matches what unidork-stage-probe writes).
+-- ====================================================================
+
+Rename.basenameNoExt : Text -> Text
+Rename.basenameNoExt filename =
+  parts = Text.split ?. filename
+  match List.reverse parts with
+    _ +: []   -> filename
+    _ +: rest -> Text.join "." (List.reverse rest)
+    []        -> filename
+
+Rename.looseVideos : FilePath ->{IO, Exception} [FilePath]
+Rename.looseVideos dir =
+  entries = directoryContents.texts dir
+  videoNames = List.filter isVideo entries
+  step acc n =
+    fp = pathJoin dir n
+    if isDirectory fp then acc else List.snoc acc fp
+  List.foldLeft step [] videoNames
+
+Rename.processLooseVideo
+  : Text -> FilePath ->{IO, Exception} Rename.Outcome
+Rename.processLooseVideo token videoFile =
+  filename = filePathBasename videoFile
+  name = Rename.basenameNoExt filename
+  sourceText = filePathText videoFile
+  match Tmdb.parseReleaseName name with
+    None ->
+      Rename.Outcome.NoMatch
+        sourceText "parse failed (no year + quality token)"
+    Some p ->
+      searchResult =
+        Tmdb.cachedSearch
+          token
+          name
+          (Tmdb.ParsedRelease.title p)
+          (Tmdb.ParsedRelease.year p)
+      match searchResult with
+        Left err ->
+          Rename.Outcome.NoMatch
+            sourceText (Text.join "" ["search: ", err])
+        Right resp ->
+          candidates = Tmdb.SearchResponse.results resp
+          scored =
+            List.map
+              (r -> (r, Tmdb.scoreCandidate p r)) candidates
+          match Tmdb.pickBest scored with
+            None ->
+              Rename.Outcome.NoMatch
+                sourceText "no single high-confidence match"
+            Some (r, _) ->
+              match Stage.readSidecar name with
+                None    -> Rename.Outcome.NoProbe sourceText
+                Some pr -> Rename.executeMove videoFile r pr
+
+Rename.runOneLoose : Text -> FilePath ->{IO, Exception} ()
+Rename.runOneLoose token videoFile =
+  use Text ++
+  filename = filePathBasename videoFile
+  name = Rename.basenameNoExt filename
+  _ = printLine ("processing (loose): " ++ filename)
+  outcome = Rename.processLooseVideo token videoFile
+  _ = match outcome with
+    Rename.Outcome.Renamed _ tgt ->
+      printLine ("  RENAMED -> " ++ tgt)
+    Rename.Outcome.NoVideo _ ->
+      printLine "  skip: no video"
+    Rename.Outcome.NoMatch _ reason ->
+      printLine ("  skip: " ++ reason)
+    Rename.Outcome.NoProbe _ ->
+      printLine "  skip: no probe sidecar (run unidork-stage-probe)"
+    Rename.Outcome.Conflict _ t ->
+      printLine ("  skip: target exists " ++ t)
+    Rename.Outcome.RenameError _ msg ->
+      printLine ("  ERROR: " ++ msg)
+  Rename.writeOutcome name outcome
+
+
+-- Replaces the previous uniDork.rename. Processes folders, then loose
+-- top-level videos. The probe sidecar is keyed identically on both
+-- sides, so cache hits work for both shapes.
+uniDork.rename : '{IO, Exception} ()
+uniDork.rename = do
+  use Text ++
+  staging = FilePath Tmdb.stagingDir
+  if isDirectory staging then
+    token = Tmdb.readToken()
+    entries = directoryContents.texts staging
+    folderNames =
+      List.filter
+        (n ->
+          if Universal.eq n "." then false
+          else if Universal.eq n ".." then false
+          else isDirectory (pathJoin staging n))
+        entries
+    folders = List.map (n -> pathJoin staging n) folderNames
+    loose = Rename.looseVideos staging
+    _ =
+      printLine
+        ("scanning " ++ Nat.toText (List.size folders)
+          ++ " folder(s) and " ++ Nat.toText (List.size loose)
+          ++ " loose video(s) under " ++ Tmdb.stagingDir)
+    _ = printLine ""
+    _ = Db.foreach_ (Rename.runOne token) folders
+    Db.foreach_ (Rename.runOneLoose token) loose
+  else
+    printLine ("staging not found: " ++ Tmdb.stagingDir)
 
 
 uniDork.identify : '{IO, Exception} ()
