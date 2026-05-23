@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib }:
+{ pkgs, lib ? pkgs.lib, uniDork }:
 
 let
   config = import ./config.nix { };
@@ -14,8 +14,7 @@ let
   };
 
   runner = import ./unison.nix {
-    inherit pkgs;
-    inherit (config) cache library;
+    inherit pkgs uniDork;
     inherit (video) ffprobe-cache;
     inherit (postgres) pg-start;
   };
@@ -38,7 +37,7 @@ in pkgs.mkShell {
     video.ffprobe-cache
     video.ffprobe-cache-clean
 
-    runner.unidork-import
+    uniDork
     runner.unidork-cron
   ];
 
@@ -51,7 +50,6 @@ in pkgs.mkShell {
 
     export UNIDORK_FFPROBE_CACHE="${config.cache.ffprobeDir}"
     export UNIDORK_CONFIG="${config.library.configFile}"
-    export UNIDORK_COMPILED="$PWD/bin/uni-import.uc"
 
     echo ""
     echo "  uniDork dev shell"
@@ -64,22 +62,16 @@ in pkgs.mkShell {
     echo "    pg-cleanup           Stop and delete data dir"
     echo ""
     echo "  Video probing:"
-    echo "    ffprobe-cache        Probe new videos, cache to"
-    echo "                         $UNIDORK_FFPROBE_CACHE"
+    echo "    ffprobe-cache        Probe new videos, cache JSON"
     echo "    ffprobe-cache-clean  Delete the ffprobe cache"
     echo ""
     echo "  Pipeline:"
     echo "    ucm                  Unison codebase manager"
-    echo "    unidork-import       Run the compiled pipeline"
+    echo "    unidork-import       Run the compiled import pipeline"
     echo "    unidork-cron         pg-start + ffprobe-cache + unidork-import"
     echo ""
-    echo "  First-run workflow:"
-    echo "    1. pg-start"
-    echo "    2. ucm"
-    echo "       uniDork/main> update"
-    echo "       uniDork/main> compile uniDork.batchedRun bin/uni-import"
-    echo "       uniDork/main> exit"
-    echo "    3. unidork-cron"
+    echo "  TMDB identification: run uniDork.identify from ucm."
+    echo "  (HTTP done in Unison; no separate command needed.)"
     echo ""
   '';
 }

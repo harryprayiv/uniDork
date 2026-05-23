@@ -1,3 +1,92 @@
+quit
+run uniDork.identify
+update
+run uniDork.identify
+update
+view lib.unison_http_16_0_0.client.examples.simple
+view lib.unison_http_16_0_0.client.examples.query
+find URI.fromText
+ls lib.unison_http_16_0_0.HttpResponse
+ls lib.unison_http_16_0_0.client.examples
+ls lib.unison_http_16_0_0.client.Http
+ls lib.unison_http_16_0_0.Method
+ls lib.unison_http_16_0_0.Headers
+ls lib.unison_http_16_0_0.client
+ls lib.unison_http_16_0_0.HttpRequest
+ls lib.unison_http_16_0_0
+ls lib
+lib.install @unison/http
+update
+run Db.countMovies
+run uniDork.batchedRun
+run Db.countMovies
+run Db.resetSchema
+compile uniDork.batchedRun bin/uni-import
+run Db.countMovies
+run uniDork.batchedRun
+run Db.migrate
+update
+quit
+run Db.migrate
+update
+run Db.migrate
+quit
+update
+find readAllUtf8
+find runCommand
+find Process
+run Db.countMovies
+run uniDork.batchedRun
+update
+run Db.countMovies
+run uniDork.batchedRun
+run Db.resetSchema
+update
+run uniDork.batchedRun
+update
+run Db.countMovies
+run uniDork.batchedRun
+run Db.countMovies
+run Db.resetSchema
+update
+find Throw.
+display lib.unison_xml_2_1_2.Soup.tracingErrors.doc
+find Soup.
+run Db.countMovies
+run uniDork.batchedRun
+run Db.countMovies
+run Db.resetSchema
+run uniDork.batchedRun
+update
+run uniDork.batchedRun
+run Db.countMovies
+run Db.resetSchema
+update
+run uniDork.batchedRun
+run Db.countMovies
+run Db.resetSchema
+run Db.countMovies
+run uniDork.batchedRun
+run Db.countMovies
+run uniDork.batchedRun
+run Db.countMovies
+run Db.resetSchema
+run Db.countMovies
+run uniDork.batchedRun
+run Db.countMovies
+run uniDork.batchedRun
+run uniDork.streamRun
+run Db.resetSchema
+update
+run uniDork.streamRun
+run Db.resetSchema
+clear
+run uniDork.streamRun
+run Db.resetSchema
+clear
+run uniDork.streamRun
+run Db.resetSchema
+update
 find PostgresClientConfig
 project.start uniDork
 quit
@@ -9,82 +98,3 @@ run uniDork.run
 update
 docs lib.runarorama_postgres_2_5_1.README
 doc lib.runarorama_postgres_2_5_1.README
-docs lib.runarorama_postgres_2_5_1.README
-docs lib.runarorama_postgres_2_5_1.README.md
-docs lib.runarorama_postgres_2_5_1.README
-view lib.runarorama_postgres_2_5_1.examples.simpleCustomCodecQuery
-view lib.runarorama_postgres_2_5_1.examples.extendedQueryMultiParam
-view lib.runarorama_postgres_2_5_1.examples.pagila.Actor
-ls lib.runarorama_postgres_2_5_1
-find Codec.optional
-find Codec.nat
-view lib.runarorama_postgres_2_5_1.examples.simpleMultiColumnQuery
-view lib.runarorama_postgres_2_5_1.examples.transactionInsert
-view lib.runarorama_postgres_2_5_1.examples.recordInsert
-ls lib.runarorama_postgres_2_5_1
-docs lib.runarorama_postgres_2_5_1.README
-ls lib.runarorama_postgres_2_5_1.examples
-display lib.runarorama_postgres_2_5_1
-docs lib.runarorama_postgres_2_5_1
-lib.install @runarorama/postgres
-run uniDork.run
-update
-run uniDork.run
-update
-run uniDork.run
-update
-run uniDork.main /tmp/uniDork.conf
-update
-find Text.indexOf
-find Text.splitOn
-find Text.split
-update
-run uniDork.main /tmp/uniDork.conf
-update
-find FilePath
-find-in lib.base.data.List filterMap
-find-in lib.base.data.Map lookup
-find Text.lines
-find printLine
-find createDirectory
-find isDirectory
-find directoryContents
-find writeFileUtf8
-find readFileUtf8
-update
-delete.namespace lib.unison_xml_2_1_2__2
-find-in lib.unison_xml_2_1_2 Soup
-find-in lib.unison_xml Soup
-lib.remove @unison/xml
-lib.uninstall @unison/xml
-ls lib
-lib.install @unison/xml
-ls unison_xml
-ls lib.unison_xml
-ls xml
-ls lib.xml
-ls lib.unison_xml
-ls lib.runarorama_xml
-ls lib
-lib.install @unison/xml
-lib.install xml
-lib.install @xml
-lib.install @runarorama/xml
-view Movie
-display exampleMovie
-add
-update
-find Universal
-update
-lib.install @unison/json
-display exampleMovie
-view Movie
-add
-main> add
-scratch/main> display exampleMovie
-scratch/main> view Movie
-scratch/main> add
-update
-ls lib.base
-project.rename uniDork
-project.create

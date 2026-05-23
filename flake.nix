@@ -17,7 +17,16 @@
           inherit system;
           overlays = [ unison-nix.overlay ];
         };
+
+        uniDork = import ./nix/build.nix { inherit pkgs; };
       in {
-        devShells.default = import ./nix/devshell.nix { inherit pkgs; };
+        packages = {
+          default = uniDork;
+          unidork-import = uniDork;
+        };
+
+        devShells.default = import ./nix/devshell.nix {
+          inherit pkgs uniDork;
+        };
       });
 }

@@ -379,6 +379,37 @@ Movie.toNdjsonLine m =
 Movie.fromNdjsonLine : Text -> Either Failure Movie
 Movie.fromNdjsonLine line = catch do Decoder.run Movie.fromJson (trim line)
 
+Tmdb.Result.toJson : Tmdb.Result -> Json
+Tmdb.Result.toJson r =
+  use Json text
+  Json.object
+    [ ("id", Json.nat (Tmdb.Result.tmdbId r))
+    , ("title", text (Tmdb.Result.title r))
+    , ("original_title", text (Tmdb.Result.originalTitle r))
+    , ("release_date", text (Tmdb.Result.releaseDate r))
+    , ("popularity", Json.float (Tmdb.Result.popularity r))
+    , ("overview", text (Tmdb.Result.overview r)) ]
+
+Tmdb.SearchResponse.toJson : Tmdb.SearchResponse -> Json
+Tmdb.SearchResponse.toJson r =
+  Json.object
+    [ ( "results"
+      , Json.array
+          (List.map Tmdb.Result.toJson (Tmdb.SearchResponse.results r)) ) ]
+
+Tmdb.CachedSearch.toJson : Tmdb.CachedSearch -> Json
+Tmdb.CachedSearch.toJson c =
+  use List ++
+  base = [("folder", Json.text (Tmdb.CachedSearch.folder c))]
+  resp = match Tmdb.CachedSearch.response c with
+    Some r -> [("response", Tmdb.SearchResponse.toJson r)]
+    None   -> []
+  err = match Tmdb.CachedSearch.error c with
+    Some e -> [("error", Json.text e)]
+    None   -> []
+  Json.object (base ++ resp ++ err)
+
+
 test> Movie.roundtrip.test =
   encoded = Movie.toNdjsonLine exampleMovie
   match Movie.fromNdjsonLine encoded with
@@ -1401,3 +1432,471 @@ Db.migrate = do
     Db.runDDLList
       [ "ALTER TABLE movies ADD COLUMN IF NOT EXISTS actual_runtime_sec INTEGER"
       ]
+
+-- ====================================================================
+-- TMDB identification (Phase 1: report only, no writes)
+--
+-- Reads cached search responses produced by the tmdb-search bash script,
+-- re-parses release names with a strict year-pivot algorithm, scores
+-- candidates, and prints a report. No file or DB writes in this phase.
+-- ====================================================================
+
+Tmdb.cachePath : Text -> FilePath
+Tmdb.cachePath folderName =
+  use Text ++
+  FilePath (Tmdb.cacheRoot ++ "/" ++ folderName ++ ".json")
+
+Tmdb.writeCacheEntry
+  : Text -> Either Text Tmdb.SearchResponse ->{IO} ()
+Tmdb.writeCacheEntry folderName result =
+  entry = match result with
+    Right r -> Tmdb.CachedSearch.CachedSearch folderName (Some r) None
+    Left e  -> Tmdb.CachedSearch.CachedSearch folderName None (Some e)
+  payload = Json.toText (Tmdb.CachedSearch.toJson entry)
+  _ = catch do writeFileUtf8 (Tmdb.cachePath folderName) payload
+  ()
+
+-- Read from cache; on miss, hit API and write the result (success or
+-- error) to cache.
+Tmdb.cachedSearch
+  : Text -> Text -> Text -> Nat ->{IO} Either Text Tmdb.SearchResponse
+Tmdb.cachedSearch token folderName title year =
+  fromCache = catch do
+    raw = readFileUtf8 (Tmdb.cachePath folderName)
+    Decoder.run Tmdb.CachedSearch.fromJson raw
+  match fromCache with
+    Right c ->
+      match Tmdb.CachedSearch.response c with
+        Some r -> Right r
+        None ->
+          match Tmdb.CachedSearch.error c with
+            Some e -> Left e
+            None   -> Left "cached entry has neither response nor error"
+    Left _ ->
+      result = Tmdb.search token title year
+      _ = Tmdb.writeCacheEntry folderName result
+      result
+
+type Tmdb.Result =
+  { tmdbId : Nat,
+    title : Text,
+    originalTitle : Text,
+    releaseDate : Text,
+    popularity : Float,
+    overview : Text }
+
+type Tmdb.SearchResponse = { results : [Tmdb.Result] }
+
+type Tmdb.CachedSearch =
+  { folder : Text,
+    response : Optional Tmdb.SearchResponse,
+    error : Optional Text }
+
+type Tmdb.ParsedRelease =
+  { rawName : Text,
+    title : Text,
+    year : Nat }
+
+type Tmdb.Confidence
+  = High
+  | Low Text
+
+
+Tmdb.stagingDir : Text
+Tmdb.stagingDir =
+  "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies"
+
+Tmdb.cacheRoot : Text
+Tmdb.cacheRoot = "/home/bismuth/.cache/uniDork/tmdb/search"
+
+
+-- ============================================================
+-- Year-pivot release-name parser
+-- ============================================================
+
+-- Tokens that appear immediately after the release year in release names.
+-- Used to disambiguate the year-of-release from years in the title.
+Tmdb.qualityTokens : [Text]
+Tmdb.qualityTokens =
+  [ "1080p", "720p", "2160p", "4k", "480p", "576p", "uhd"
+  , "bluray", "blu-ray", "bdrip", "webrip", "web-dl", "webdl", "web"
+  , "hdrip", "dvdrip", "hdtv", "remux", "cam", "ts", "telesync", "hdcam"
+  , "x264", "x265", "hevc", "avc", "h264", "h265", "av1", "xvid"
+  , "ddp", "ddp5", "dts", "ac3", "aac", "atmos", "truehd", "flac", "eac3"
+  , "8bit", "10bit", "12bit"
+  , "hdr", "hdr10", "hdr10+", "dv", "dolby"
+  , "amzn", "nf", "hulu", "atvp", "max", "dsnp", "mtv", "pmtp", "ma"
+  , "internal", "upscaled", "proper", "repack"
+  , "unrated", "extended", "theatrical", "remastered", "anniversary"
+  , "directors" ]
+
+Tmdb.isQualityToken : Text -> Boolean
+Tmdb.isQualityToken t =
+  lower = Text.toLowercase t
+  List.any (q -> Universal.eq q lower) Tmdb.qualityTokens
+
+Tmdb.tokenAsYear : Text -> Optional Nat
+Tmdb.tokenAsYear t =
+  use Nat <= >=
+  if Universal.eq (Text.size t) 4 then
+    match Nat.fromText t with
+      Some n -> if (n >= 1900) && (n <= 2030) then Some n else None
+      None   -> None
+  else None
+
+Tmdb.tokenize : Text -> [Text]
+Tmdb.tokenize name =
+  s1 = Text.split ?. name
+  s2 = List.flatMap (p -> Text.split ?_ p) s1
+  s3 = List.flatMap (p -> Text.split ?\s p) s2
+  List.filter (p -> Nat.gt (Text.size p) 0) s3
+
+Tmdb.nth : Nat -> [a] -> Optional a
+Tmdb.nth i xs = List.head (List.drop i xs)
+
+-- Walk indexed tokens, pick the first year that is immediately followed
+-- by a quality token. Strict mode: no quality follower → no year.
+Tmdb.findYearIndex : [Text] -> Optional Nat
+Tmdb.findYearIndex tokens =
+  use Nat +
+  pairs = Db.withIndex tokens
+  qualifying =
+    List.filterMap
+      (cases
+        (i, t) ->
+          match Tmdb.tokenAsYear t with
+            None   -> None
+            Some _ ->
+              match Tmdb.nth (i + 1) tokens with
+                Some next ->
+                  if Tmdb.isQualityToken next then Some i else None
+                None -> None)
+      pairs
+  List.head qualifying
+
+Tmdb.parseReleaseName : Text -> Optional Tmdb.ParsedRelease
+Tmdb.parseReleaseName name =
+  match Tmdb.findEnclosedYearAny name with
+    Some (titlePrefix, year) ->
+      cleaned = Tmdb.cleanTitle titlePrefix
+      if Universal.eq (Text.size cleaned) 0 then None
+      else Some (Tmdb.ParsedRelease.ParsedRelease name cleaned year)
+    None ->
+      tokens = Tmdb.tokenize name
+      match Tmdb.findYearIndex tokens with
+        None   -> None
+        Some i ->
+          match Tmdb.nth i tokens with
+            None    -> None
+            Some yt ->
+              match Tmdb.tokenAsYear yt with
+                None   -> None
+                Some y ->
+                  titleStr = trim (Text.join " " (List.take i tokens))
+                  if Universal.eq (Text.size titleStr) 0 then None
+                  else
+                    Some
+                      (Tmdb.ParsedRelease.ParsedRelease name titleStr y)
+
+
+-- ============================================================
+-- Title normalization for strict comparison
+-- ============================================================
+
+Tmdb.normalize : Text -> Text
+Tmdb.normalize t =
+  lower = Text.toLowercase t
+  punct =
+    [ ".", ",", ":", ";", "!", "?", "'", "\""
+    , "(", ")", "[", "]", "{", "}", "-", "_", "&", "/" ]
+  noPunct = List.foldLeft (acc p -> replaceAll p " " acc) lower punct
+  parts = Text.split ?\s noPunct
+  nonEmpty = List.filter (p -> Nat.gt (Text.size p) 0) parts
+  joined = Text.join " " nonEmpty
+  if startsWith "the " joined then Text.drop 4 joined
+  else if startsWith "an " joined then Text.drop 3 joined
+  else if startsWith "a " joined then Text.drop 2 joined
+  else joined
+
+
+-- ============================================================
+-- Strict scorer
+-- ============================================================
+
+Tmdb.releaseYear : Text -> Optional Nat
+Tmdb.releaseYear dateStr =
+  if Nat.lt (Text.size dateStr) 4 then None
+  else Tmdb.tokenAsYear (Text.take 4 dateStr)
+
+Tmdb.scoreCandidate
+  : Tmdb.ParsedRelease -> Tmdb.Result -> Tmdb.Confidence
+Tmdb.scoreCandidate p r =
+  q = Tmdb.normalize (Tmdb.ParsedRelease.title p)
+  t = Tmdb.normalize (Tmdb.Result.title r)
+  o = Tmdb.normalize (Tmdb.Result.originalTitle r)
+  titleOk = Universal.eq q t || Universal.eq q o
+  yearOk = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
+    Some y -> Universal.eq y (Tmdb.ParsedRelease.year p)
+    None   -> false
+  if titleOk && yearOk then Tmdb.Confidence.High
+  else if titleOk then Tmdb.Confidence.Low "year mismatch"
+  else if yearOk then Tmdb.Confidence.Low "title mismatch"
+  else Tmdb.Confidence.Low "title and year mismatch"
+
+-- Pick a single HIGH match if exactly one. More than one HIGH = ambiguous;
+-- in strict mode we refuse to pick.
+Tmdb.pickBest
+  : [(Tmdb.Result, Tmdb.Confidence)]
+  -> Optional (Tmdb.Result, Tmdb.Confidence)
+Tmdb.pickBest scored =
+  isHigh = cases
+    (_, Tmdb.Confidence.High) -> true
+    _                         -> false
+  highs = List.filter isHigh scored
+  match highs with
+    []        -> None
+    [single]  -> Some single
+    _         -> None
+
+
+-- ============================================================
+-- Cache reader
+-- ============================================================
+
+Tmdb.Result.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.Result
+Tmdb.Result.fromJson = do
+  use Decoder optional!
+  use object at at!
+  tmdbId = at! "id" Decoder.nat
+  title = at! "title" Decoder.text
+  originalTitle = at! "original_title" Decoder.text
+  releaseDate = Optional.getOrElse "" (optional! (at "release_date" Decoder.text))
+  popularity = at! "popularity" Decoder.float
+  overview = Optional.getOrElse "" (optional! (at "overview" Decoder.text))
+  Tmdb.Result.Result tmdbId title originalTitle releaseDate popularity overview
+
+Tmdb.SearchResponse.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.SearchResponse
+Tmdb.SearchResponse.fromJson = do
+  results = object.at! "results" (Decoder.array Tmdb.Result.fromJson)
+  Tmdb.SearchResponse.SearchResponse results
+
+Tmdb.CachedSearch.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.CachedSearch
+Tmdb.CachedSearch.fromJson = do
+  use Decoder optional!
+  use object at at!
+  folder = at! "folder" Decoder.text
+  response = optional! (at "response" Tmdb.SearchResponse.fromJson)
+  error = optional! (at "error" Decoder.text)
+  Tmdb.CachedSearch.CachedSearch folder response error
+
+Tmdb.readCache : Text ->{IO, Exception} Optional Tmdb.CachedSearch
+Tmdb.readCache folderName =
+  use Text ++
+  jsonPath = FilePath (Tmdb.cacheRoot ++ "/" ++ folderName ++ ".json")
+  match catch do
+    raw = readFileUtf8 jsonPath
+    Decoder.run Tmdb.CachedSearch.fromJson raw
+  with
+    Left _  -> None
+    Right s -> Some s
+
+
+-- ============================================================
+-- Report (Phase 1 entry point)
+-- ============================================================
+
+Tmdb.printCandidate : (Tmdb.Result, Tmdb.Confidence) ->{IO, Exception} ()
+Tmdb.printCandidate = cases
+  (r, c) ->
+    use Text join
+    flag = match c with
+      Tmdb.Confidence.High  -> "[HIGH ]"
+      Tmdb.Confidence.Low _ -> "[low  ]"
+    yearText = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
+      Some y -> Nat.toText y
+      None   -> "????"
+    reason = match c with
+      Tmdb.Confidence.Low r -> Text.join "" [" (", r, ")"]
+      Tmdb.Confidence.High  -> ""
+    printLine
+      (join ""
+        [ "    ", flag, " tmdb:"
+        , Nat.toText (Tmdb.Result.tmdbId r)
+        , " \""
+        , Tmdb.Result.title r
+        , "\" ("
+        , yearText
+        , ") pop="
+        , Float.toText (Tmdb.Result.popularity r)
+        , reason ])
+
+Tmdb.reportFolder : Text -> Text ->{IO, Exception} ()
+Tmdb.reportFolder token folderName =
+  use Text join
+  parsed = Tmdb.parseReleaseName folderName
+  _ = printLine (join "" ["FOLDER: ", folderName])
+  match parsed with
+    None ->
+      _ = printLine "  parsed:  FAILED (no year followed by quality token)"
+      _ = printLine "  verdict: SKIP"
+      printLine ""
+    Some p ->
+      _ =
+        printLine
+          (join ""
+            [ "  parsed:  title=\""
+            , Tmdb.ParsedRelease.title p
+            , "\", year="
+            , Nat.toText (Tmdb.ParsedRelease.year p) ])
+      result =
+        Tmdb.cachedSearch
+          token
+          folderName
+          (Tmdb.ParsedRelease.title p)
+          (Tmdb.ParsedRelease.year p)
+      match result with
+        Left err ->
+          _ = printLine (join "" ["  error:   ", err])
+          _ = printLine "  verdict: SKIP"
+          printLine ""
+        Right resp ->
+          candidates = Tmdb.SearchResponse.results resp
+          scored =
+            List.map (r -> (r, Tmdb.scoreCandidate p r)) candidates
+          _ =
+            printLine
+              (join ""
+                [ "  candidates: "
+                , Nat.toText (List.size candidates) ])
+          _ = Db.foreach_ Tmdb.printCandidate scored
+          _ =
+            match Tmdb.pickBest scored with
+              Some (r, _) ->
+                printLine
+                  (join ""
+                    [ "  verdict: HIGH -> tmdb:"
+                    , Nat.toText (Tmdb.Result.tmdbId r)
+                    , " \""
+                    , Tmdb.Result.title r
+                    , "\"" ])
+              None ->
+                printLine
+                  "  verdict: SKIP (no single high-confidence match)"
+          printLine ""
+
+uniDork.identify : '{IO, Exception} ()
+uniDork.identify = do
+  use Text join
+  staging = FilePath Tmdb.stagingDir
+  if isDirectory staging then
+    token = Tmdb.readToken()
+    entries = directoryContents.texts staging
+    folderNames =
+      List.filter
+        (n ->
+          if Universal.eq n "." then false
+          else if Universal.eq n ".." then false
+          else isDirectory (pathJoin staging n))
+        entries
+    _ =
+      printLine
+        (join ""
+          [ "scanning "
+          , Nat.toText (List.size folderNames)
+          , " folder(s) under "
+          , Tmdb.stagingDir ])
+    _ = printLine ""
+    Db.foreach_ (Tmdb.reportFolder token) folderNames
+  else
+    printLine (join "" ["staging not found: ", Tmdb.stagingDir])
+
+-- Title cleanup: replace dots/underscores with spaces, collapse, trim.
+-- Used after extracting a title prefix from a folder name.
+Tmdb.cleanTitle : Text -> Text
+Tmdb.cleanTitle t =
+  s1 = replaceAll "." " " t
+  s2 = replaceAll "_" " " s1
+  parts = Text.split ?\s s2
+  nonEmpty = List.filter (p -> Nat.gt (Text.size p) 0) parts
+  trim (Text.join " " nonEmpty)
+
+-- Look for an "(YYYY)" or "[YYYY]" pattern. Returns the title prefix
+-- (everything before the opening bracket) and the year. The bracket
+-- characters are passed as Text so we can reuse the function for both
+-- paren and square-bracket forms.
+Tmdb.findEnclosedYear : Text -> Text -> Text -> Optional (Text, Nat)
+Tmdb.findEnclosedYear open close name =
+  use Nat +
+  go offset =
+    sub = Text.drop offset name
+    match Text.indexOf open sub with
+      None -> None
+      Some openIdx ->
+        absOpen = offset + openIdx
+        afterOpen = absOpen + Text.size open
+        cand = Text.take 4 (Text.drop afterOpen name)
+        closeAt = afterOpen + 4
+        match Tmdb.tokenAsYear cand with
+          Some y ->
+            actualClose = Text.take (Text.size close) (Text.drop closeAt name)
+            if Universal.eq actualClose close then
+              Some (trim (Text.take absOpen name), y)
+            else
+              go (absOpen + 1)
+          None -> go (absOpen + 1)
+  go 0
+
+-- Try parens first, then square brackets.
+Tmdb.findEnclosedYearAny : Text -> Optional (Text, Nat)
+Tmdb.findEnclosedYearAny name =
+  match Tmdb.findEnclosedYear "(" ")" name with
+    Some r -> Some r
+    None   -> Tmdb.findEnclosedYear "[" "]" name
+
+-- ============================================================
+-- HTTP integration: read token, query TMDB, cache responses.
+-- ============================================================
+
+Tmdb.tokenPath : Text
+Tmdb.tokenPath = "/home/bismuth/.config/uniDork/tmdb-token"
+
+Tmdb.readToken : '{IO, Exception} Text
+Tmdb.readToken = do trim (readFileUtf8 (FilePath Tmdb.tokenPath))
+
+Tmdb.apiAuthority : Authority
+Tmdb.apiAuthority =
+  Authority None (HostName "api.themoviedb.org") None
+
+Tmdb.searchURI : Text -> Nat -> URI
+Tmdb.searchURI title year =
+  use Path /
+  path = Path.root / "3" / "search" / "movie"
+  q =
+    Query.empty
+      & ("query", title)
+      & ("year", Nat.toText year)
+  URI Scheme.https (Some Tmdb.apiAuthority) path (fromQuery q) Fragment.empty
+
+Tmdb.searchRequest : Text -> Text -> Nat -> HttpRequest
+Tmdb.searchRequest token title year =
+  use Text ++
+  HttpRequest.get (Tmdb.searchURI title year)
+    |> HttpRequest.addHeader "Authorization" ("Bearer " ++ token)
+    |> HttpRequest.addHeader "Accept" "application/json"
+
+-- Hit TMDB. Returns Left with a message on any failure (network, HTTP
+-- non-2xx, malformed JSON).
+Tmdb.search
+  : Text -> Text -> Nat ->{IO} Either Text Tmdb.SearchResponse
+Tmdb.search token title year =
+  req = Tmdb.searchRequest token title year
+  match catch do
+    Threads.run do
+      Http.run do
+        resp = Http.request req
+        ok = HttpResponse.ensureSuccess resp
+        body = HttpResponse.bodyText ok
+        Decoder.run Tmdb.SearchResponse.fromJson body
+  with
+    Right v -> Right v
+    Left f  -> Left (Failure.message f)
