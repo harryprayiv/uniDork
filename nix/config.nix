@@ -12,6 +12,8 @@
   cache = {
     ffprobeDir = "$HOME/.cache/uniDork/ffprobe";
     tmdbDir    = "$HOME/.cache/uniDork/tmdb/search";
+    stageDir   = "$HOME/.cache/uniDork/stage";
+    renameLog  = "$HOME/.cache/uniDork/rename-log";
   };
 
   library = {
@@ -20,6 +22,10 @@
 
   staging = {
     movies = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies";
+  };
+
+  rename = {
+    targetDir = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/testMovies";
   };
 
   tmdb = {

@@ -1708,6 +1708,524 @@ Tmdb.search token title year =
     Right v -> Right v
     Left f  -> Left (Failure.message f)
 
+-- ====================================================================
+-- Stage probe sidecar: CRC32 + selected ffprobe data, one JSON per
+-- staging folder. Written by the unidork-stage-probe shell script.
+-- ====================================================================
+
+type Stage.VideoInfo
+  = { codec : Text,
+      width : Nat,
+      height : Nat,
+      bitDepth : Nat,
+      pixFmt : Text,
+      bitRate : Optional Nat }
+
+type Stage.AudioInfo
+  = { codec : Text, channels : Nat, channelLayout : Text }
+
+type Stage.ProbeResult
+  = { videoPath : Text,
+      crc32 : Text,
+      sizeBytes : Nat,
+      durationSec : Float,
+      video : Stage.VideoInfo,
+      audio : Optional Stage.AudioInfo }
+
+Stage.VideoInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.VideoInfo
+Stage.VideoInfo.fromJson = do
+  use Decoder optional!
+  use object at at!
+  codec = at! "codec" Decoder.text
+  width = at! "width" Decoder.nat
+  height = at! "height" Decoder.nat
+  bitDepth = at! "bit_depth" Decoder.nat
+  pixFmt = at! "pix_fmt" Decoder.text
+  bitRate = optional! (at "bit_rate" Decoder.nat)
+  Stage.VideoInfo.VideoInfo codec width height bitDepth pixFmt bitRate
+
+Stage.AudioInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.AudioInfo
+Stage.AudioInfo.fromJson = do
+  use object at!
+  codec = at! "codec" Decoder.text
+  channels = at! "channels" Decoder.nat
+  channelLayout = at! "channel_layout" Decoder.text
+  Stage.AudioInfo.AudioInfo codec channels channelLayout
+
+Stage.ProbeResult.fromJson : '{unison_json_1_4_2.Decoder} Stage.ProbeResult
+Stage.ProbeResult.fromJson = do
+  use Decoder optional!
+  use object at at!
+  videoPath = at! "video_path" Decoder.text
+  crc32 = at! "crc32" Decoder.text
+  sizeBytes = at! "size_bytes" Decoder.nat
+  durationSec = at! "duration_sec" Decoder.float
+  video = at! "video" Stage.VideoInfo.fromJson
+  audio = optional! (at "audio" Stage.AudioInfo.fromJson)
+  Stage.ProbeResult.ProbeResult
+    videoPath crc32 sizeBytes durationSec video audio
+
+Stage.cacheRoot : Text
+Stage.cacheRoot = "/home/bismuth/.cache/uniDork/stage"
+
+Stage.sidecarPath : Text -> FilePath
+Stage.sidecarPath folderName =
+  use Text ++
+  FilePath (Stage.cacheRoot ++ "/" ++ folderName ++ ".json")
+
+Stage.readSidecar
+  : Text ->{IO, Exception} Optional Stage.ProbeResult
+Stage.readSidecar folderName =
+  match catch do
+    raw = readFileUtf8 (Stage.sidecarPath folderName)
+    Decoder.run Stage.ProbeResult.fromJson raw
+  with
+    Left _  -> None
+    Right r -> Some r
+
+
+-- ====================================================================
+-- Rename: build canonical folder + filename matching filebot's amc
+-- format, move the video, write an NFO, log per-folder outcome.
+-- Conservative: any uncertainty produces a skip outcome, no move.
+-- ====================================================================
+
+Rename.targetRoot : Text
+Rename.targetRoot =
+  "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/testMovies"
+
+Rename.logDir : Text
+Rename.logDir = "/home/bismuth/.cache/uniDork/rename-log"
+
+
+-- ============================================================
+-- Format helpers (Nat-only arithmetic, no Float formatting).
+-- Filebot tokens:
+--   {ny}=Title (YYYY), {gigabytes}=8.5, {vf}=1080p,
+--   {vc}=x264|x265|..., {bitdepth}=8|10|12, {minutes}=int,
+--   {crc32}=8-hex-upper, {resolution}=WxH, {mbps}=12.5,
+--   {ac}=AC3|AAC|..., {channels}=5.1|7.1|2.0|...
+-- ============================================================
+
+-- Bytes -> "X.Y" gigabytes, 1 decimal, integer-only.
+Rename.gigabytes : Nat -> Text
+Rename.gigabytes bytes =
+  use Text ++
+  use Nat *
+  use Nat /
+  tenths = bytes * 10 / 1073741824
+  whole = tenths / 10
+  frac = Nat.mod tenths 10
+  Nat.toText whole ++ "." ++ Nat.toText frac
+
+-- Truncate Float seconds to Nat minutes.
+Rename.minutes : Float -> Nat
+Rename.minutes durationSec =
+  use Nat /
+  if Float.lt durationSec 0.0 then 0
+  else
+    asText = Float.toText durationSec
+    intPart = match Text.indexOf "." asText with
+      Some i -> Text.take i asText
+      None   -> asText
+    sec = Optional.getOrElse 0 (Nat.fromText intPart)
+    sec / 60
+
+-- Vertical-resolution tag from height.
+Rename.vfTag : Nat -> Text
+Rename.vfTag height =
+  if Universal.eq height 2160 then "2160p"
+  else if Universal.eq height 1440 then "1440p"
+  else if Universal.eq height 1080 then "1080p"
+  else if Universal.eq height 720 then "720p"
+  else if Universal.eq height 576 then "576p"
+  else if Universal.eq height 480 then "480p"
+  else "SD"
+
+-- Video codec mapping to filebot's lowercase short names.
+Rename.vcTag : Text -> Text
+Rename.vcTag raw =
+  lower = Text.toLowercase raw
+  if Universal.eq lower "hevc" then "x265"
+  else if Universal.eq lower "h265" then "x265"
+  else if Universal.eq lower "h264" then "x264"
+  else if Universal.eq lower "avc" then "x264"
+  else if Universal.eq lower "av1" then "av1"
+  else if Universal.eq lower "vp9" then "vp9"
+  else if Universal.eq lower "mpeg4" then "xvid"
+  else lower
+
+Rename.resolutionStr : Nat -> Nat -> Text
+Rename.resolutionStr w h =
+  use Text ++
+  Nat.toText w ++ "x" ++ Nat.toText h
+
+-- bit_rate (bits/sec) -> "X.Y" Mbps. None -> "0.0".
+Rename.mbps : Optional Nat -> Text
+Rename.mbps = cases
+  None -> "0.0"
+  Some br ->
+    use Text ++
+    use Nat /
+    tenths = br / 100000
+    whole = tenths / 10
+    frac = Nat.mod tenths 10
+    Nat.toText whole ++ "." ++ Nat.toText frac
+
+-- Audio channel count -> layout label.
+Rename.channelsTag : Nat -> Text
+Rename.channelsTag ch =
+  if Universal.eq ch 1 then "1.0"
+  else if Universal.eq ch 2 then "2.0"
+  else if Universal.eq ch 6 then "5.1"
+  else if Universal.eq ch 8 then "7.1"
+  else Nat.toText ch
+
+Rename.acTag : Text -> Text
+Rename.acTag raw =
+  upper = Text.toUppercase raw
+  if Universal.eq upper "AC3" then "AC3"
+  else if Universal.eq upper "EAC3" then "EAC3"
+  else if Universal.eq upper "AAC" then "AAC"
+  else if Universal.eq upper "DTS" then "DTS"
+  else if Universal.eq upper "TRUEHD" then "TrueHD"
+  else if Universal.eq upper "FLAC" then "FLAC"
+  else if Universal.eq upper "OPUS" then "Opus"
+  else if Universal.eq upper "MP3" then "MP3"
+  else upper
+
+Rename.titleYear : Tmdb.Result -> Text
+Rename.titleYear r =
+  use Text ++
+  yearText = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
+    Some y -> Nat.toText y
+    None   -> "0000"
+  Tmdb.Result.title r ++ " (" ++ yearText ++ ")"
+
+Rename.fileExt : Text -> Text
+Rename.fileExt path =
+  lower = Text.toLowercase path
+  if endsWith ".mkv" lower then ".mkv"
+  else if endsWith ".mp4" lower then ".mp4"
+  else if endsWith ".avi" lower then ".avi"
+  else if endsWith ".mov" lower then ".mov"
+  else if endsWith ".wmv" lower then ".wmv"
+  else if endsWith ".flv" lower then ".flv"
+  else ""
+
+-- {ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}
+Rename.folderName : Tmdb.Result -> Stage.ProbeResult -> Text
+Rename.folderName tr pr =
+  use Text ++
+  vid = Stage.ProbeResult.video pr
+  ny = Rename.titleYear tr
+  parts =
+    Rename.gigabytes (Stage.ProbeResult.sizeBytes pr)
+      ++ "."
+      ++ Rename.vfTag (Stage.VideoInfo.height vid)
+      ++ "."
+      ++ Rename.vcTag (Stage.VideoInfo.codec vid)
+      ++ "."
+      ++ Nat.toText (Stage.VideoInfo.bitDepth vid)
+      ++ "b."
+      ++ Nat.toText (Rename.minutes (Stage.ProbeResult.durationSec pr))
+      ++ "min"
+  ny ++ " [" ++ parts ++ "] ~" ++ Stage.ProbeResult.crc32 pr
+
+-- {ny} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}
+-- (tags and group dropped pending dedicated parsers.)
+Rename.fileBaseName : Tmdb.Result -> Stage.ProbeResult -> Text
+Rename.fileBaseName tr pr =
+  use Text ++
+  vid = Stage.ProbeResult.video pr
+  ny = Rename.titleYear tr
+  audioPart = match Stage.ProbeResult.audio pr with
+    None -> "noaudio-0"
+    Some a ->
+      Rename.acTag (Stage.AudioInfo.codec a)
+        ++ "-"
+        ++ Rename.channelsTag (Stage.AudioInfo.channels a)
+  bracketed =
+    Rename.vcTag (Stage.VideoInfo.codec vid)
+      ++ "_"
+      ++ Nat.toText (Stage.VideoInfo.bitDepth vid)
+      ++ "b_"
+      ++ Rename.resolutionStr
+          (Stage.VideoInfo.width vid)
+          (Stage.VideoInfo.height vid)
+      ++ "_"
+      ++ Rename.mbps (Stage.VideoInfo.bitRate vid)
+      ++ "_"
+      ++ audioPart
+  ny ++ " [" ++ bracketed ++ "] ~" ++ Stage.ProbeResult.crc32 pr
+
+
+-- ============================================================
+-- NFO builder (Kodi-compatible minimal).
+-- ============================================================
+
+Rename.escapeXml : Text -> Text
+Rename.escapeXml t =
+  t
+    |> replaceAll "&" "&amp;"
+    |> replaceAll "<" "&lt;"
+    |> replaceAll ">" "&gt;"
+
+Rename.buildNfo : Tmdb.Result -> Stage.ProbeResult -> Text
+Rename.buildNfo tr pr =
+  use Text ++
+  esc = Rename.escapeXml
+  yearText = match Tmdb.releaseYear (Tmdb.Result.releaseDate tr) with
+    Some y -> Nat.toText y
+    None   -> ""
+  vid = Stage.ProbeResult.video pr
+  audioLines = match Stage.ProbeResult.audio pr with
+    None -> []
+    Some a ->
+      [ "      <audio>"
+      , "        <codec>" ++ esc (Stage.AudioInfo.codec a) ++ "</codec>"
+      , "        <channels>"
+          ++ Nat.toText (Stage.AudioInfo.channels a)
+          ++ "</channels>"
+      , "      </audio>" ]
+  baseLines =
+    [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+    , "<movie>"
+    , "  <title>" ++ esc (Tmdb.Result.title tr) ++ "</title>"
+    , "  <originaltitle>"
+        ++ esc (Tmdb.Result.originalTitle tr)
+        ++ "</originaltitle>"
+    , "  <year>" ++ yearText ++ "</year>"
+    , "  <plot>" ++ esc (Tmdb.Result.overview tr) ++ "</plot>"
+    , "  <uniqueid type=\"tmdb\" default=\"true\">"
+        ++ Nat.toText (Tmdb.Result.tmdbId tr)
+        ++ "</uniqueid>"
+    , "  <fileinfo>"
+    , "    <streamdetails>"
+    , "      <video>"
+    , "        <codec>" ++ esc (Stage.VideoInfo.codec vid) ++ "</codec>"
+    , "        <width>"
+        ++ Nat.toText (Stage.VideoInfo.width vid)
+        ++ "</width>"
+    , "        <height>"
+        ++ Nat.toText (Stage.VideoInfo.height vid)
+        ++ "</height>"
+    , "      </video>" ]
+  tailLines =
+    [ "    </streamdetails>"
+    , "  </fileinfo>"
+    , "</movie>"
+    , "" ]
+  Text.join "\n" (baseLines List.++ audioLines List.++ tailLines)
+
+
+-- ============================================================
+-- Outcome type + per-folder log file.
+-- ============================================================
+
+type Rename.Outcome
+  = Renamed Text Text
+  | NoVideo Text
+  | NoMatch Text Text
+  | NoProbe Text
+  | Conflict Text Text
+  | RenameError Text Text
+
+Rename.Outcome.toJson : Rename.Outcome -> Json
+Rename.Outcome.toJson = cases
+  Rename.Outcome.Renamed src tgt ->
+    Json.object
+      [ ("outcome", Json.text "renamed")
+      , ("source", Json.text src)
+      , ("target", Json.text tgt) ]
+  Rename.Outcome.NoVideo src ->
+    Json.object
+      [ ("outcome", Json.text "no_video")
+      , ("source", Json.text src) ]
+  Rename.Outcome.NoMatch src reason ->
+    Json.object
+      [ ("outcome", Json.text "no_match")
+      , ("source", Json.text src)
+      , ("reason", Json.text reason) ]
+  Rename.Outcome.NoProbe src ->
+    Json.object
+      [ ("outcome", Json.text "no_probe")
+      , ("source", Json.text src) ]
+  Rename.Outcome.Conflict src existing ->
+    Json.object
+      [ ("outcome", Json.text "conflict")
+      , ("source", Json.text src)
+      , ("existing", Json.text existing) ]
+  Rename.Outcome.RenameError src msg ->
+    Json.object
+      [ ("outcome", Json.text "error")
+      , ("source", Json.text src)
+      , ("message", Json.text msg) ]
+
+Rename.writeOutcome
+  : Text -> Rename.Outcome ->{IO, Exception} ()
+Rename.writeOutcome folderName o =
+  use Text ++
+  path = FilePath (Rename.logDir ++ "/" ++ folderName ++ ".json")
+  writeFileUtf8 path (Json.toText (Rename.Outcome.toJson o))
+
+
+-- ============================================================
+-- Driver. One folder -> one outcome -> one log file.
+-- Source folder is left as-is (becomes a stub after the video moves);
+-- the absence of a video on a future run is the "already done" signal.
+-- ============================================================
+
+Rename.executeMove
+  : FilePath
+  -> Tmdb.Result
+  -> Stage.ProbeResult
+  ->{IO, Exception} Rename.Outcome
+Rename.executeMove sourceFolder tr pr =
+  use Text ++
+  sourceText = filePathText sourceFolder
+  sourceVideo = FilePath (Stage.ProbeResult.videoPath pr)
+  videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
+  base = Rename.fileBaseName tr pr
+  targetFolderText = Rename.targetRoot ++ "/" ++ Rename.folderName tr pr
+  targetFolder = FilePath targetFolderText
+  targetVideo = pathJoin targetFolder (base ++ videoExt)
+  targetNfo = pathJoin targetFolder (base ++ ".nfo")
+  if isDirectory targetFolder then
+    Rename.Outcome.Conflict sourceText targetFolderText
+  else
+    match catch do
+      _ = createDirectory targetFolder
+      _ = writeFileUtf8 targetNfo (Rename.buildNfo tr pr)
+      renameFile sourceVideo targetVideo
+    with
+      Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
+      Left f  ->
+        Rename.Outcome.RenameError sourceText (Failure.message f)
+
+Rename.processFolder
+  : Text -> FilePath ->{IO, Exception} Rename.Outcome
+Rename.processFolder token folder =
+  folderName = filePathBasename folder
+  folderText = filePathText folder
+  files = directoryContents.texts folder
+  match findFirstVideo files with
+    None -> Rename.Outcome.NoVideo folderText
+    Some _ ->
+      match Tmdb.parseReleaseName folderName with
+        None ->
+          Rename.Outcome.NoMatch
+            folderText "parse failed (no year + quality token)"
+        Some p ->
+          searchResult =
+            Tmdb.cachedSearch
+              token
+              folderName
+              (Tmdb.ParsedRelease.title p)
+              (Tmdb.ParsedRelease.year p)
+          match searchResult with
+            Left err ->
+              Rename.Outcome.NoMatch
+                folderText (Text.join "" ["search: ", err])
+            Right resp ->
+              candidates = Tmdb.SearchResponse.results resp
+              scored =
+                List.map
+                  (r -> (r, Tmdb.scoreCandidate p r)) candidates
+              match Tmdb.pickBest scored with
+                None ->
+                  Rename.Outcome.NoMatch
+                    folderText "no single high-confidence match"
+                Some (r, _) ->
+                  match Stage.readSidecar folderName with
+                    None    -> Rename.Outcome.NoProbe folderText
+                    Some pr -> Rename.executeMove folder r pr
+
+Rename.runOne : Text -> FilePath ->{IO, Exception} ()
+Rename.runOne token folder =
+  use Text ++
+  folderName = filePathBasename folder
+  _ = printLine ("processing: " ++ folderName)
+  outcome = Rename.processFolder token folder
+  _ = match outcome with
+    Rename.Outcome.Renamed _ tgt ->
+      printLine ("  RENAMED -> " ++ tgt)
+    Rename.Outcome.NoVideo _ ->
+      printLine "  skip: no video (already renamed?)"
+    Rename.Outcome.NoMatch _ reason ->
+      printLine ("  skip: " ++ reason)
+    Rename.Outcome.NoProbe _ ->
+      printLine "  skip: no probe sidecar (run unidork-stage-probe)"
+    Rename.Outcome.Conflict _ t ->
+      printLine ("  skip: target exists " ++ t)
+    Rename.Outcome.RenameError _ msg ->
+      printLine ("  ERROR: " ++ msg)
+  Rename.writeOutcome folderName outcome
+
+uniDork.rename : '{IO, Exception} ()
+uniDork.rename = do
+  use Text ++
+  staging = FilePath Tmdb.stagingDir
+  if isDirectory staging then
+    token = Tmdb.readToken()
+    entries = directoryContents.texts staging
+    folderNames =
+      List.filter
+        (n ->
+          if Universal.eq n "." then false
+          else if Universal.eq n ".." then false
+          else isDirectory (pathJoin staging n))
+        entries
+    folders = List.map (n -> pathJoin staging n) folderNames
+    _ =
+      printLine
+        ("scanning " ++ Nat.toText (List.size folders)
+          ++ " folder(s) under " ++ Tmdb.stagingDir)
+    _ = printLine ""
+    Db.foreach_ (Rename.runOne token) folders
+  else
+    printLine ("staging not found: " ++ Tmdb.stagingDir)
+
+
+-- ============================================================
+-- Tests for format helpers.
+-- ============================================================
+
+test> Rename.gigabytes.test =
+  List.flatMap check
+    [ Universal.eq (Rename.gigabytes 1073741824) "1.0"
+    , Universal.eq (Rename.gigabytes 8589934592) "8.0"
+    , Universal.eq (Rename.gigabytes 5368709120) "5.0"
+    , Universal.eq (Rename.gigabytes 0) "0.0" ]
+
+test> Rename.vfTag.test =
+  List.flatMap check
+    [ Universal.eq (Rename.vfTag 2160) "2160p"
+    , Universal.eq (Rename.vfTag 1080) "1080p"
+    , Universal.eq (Rename.vfTag 720) "720p"
+    , Universal.eq (Rename.vfTag 999) "SD" ]
+
+test> Rename.vcTag.test =
+  List.flatMap check
+    [ Universal.eq (Rename.vcTag "hevc") "x265"
+    , Universal.eq (Rename.vcTag "HEVC") "x265"
+    , Universal.eq (Rename.vcTag "h264") "x264"
+    , Universal.eq (Rename.vcTag "av1") "av1" ]
+
+test> Rename.mbps.test =
+  List.flatMap check
+    [ Universal.eq (Rename.mbps None) "0.0"
+    , Universal.eq (Rename.mbps (Some 12500000)) "12.5"
+    , Universal.eq (Rename.mbps (Some 1500000)) "1.5" ]
+
+test> Rename.channelsTag.test =
+  List.flatMap check
+    [ Universal.eq (Rename.channelsTag 2) "2.0"
+    , Universal.eq (Rename.channelsTag 6) "5.1"
+    , Universal.eq (Rename.channelsTag 8) "7.1"
+    , Universal.eq (Rename.channelsTag 3) "3" ]
+
+
 uniDork.identify : '{IO, Exception} ()
 uniDork.identify = do
   use Text join
