@@ -29,6 +29,7 @@
       shopt -s nullglob
       folders=("$stage_root"/*/)
       echo "folders: ''${#folders[@]}"
+      echo ""
 
       processed=0
       skipped_done=0
@@ -53,25 +54,29 @@
             -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print0)
 
         if [ -z "$video" ]; then
+          echo "no video:  $name"
           skipped_novideo=$((skipped_novideo + 1))
           continue
         fi
 
-        # skip if cached and not stale
+        # skip if cached and not stale; still print the cached crc
         if [ -f "$out" ] && [ "$out" -nt "$video" ]; then
+          cached_crc="$(jq -r '.crc32 // "????????"' "$out" 2>/dev/null || echo "????????")"
+          echo "cached:    $cached_crc  $name"
           skipped_done=$((skipped_done + 1))
           continue
         fi
 
-        echo "probing: $name"
+        echo "probing:   $name"
 
         # CRC32 (uppercase, matches Java util.zip.CRC32)
-        crc="$(rhash --crc32 -p '%C' "$video" 2>/dev/null | tr 'a-z' 'A-Z')"
+        crc="$(rhash --crc32 -p '%C' "$video" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
         if [ -z "$crc" ]; then
           echo "  crc failed" >&2
           failed=$((failed + 1))
           continue
         fi
+        echo "  crc32:   $crc"
 
         # ffprobe JSON
         probe_json="$(ffprobe -v quiet -print_format json -show_format -show_streams "$video" 2>/dev/null || true)"
@@ -126,6 +131,7 @@
         processed=$((processed + 1))
       done
 
+      echo ""
       echo "processed:        $processed"
       echo "skipped (cached): $skipped_done"
       echo "skipped (no vid): $skipped_novideo"
