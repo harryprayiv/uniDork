@@ -1,3 +1,2579 @@
+type MovieId
+  = { kodi : Text,
+      imdb : Optional Text,
+      tmdb : Optional Text,
+      tvdb : Optional Text }
+
+type Title
+  = { display : Text, original : Text, sort : Text }
+
+type Scoring
+  = { year : Optional Nat, rating : Float, votes : Nat, mpaa : Text }
+
+type Taxonomy
+  = { genres : [Text],
+      tags : [Text],
+      countries : [Text],
+      studios : [Text],
+      directors : [Text],
+      credits : [Text] }
+
+type Video
+  = { codec : Text, aspect : Float, width : Nat, height : Nat }
+
+type Audio
+  = { codec : Text, language : Text, channels : Nat }
+
+type Subtitle
+  = { language : Text }
+
+type StreamDetails
+  = { video : Video, audios : [Audio], subtitles : [Subtitle] }
+
+type FileInfo
+  = { streams : StreamDetails }
+
+type Actor
+  = { name : Text, role : Text }
+
+type FolderMeta
+  = { rawSize : Optional Text,
+      resolution : Optional Text,
+      videoCodec : Optional Text,
+      bitDepth : Optional Nat,
+      runtimeMin : Optional Nat,
+      checksum : Optional Text }
+
+type Movie
+  = { id : MovieId,
+      title : Title,
+      collection : Optional Text,
+      runtime : Optional Nat,
+      scoring : Scoring,
+      plot : Text,
+      tagline : Text,
+      taxonomy : Taxonomy,
+      fileInfo : FileInfo,
+      videoFilePath : Optional Text,
+      checksum : Optional Text,
+      actors : [Actor],
+      folderPath : Optional Text,
+      nfoPath : Optional Text,
+      fileSizeBytes : Optional Nat,
+      folderMeta : FolderMeta }
+
+emptyFolderMeta : FolderMeta
+emptyFolderMeta = FolderMeta.FolderMeta None None None None None None
+
+exampleMovie : Movie
+exampleMovie =
+  use Actor Actor
+  Movie.Movie
+    (MovieId.MovieId "tt0167260" (Some "tt0167260") (Some "122") None)
+    (Title.Title
+      "The Lord of the Rings: The Return of the King"
+      "The Lord of the Rings: The Return of the King"
+      "Lord of the Rings, The: The Return of the King")
+    (Some "The Lord of the Rings Collection")
+    (Some 201)
+    (Scoring.Scoring (Some 2003) 8.9 12000 "PG-13")
+    "Aragorn leads the World of Men against Sauron's army..."
+    "The eye of the enemy is moving."
+    (Taxonomy.Taxonomy
+      ["Adventure", "Fantasy"]
+      []
+      ["New Zealand", "United States"]
+      ["New Line Cinema"]
+      ["Peter Jackson"]
+      ["Fran Walsh"])
+    (FileInfo.FileInfo
+      (StreamDetails.StreamDetails
+        (Video.Video "h264" 2.39 1920 800)
+        [Audio.Audio "ac3" "eng" 6]
+        [Subtitle.Subtitle "eng"]))
+    (Some "/movies/lotr-rotk/lotr-rotk.mkv")
+    (Some "a3f1c9")
+    [Actor "Elijah Wood" "Frodo Baggins", Actor "Viggo Mortensen" "Aragorn"]
+    (Some "/movies/lotr-rotk")
+    (Some "/movies/lotr-rotk/lotr-rotk.nfo")
+    None
+    emptyFolderMeta
+
+toJsonOpt : (a -> Json) -> Optional a -> Json
+toJsonOpt f = cases
+  None   -> Json.null
+  Some a -> f a
+
+Title.toJson : Title -> Json
+Title.toJson t =
+  use Json text
+  Json.object
+    [ ("display", text (Title.display t))
+    , ("original", text (Title.original t))
+    , ("sort", text (Title.sort t))
+    ]
+
+MovieId.toJson : MovieId -> Json
+MovieId.toJson m =
+  use Json text
+  Json.object
+    [ ("kodi", text (MovieId.kodi m))
+    , ("imdb", toJsonOpt text (MovieId.imdb m))
+    , ("tmdb", toJsonOpt text (MovieId.tmdb m))
+    , ("tvdb", toJsonOpt text (MovieId.tvdb m))
+    ]
+
+Scoring.toJson : Scoring -> Json
+Scoring.toJson s =
+  use Json nat
+  Json.object
+    [ ("year", toJsonOpt nat (Scoring.year s))
+    , ("rating", Json.float (Scoring.rating s))
+    , ("votes", nat (Scoring.votes s))
+    , ("mpaa", Json.text (Scoring.mpaa s))
+    ]
+
+Taxonomy.toJson : Taxonomy -> Json
+Taxonomy.toJson t =
+  use Json array text
+  use List map
+  Json.object
+    [ ("genres", array (map text (Taxonomy.genres t)))
+    , ("tags", array (map text (Taxonomy.tags t)))
+    , ("countries", array (map text (Taxonomy.countries t)))
+    , ("studios", array (map text (Taxonomy.studios t)))
+    , ("directors", array (map text (Taxonomy.directors t)))
+    , ("credits", array (map text (Taxonomy.credits t)))
+    ]
+
+Video.toJson : Video -> Json
+Video.toJson v =
+  use Json nat
+  Json.object
+    [ ("codec", Json.text (Video.codec v))
+    , ("aspect", Json.float (Video.aspect v))
+    , ("width", nat (Video.width v))
+    , ("height", nat (Video.height v))
+    ]
+
+Audio.toJson : Audio -> Json
+Audio.toJson a =
+  use Json text
+  Json.object
+    [ ("codec", text (Audio.codec a))
+    , ("language", text (Audio.language a))
+    , ("channels", Json.nat (Audio.channels a))
+    ]
+
+Subtitle.toJson : Subtitle -> Json
+Subtitle.toJson s = Json.object [("language", Json.text (Subtitle.language s))]
+
+StreamDetails.toJson : StreamDetails -> Json
+StreamDetails.toJson s =
+  use Json array
+  use List map
+  Json.object
+    [ ("video", Video.toJson (StreamDetails.video s))
+    , ("audios", array (map Audio.toJson (StreamDetails.audios s)))
+    , ("subtitles", array (map Subtitle.toJson (StreamDetails.subtitles s)))
+    ]
+
+FileInfo.toJson : FileInfo -> Json
+FileInfo.toJson f =
+  Json.object [("streams", StreamDetails.toJson (FileInfo.streams f))]
+
+Actor.toJson : Actor -> Json
+Actor.toJson a =
+  use Json text
+  Json.object [("name", text (Actor.name a)), ("role", text (Actor.role a))]
+
+FolderMeta.toJson : FolderMeta -> Json
+FolderMeta.toJson f =
+  use Json nat text
+  Json.object
+    [ ("rawSize", toJsonOpt text (FolderMeta.rawSize f))
+    , ("resolution", toJsonOpt text (FolderMeta.resolution f))
+    , ("videoCodec", toJsonOpt text (FolderMeta.videoCodec f))
+    , ("bitDepth", toJsonOpt nat (FolderMeta.bitDepth f))
+    , ("runtimeMin", toJsonOpt nat (FolderMeta.runtimeMin f))
+    , ("checksum", toJsonOpt text (FolderMeta.checksum f))
+    ]
+
+Movie.toJson : Movie -> Json
+Movie.toJson m =
+  use Json nat text
+  Json.object
+    [ ("id", MovieId.toJson (Movie.id m))
+    , ("title", Title.toJson (Movie.title m))
+    , ("collection", toJsonOpt text (Movie.collection m))
+    , ("runtime", toJsonOpt nat (Movie.runtime m))
+    , ("scoring", Scoring.toJson (Movie.scoring m))
+    , ("plot", text (Movie.plot m))
+    , ("tagline", text (Movie.tagline m))
+    , ("taxonomy", Taxonomy.toJson (Movie.taxonomy m))
+    , ("fileInfo", FileInfo.toJson (Movie.fileInfo m))
+    , ("videoFilePath", toJsonOpt text (Movie.videoFilePath m))
+    , ("checksum", toJsonOpt text (Movie.checksum m))
+    , ("actors", Json.array (List.map Actor.toJson (Movie.actors m)))
+    , ("folderPath", toJsonOpt text (Movie.folderPath m))
+    , ("nfoPath", toJsonOpt text (Movie.nfoPath m))
+    , ("fileSizeBytes", toJsonOpt nat (Movie.fileSizeBytes m))
+    , ("folderMeta", FolderMeta.toJson (Movie.folderMeta m))
+    ]
+
+Title.fromJson : '{unison_json_1_4_2.Decoder} Title
+Title.fromJson = do
+  use Decoder text
+  use object at!
+  display = at! "display" text
+  original = at! "original" text
+  sort = at! "sort" text
+  Title.Title display original sort
+
+MovieId.fromJson : '{unison_json_1_4_2.Decoder} MovieId
+MovieId.fromJson = do
+  use Decoder optional! text
+  use object at
+  kodi = object.at! "kodi" text
+  imdb = optional! (at "imdb" text)
+  tmdb = optional! (at "tmdb" text)
+  tvdb = optional! (at "tvdb" text)
+  MovieId.MovieId kodi imdb tmdb tvdb
+
+Scoring.fromJson : '{unison_json_1_4_2.Decoder} Scoring
+Scoring.fromJson = do
+  use Decoder nat
+  use object at!
+  year = Decoder.optional! (object.at "year" nat)
+  rating = at! "rating" Decoder.float
+  votes = at! "votes" nat
+  mpaa = at! "mpaa" Decoder.text
+  Scoring.Scoring year rating votes mpaa
+
+Taxonomy.fromJson : '{unison_json_1_4_2.Decoder} Taxonomy
+Taxonomy.fromJson = do
+  use Decoder array text
+  use object at!
+  genres = at! "genres" (array text)
+  tags = at! "tags" (array text)
+  countries = at! "countries" (array text)
+  studios = at! "studios" (array text)
+  directors = at! "directors" (array text)
+  credits = at! "credits" (array text)
+  Taxonomy.Taxonomy genres tags countries studios directors credits
+
+Video.fromJson : '{unison_json_1_4_2.Decoder} Video
+Video.fromJson = do
+  use Decoder nat
+  use object at!
+  codec = at! "codec" Decoder.text
+  aspect = at! "aspect" Decoder.float
+  width = at! "width" nat
+  height = at! "height" nat
+  Video.Video codec aspect width height
+
+Audio.fromJson : '{unison_json_1_4_2.Decoder} Audio
+Audio.fromJson = do
+  use Decoder text
+  use object at!
+  codec = at! "codec" text
+  language = at! "language" text
+  channels = at! "channels" Decoder.nat
+  Audio.Audio codec language channels
+
+Subtitle.fromJson : '{unison_json_1_4_2.Decoder} Subtitle
+Subtitle.fromJson = do
+  language = object.at! "language" Decoder.text
+  Subtitle.Subtitle language
+
+StreamDetails.fromJson : '{unison_json_1_4_2.Decoder} StreamDetails
+StreamDetails.fromJson = do
+  use Decoder array
+  use object at!
+  video = at! "video" Video.fromJson
+  audios = at! "audios" (array Audio.fromJson)
+  subtitles = at! "subtitles" (array Subtitle.fromJson)
+  StreamDetails.StreamDetails video audios subtitles
+
+FileInfo.fromJson : '{unison_json_1_4_2.Decoder} FileInfo
+FileInfo.fromJson = do
+  streams = object.at! "streams" StreamDetails.fromJson
+  FileInfo.FileInfo streams
+
+Actor.fromJson : '{unison_json_1_4_2.Decoder} Actor
+Actor.fromJson = do
+  use Decoder text
+  use object at!
+  name = at! "name" text
+  role = at! "role" text
+  Actor.Actor name role
+
+FolderMeta.fromJson : '{unison_json_1_4_2.Decoder} FolderMeta
+FolderMeta.fromJson =
+  do
+    use Decoder nat optional! text
+    use object at
+    rawSize = optional! (at "rawSize" text)
+    resolution = optional! (at "resolution" text)
+    videoCodec = optional! (at "videoCodec" text)
+    bitDepth = optional! (at "bitDepth" nat)
+    runtimeMin = optional! (at "runtimeMin" nat)
+    checksum = optional! (at "checksum" text)
+    FolderMeta.FolderMeta
+      rawSize resolution videoCodec bitDepth runtimeMin checksum
+
+Movie.fromJson : '{unison_json_1_4_2.Decoder} Movie
+Movie.fromJson =
+  do
+    use Decoder nat optional! text
+    use object at at!
+    id = at! "id" MovieId.fromJson
+    title = at! "title" Title.fromJson
+    collection = optional! (at "collection" text)
+    runtime = optional! (at "runtime" nat)
+    scoring = at! "scoring" Scoring.fromJson
+    plot = at! "plot" text
+    tagline = at! "tagline" text
+    taxonomy = at! "taxonomy" Taxonomy.fromJson
+    fileInfo = at! "fileInfo" FileInfo.fromJson
+    videoFilePath = optional! (at "videoFilePath" text)
+    checksum = optional! (at "checksum" text)
+    actors = at! "actors" (Decoder.array Actor.fromJson)
+    folderPath = optional! (at "folderPath" text)
+    nfoPath = optional! (at "nfoPath" text)
+    fileSizeBytes = optional! (at "fileSizeBytes" nat)
+    folderMeta = at! "folderMeta" FolderMeta.fromJson
+    Movie.Movie
+      id
+      title
+      collection
+      runtime
+      scoring
+      plot
+      tagline
+      taxonomy
+      fileInfo
+      videoFilePath
+      checksum
+      actors
+      folderPath
+      nfoPath
+      fileSizeBytes
+      folderMeta
+
+Movie.toNdjsonLine : Movie -> Text
+Movie.toNdjsonLine m =
+  use Text ++
+  Json.toText (Movie.toJson m) ++ "\n"
+
+Movie.fromNdjsonLine : Text -> Either Failure Movie
+Movie.fromNdjsonLine line = catch do Decoder.run Movie.fromJson (trim line)
+
+Tmdb.Result.toJson : Tmdb.Result -> Json
+Tmdb.Result.toJson r =
+  use Json text
+  Json.object
+    [ ("id", Json.nat (Tmdb.Result.tmdbId r))
+    , ("title", text (Tmdb.Result.title r))
+    , ("original_title", text (Tmdb.Result.originalTitle r))
+    , ("release_date", text (Tmdb.Result.releaseDate r))
+    , ("popularity", Json.float (Tmdb.Result.popularity r))
+    , ("overview", text (Tmdb.Result.overview r))
+    ]
+
+Tmdb.SearchResponse.toJson : Tmdb.SearchResponse -> Json
+Tmdb.SearchResponse.toJson r =
+  Json.object
+    [ ( "results"
+      , Json.array
+          (List.map Tmdb.Result.toJson (Tmdb.SearchResponse.results r))
+      )
+    ]
+
+Tmdb.CachedSearch.toJson : Tmdb.CachedSearch -> Json
+Tmdb.CachedSearch.toJson c =
+  use Json text
+  use List ++
+  base = [("folder", text (Tmdb.CachedSearch.folder c))]
+  resp = match Tmdb.CachedSearch.response c with
+    Some r -> [("response", Tmdb.SearchResponse.toJson r)]
+    None   -> []
+  err = match Tmdb.CachedSearch.error c with
+    Some e -> [("error", text e)]
+    None   -> []
+  Json.object (base ++ resp ++ err)
+
+test> Movie.roundtrip.test =
+  encoded = Movie.toNdjsonLine exampleMovie
+  match Movie.fromNdjsonLine encoded with
+    Left failure -> [Fail (Failure.message failure)]
+    Right m      -> check (Universal.eq m exampleMovie)
+
+textBetween : Text -> Text -> Text -> Optional Text
+textBetween startD endD t = match Text.indexOf startD t with
+  None   -> None
+  Some i ->
+    use Nat +
+    after = Text.drop (i + Text.size startD) t
+    match Text.indexOf endD after with
+      None   -> None
+      Some j -> Some (Text.take j after)
+
+textAfter : Text -> Text -> Optional Text
+textAfter sep t = match Text.indexOf sep t with
+  None   -> None
+  Some i -> Some (trim (Text.drop (i Nat.+ Text.size sep) t))
+
+parseNatBefore : Text -> Text -> Optional Nat
+parseNatBefore suffix t =
+  use Nat -
+  use Text size
+  if endsWith suffix t then
+    sz = size t - size suffix
+    Nat.fromText (Text.take sz t)
+  else None
+
+classifyPiece : Text -> FolderMeta -> FolderMeta
+classifyPiece p m =
+  if endsWith "min" p then FolderMeta.runtimeMin.set (parseNatBefore "min" p) m
+  else
+    if endsWith "p" p then FolderMeta.resolution.set (Some p) m
+    else
+      if endsWith "b" p then FolderMeta.bitDepth.set (parseNatBefore "b" p) m
+      else
+        if endsWith "G" p then FolderMeta.rawSize.set (Some p) m
+        else
+          if endsWith "M" p then FolderMeta.rawSize.set (Some p) m
+          else
+            if startsWith "x" p then FolderMeta.videoCodec.set (Some p) m
+            else
+              if startsWith "h" p then FolderMeta.videoCodec.set (Some p) m
+              else
+                if startsWith "av" p then FolderMeta.videoCodec.set (Some p) m
+                else m
+
+Nfo.parseFolderName : Text -> FolderMeta
+Nfo.parseFolderName name =
+  csum = textAfter "~" name
+  brackets = textBetween "[" "]" name
+  base = FolderMeta.checksum.set csum emptyFolderMeta
+  match brackets with
+    None -> base
+    Some content ->
+      List.foldLeft
+        (acc p -> classifyPiece (trim p) acc) base (Text.split ?\s content)
+
+tryXml : '{Throw XMLError} a -> Optional a
+tryXml = Throw.toOptional
+
+silentBranches : '{Each, Throw XMLError} a -> [a]
+silentBranches thunk =
+  List.filterMap (x -> x) (Each.toList do Throw.toOptional thunk)
+
+Nfo.allText : Soup ->{Throw XMLError} Text
+Nfo.allText s = Text.join "" (Soup.texts s)
+
+Nfo.optText : Text -> Soup -> Optional Text
+Nfo.optText tag s = match tryXml do Nfo.allText (Soup.findFirst tag s) with
+  Some t -> if Universal.eq (Text.size t) 0 then None else Some t
+  None   -> None
+
+Nfo.requireText : Text -> Soup ->{Throw XMLError} Text
+Nfo.requireText tag s = Nfo.allText (Soup.findFirst tag s)
+
+Nfo.textOr : Text -> Text -> Soup -> Text
+Nfo.textOr default tag s = Optional.getOrElse default (Nfo.optText tag s)
+
+Nfo.texts : Text -> Soup -> [Text]
+Nfo.texts tag s = silentBranches do
+  g = Soup.named tag s
+  Nfo.allText g
+
+Nfo.natOr : Nat -> Text -> Nat
+Nfo.natOr default t = Optional.getOrElse default (Nat.fromText t)
+
+Nfo.floatOr : Float -> Text -> Float
+Nfo.floatOr default t = Optional.getOrElse default (Float.fromText t)
+
+Nfo.descendantAttr : Text -> Text -> Soup -> Optional Text
+Nfo.descendantAttr elemName attrName s = 
+  Throw.toOptional do Soup.attribute attrName (Soup.findFirst elemName s)
+
+Nfo.uniqueIdOfType : Text -> Soup -> Optional Text
+Nfo.uniqueIdOfType wantType s =
+  candidates : [(Text, Text)]
+  candidates = silentBranches do
+    u = Soup.named "uniqueid" s
+    typeAttr = Soup.attribute "type" u
+    textVal = Nfo.allText u
+    (typeAttr, textVal)
+  match List.find (cases (t, _) -> Universal.eq t wantType) candidates with
+    Some (_, v) -> Some (trim v)
+    None        -> None
+
+Nfo.parseCollection : Soup -> Optional Text
+Nfo.parseCollection s =
+  use Soup findFirst
+  modern = Throw.toOptional do
+    setElem = findFirst "set" s
+    nameElem = findFirst "name" setElem
+    Nfo.allText nameElem
+  match modern with
+    Some n ->
+      trimmed = trim n
+      if Universal.eq (Text.size trimmed) 0 then Nfo.optText "set" s
+      else Some trimmed
+    None -> Nfo.optText "set" s
+
+Nfo.parseRatingAndVotes : Soup -> (Float, Nat)
+Nfo.parseRatingAndVotes s =
+  use List find
+  use Optional getOrElse
+  use Soup attribute findFirst
+  use Throw toOptional
+  use Universal eq
+  ratingsElem = toOptional do findFirst "ratings" s
+  match ratingsElem with
+    None    ->
+      r = Nfo.floatOr 0.0 (Nfo.textOr "0" "rating" s)
+      v = Nfo.natOr 0 (Nfo.textOr "0" "votes" s)
+      (r, v)
+    Some rs ->
+      candidates : [(Optional Text, Optional Text, Float, Nat)]
+      candidates = silentBranches do
+        r = Soup.named "rating" rs
+        name = toOptional do attribute "name" r
+        dflt = toOptional do attribute "default" r
+        valStr = Nfo.allText (findFirst "value" r)
+        votesStr = Nfo.allText (findFirst "votes" r)
+        val = getOrElse 0.0 (Float.fromText (trim valStr))
+        vc = getOrElse 0 (Nat.fromText (trim votesStr))
+        (name, dflt, val, vc)
+      defaultMatch = find (cases (_, d, _, _) -> eq d (Some "true")) candidates
+      imdbMatch = find (cases (n, _, _, _) -> eq n (Some "imdb")) candidates
+      best = match defaultMatch with
+        Some x -> Some x
+        None   ->
+          match imdbMatch with
+            Some x -> Some x
+            None   -> List.head candidates
+      match best with
+        Some (_, _, r, v) -> (r, v)
+        None              -> (0.0, 0)
+
+Nfo.parseTitle : Soup ->{Throw XMLError} Title
+Nfo.parseTitle s =
+  display = Nfo.textOr "" "title" s
+  original = Nfo.textOr "" "originaltitle" s
+  sort = Nfo.textOr "" "sorttitle" s
+  Title.Title display original sort
+
+Nfo.parseMovieId : Soup ->{Throw XMLError} MovieId
+Nfo.parseMovieId s =
+  imdb = match Nfo.uniqueIdOfType "imdb" s with
+    Some v -> Some v
+    None   -> Nfo.descendantAttr "imdb" "id" s
+  tmdb = match Nfo.uniqueIdOfType "tmdb" s with
+    Some v -> Some v
+    None   -> Nfo.descendantAttr "tmdb" "id" s
+  tvdb = match Nfo.uniqueIdOfType "tvdb" s with
+    Some v -> Some v
+    None   -> Nfo.descendantAttr "tvdb" "id" s
+  kodi = match Nfo.optText "id" s with
+    Some k -> k
+    None   -> Optional.getOrElse "" imdb
+  MovieId.MovieId kodi imdb tmdb tvdb
+
+Nfo.parseScoring : Soup ->{Throw XMLError} Scoring
+Nfo.parseScoring s =
+  year = Optional.map (Nfo.natOr 0) (Nfo.optText "year" s)
+  (rating, votes) = Nfo.parseRatingAndVotes s
+  mpaa = Nfo.textOr "" "mpaa" s
+  Scoring.Scoring year rating votes mpaa
+
+Nfo.parseTaxonomy : Soup -> Taxonomy
+Nfo.parseTaxonomy s =
+  Taxonomy.Taxonomy
+    (Nfo.texts "genre" s)
+    (Nfo.texts "tag" s)
+    (Nfo.texts "country" s)
+    (Nfo.texts "studio" s)
+    (Nfo.texts "director" s)
+    (Nfo.texts "credits" s)
+
+Nfo.parseVideo : Soup ->{Throw XMLError} Video
+Nfo.parseVideo s =
+  codec = Nfo.textOr "" "codec" s
+  aspect = Nfo.floatOr 0.0 (Nfo.textOr "0" "aspect" s)
+  width = Nfo.natOr 0 (Nfo.textOr "0" "width" s)
+  height = Nfo.natOr 0 (Nfo.textOr "0" "height" s)
+  Video.Video codec aspect width height
+
+Nfo.parseAudio : Soup ->{Throw XMLError} Audio
+Nfo.parseAudio s =
+  codec = Nfo.textOr "" "codec" s
+  language = Nfo.textOr "" "language" s
+  channels = Nfo.natOr 0 (Nfo.textOr "0" "channels" s)
+  Audio.Audio codec language channels
+
+Nfo.parseSubtitle : Soup ->{Throw XMLError} Subtitle
+Nfo.parseSubtitle s =
+  language = Nfo.textOr "" "language" s
+  Subtitle.Subtitle language
+
+Nfo.parseStreamDetails : Soup ->{Throw XMLError} StreamDetails
+Nfo.parseStreamDetails s =
+  use Soup named
+  video = Nfo.parseVideo (Soup.findFirst "video" s)
+  audios = silentBranches do
+    a = named "audio" s
+    Nfo.parseAudio a
+  subs = silentBranches do
+    sb = named "subtitle" s
+    Nfo.parseSubtitle sb
+  StreamDetails.StreamDetails video audios subs
+
+Nfo.parseFileInfo : Soup ->{Throw XMLError} FileInfo
+Nfo.parseFileInfo s =
+  streams = Nfo.parseStreamDetails (Soup.findFirst "streamdetails" s)
+  FileInfo.FileInfo streams
+
+Nfo.parseActor : Soup ->{Throw XMLError} Actor
+Nfo.parseActor s =
+  name = Nfo.textOr "" "name" s
+  role = Nfo.textOr "" "role" s
+  Actor.Actor name role
+
+Nfo.parseActors : Soup -> [Actor]
+Nfo.parseActors s = silentBranches do
+  a = Soup.named "actor" s
+  Nfo.parseActor a
+
+Nfo.parseMovie : Soup ->{Throw XMLError} Movie
+Nfo.parseMovie s =
+  id = Nfo.parseMovieId s
+  title = Nfo.parseTitle s
+  collection = Nfo.parseCollection s
+  runtime = Optional.map (Nfo.natOr 0) (Nfo.optText "runtime" s)
+  scoring = Nfo.parseScoring s
+  plot = Nfo.textOr "" "plot" s
+  tagline = Nfo.textOr "" "tagline" s
+  taxonomy = Nfo.parseTaxonomy s
+  fileInfo =
+    match catch do Nfo.parseFileInfo s with
+      Left _ ->
+        FileInfo.FileInfo
+          (StreamDetails.StreamDetails (Video.Video "" 0.0 0 0) [] [])
+      Right f -> f
+  Movie.Movie
+    id
+    title
+    collection
+    runtime
+    scoring
+    plot
+    tagline
+    taxonomy
+    fileInfo
+    None
+    None
+    (Nfo.parseActors s)
+    None
+    None
+    None
+    emptyFolderMeta
+
+Nfo.parse : Text -> Either Text Movie
+Nfo.parse xml = match withXML xml Nfo.parseMovie with
+  Left err       -> Left err
+  Right (m +: _) -> Right m
+  Right []       -> Left "no <movie> element found"
+
+pathJoin : FilePath -> Text -> FilePath
+pathJoin base name =
+  use Text ++
+  (FilePath t) = base
+  FilePath (t ++ "/" ++ name)
+
+filePathText : FilePath -> Text
+filePathText = cases FilePath t -> t
+
+filePathBasename : FilePath -> Text
+filePathBasename fp = match List.reverse (Text.split ?/ (filePathText fp)) with
+  last +: _ -> last
+  []        -> filePathText fp
+
+videoExtensions : [Text]
+videoExtensions = [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv"]
+
+isNfo : Text -> Boolean
+isNfo name = endsWith ".nfo" name
+
+isVideo : Text -> Boolean
+isVideo name = List.any (ext -> endsWith ext name) videoExtensions
+
+findFirstNfo : [Text] -> Optional Text
+findFirstNfo = List.find isNfo
+
+findFirstVideo : [Text] -> Optional Text
+findFirstVideo = List.find isVideo
+
+Nfo.processFolder : FilePath ->{IO, Exception} Either FilePath Movie
+Nfo.processFolder folder =
+  files = directoryContents.texts folder
+  match findFirstNfo files with
+    None -> Left folder
+    Some nfoName ->
+      nfoFp = pathJoin folder nfoName
+      xml = readFileUtf8 nfoFp
+      match Nfo.parse xml with
+        Left _ -> Left folder
+        Right m ->
+          videoPath =
+            Optional.map
+              (vf -> filePathText (pathJoin folder vf)) (findFirstVideo files)
+          folderName = filePathBasename folder
+          folderMeta = Nfo.parseFolderName folderName
+          Right
+            (m
+              |> Movie.videoFilePath.set videoPath
+              |> Movie.checksum.set (FolderMeta.checksum folderMeta)
+              |> Movie.folderPath.set (Some (filePathText folder))
+              |> Movie.nfoPath.set (Some (filePathText nfoFp))
+              |> Movie.folderMeta.set folderMeta)
+
+parseConfigLine : Text -> Optional FilePath
+parseConfigLine l =
+  trimmed = trim l
+  if Universal.eq (Text.size trimmed) 0 then None else Some (FilePath trimmed)
+
+Db.config : PostgresClientConfig
+Db.config =
+  PostgresClientConfig.default
+    (HostName "localhost") (UserName "postgres") (DatabaseName "dork")
+    |> PostgresClientConfig.port.set (Port "5434")
+
+Db.runDDL cmd =
+  pc = prepareCommand cmd
+  ignore (bindAndExecuteCommand pc (Command.encodeArgs cmd))
+
+Db.runDDLList stmts =
+  _ = List.map (s -> Db.runDDL (sql s |> buildCommand)) stmts
+  ()
+
+Db.moviesDdl : Text
+Db.moviesDdl =
+  Text.join
+    ""
+    [ "CREATE TABLE IF NOT EXISTS movies ("
+    , "  id                 SERIAL PRIMARY KEY,"
+    , "  folder_checksum    TEXT NOT NULL UNIQUE,"
+    , "  kodi_id            TEXT NOT NULL DEFAULT '',"
+    , "  imdb_id            TEXT,"
+    , "  tmdb_id            TEXT,"
+    , "  tvdb_id            TEXT,"
+    , "  title              TEXT NOT NULL DEFAULT '',"
+    , "  original_title     TEXT NOT NULL DEFAULT '',"
+    , "  sort_title         TEXT NOT NULL DEFAULT '',"
+    , "  collection         TEXT,"
+    , "  year               INTEGER,"
+    , "  rating             DOUBLE PRECISION NOT NULL DEFAULT 0,"
+    , "  votes              INTEGER NOT NULL DEFAULT 0,"
+    , "  mpaa               TEXT NOT NULL DEFAULT '',"
+    , "  runtime            INTEGER,"
+    , "  plot               TEXT NOT NULL DEFAULT '',"
+    , "  tagline            TEXT NOT NULL DEFAULT '',"
+    , "  folder_path        TEXT,"
+    , "  nfo_path           TEXT,"
+    , "  video_file_path    TEXT,"
+    , "  file_size_bytes    BIGINT,"
+    , "  parsed_size_str    TEXT,"
+    , "  parsed_resolution  TEXT,"
+    , "  parsed_codec       TEXT,"
+    , "  parsed_bit_depth   INTEGER,"
+    , "  parsed_runtime_min INTEGER,"
+    , "  actual_runtime_sec INTEGER,"
+    , "  imported_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+    , "  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+    , ")"
+    ]
+
+Db.childDdl : [Text]
+Db.childDdl =
+  [ "CREATE TABLE IF NOT EXISTS movie_video_streams (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, codec TEXT NOT NULL DEFAULT '', aspect DOUBLE PRECISION NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0)"
+  , "CREATE TABLE IF NOT EXISTS movie_audio_tracks (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, codec TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT '', channels INTEGER NOT NULL DEFAULT 0)"
+  , "CREATE TABLE IF NOT EXISTS movie_subtitles (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, track_order INTEGER NOT NULL DEFAULT 0, language TEXT NOT NULL DEFAULT '')"
+  , "CREATE TABLE IF NOT EXISTS movie_actors (id SERIAL PRIMARY KEY, folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, sort_order INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '')"
+  , "CREATE TABLE IF NOT EXISTS movie_genres (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, genre TEXT NOT NULL, PRIMARY KEY (folder_checksum, genre))"
+  , "CREATE TABLE IF NOT EXISTS movie_tags (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY (folder_checksum, tag))"
+  , "CREATE TABLE IF NOT EXISTS movie_countries (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, country TEXT NOT NULL, PRIMARY KEY (folder_checksum, country))"
+  , "CREATE TABLE IF NOT EXISTS movie_studios (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, studio TEXT NOT NULL, PRIMARY KEY (folder_checksum, studio))"
+  , "CREATE TABLE IF NOT EXISTS movie_directors (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, director TEXT NOT NULL, PRIMARY KEY (folder_checksum, director))"
+  , "CREATE TABLE IF NOT EXISTS movie_credits (folder_checksum TEXT NOT NULL REFERENCES movies(folder_checksum) ON DELETE CASCADE, credit TEXT NOT NULL, PRIMARY KEY (folder_checksum, credit))"
+  ]
+
+Db.indexDdl : [Text]
+Db.indexDdl =
+  [ "CREATE INDEX IF NOT EXISTS idx_movies_kodi       ON movies(kodi_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_imdb       ON movies(imdb_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_tmdb       ON movies(tmdb_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_tvdb       ON movies(tvdb_id)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_year       ON movies(year)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_title      ON movies(title)"
+  , "CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)"
+  , "CREATE INDEX IF NOT EXISTS idx_actors_name       ON movie_actors(name)"
+  ]
+
+Db.dropDdl : [Text]
+Db.dropDdl =
+  [ "DROP TABLE IF EXISTS movie_credits        CASCADE"
+  , "DROP TABLE IF EXISTS movie_directors      CASCADE"
+  , "DROP TABLE IF EXISTS movie_studios        CASCADE"
+  , "DROP TABLE IF EXISTS movie_countries      CASCADE"
+  , "DROP TABLE IF EXISTS movie_tags           CASCADE"
+  , "DROP TABLE IF EXISTS movie_genres         CASCADE"
+  , "DROP TABLE IF EXISTS movie_actors         CASCADE"
+  , "DROP TABLE IF EXISTS movie_subtitles      CASCADE"
+  , "DROP TABLE IF EXISTS movie_audio_tracks   CASCADE"
+  , "DROP TABLE IF EXISTS movie_video_streams  CASCADE"
+  , "DROP TABLE IF EXISTS movies               CASCADE"
+  ]
+
+Db.createSchema : '{IO, Exception} ()
+Db.createSchema = do
+  singleIO Db.config do
+    _ = Db.runDDLList [Db.moviesDdl]
+    _ = Db.runDDLList Db.childDdl
+    Db.runDDLList Db.indexDdl
+
+Db.resetSchema : '{IO, Exception} ()
+Db.resetSchema = do
+  singleIO Db.config do
+    _ = Db.runDDLList Db.dropDdl
+    _ = Db.runDDLList [Db.moviesDdl]
+    _ = Db.runDDLList Db.childDdl
+    Db.runDDLList Db.indexDdl
+
+Db.deleteChildSql table =
+  q = Text.join "" ["DELETE FROM ", table, " WHERE folder_checksum = "]
+  sql q %% var Codec.text |> buildCommand
+
+Db.insertVideoSql =
+  use Codec text
+  sql
+    "INSERT INTO movie_video_streams (folder_checksum, codec, aspect, width, height) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var Codec.double
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var integer
+    %% sql ")"
+    |> buildCommand
+
+Db.insertAudioSql =
+  use Codec text
+  sql
+    "INSERT INTO movie_audio_tracks (folder_checksum, track_order, codec, language, channels) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ")"
+    |> buildCommand
+
+Db.insertSubSql =
+  use Codec text
+  sql
+    "INSERT INTO movie_subtitles (folder_checksum, track_order, language) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ")"
+    |> buildCommand
+
+Db.insertActorSql =
+  use Codec text
+  sql
+    "INSERT INTO movie_actors (folder_checksum, sort_order, name, role) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ")"
+    |> buildCommand
+
+Db.insertPairSql table col =
+  use Codec text
+  q =
+    Text.join
+      "" ["INSERT INTO ", table, " (folder_checksum, ", col, ") VALUES ("]
+  sql q %% var text %% sql ", " %% var text %% sql ") ON CONFLICT DO NOTHING"
+    |> buildCommand
+
+Db.insertGenreSql = Db.insertPairSql "movie_genres" "genre"
+
+Db.insertTagSql = Db.insertPairSql "movie_tags" "tag"
+
+Db.insertCountrySql = Db.insertPairSql "movie_countries" "country"
+
+Db.insertStudioSql = Db.insertPairSql "movie_studios" "studio"
+
+Db.insertDirectorSql = Db.insertPairSql "movie_directors" "director"
+
+Db.insertCreditSql = Db.insertPairSql "movie_credits" "credit"
+
+Db.upsertMovieSql =
+  use Codec optional text
+  sql
+    "INSERT INTO movies (kodi_id, imdb_id, tmdb_id, tvdb_id, title, original_title, sort_title, collection, year, rating, votes, mpaa, runtime, plot, tagline, folder_path, nfo_path, video_file_path, file_size_bytes, folder_checksum, parsed_size_str, parsed_resolution, parsed_codec, parsed_bit_depth, parsed_runtime_min, actual_runtime_sec) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ", "
+    %% var Codec.double
+    %% sql ", "
+    %% var integer
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional bigint)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ", "
+    %% var (optional integer)
+    %% sql ", "
+    %% var (optional integer)
+    %% sql
+         ") ON CONFLICT (folder_checksum) DO UPDATE SET kodi_id = EXCLUDED.kodi_id, imdb_id = EXCLUDED.imdb_id, tmdb_id = EXCLUDED.tmdb_id, tvdb_id = EXCLUDED.tvdb_id, title = EXCLUDED.title, original_title = EXCLUDED.original_title, sort_title = EXCLUDED.sort_title, collection = EXCLUDED.collection, year = EXCLUDED.year, rating = EXCLUDED.rating, votes = EXCLUDED.votes, mpaa = EXCLUDED.mpaa, runtime = EXCLUDED.runtime, plot = EXCLUDED.plot, tagline = EXCLUDED.tagline, folder_path = EXCLUDED.folder_path, nfo_path = EXCLUDED.nfo_path, video_file_path = EXCLUDED.video_file_path, file_size_bytes = EXCLUDED.file_size_bytes, parsed_size_str = EXCLUDED.parsed_size_str, parsed_resolution = EXCLUDED.parsed_resolution, parsed_codec = EXCLUDED.parsed_codec, parsed_bit_depth = EXCLUDED.parsed_bit_depth, parsed_runtime_min = EXCLUDED.parsed_runtime_min, actual_runtime_sec = COALESCE(EXCLUDED.actual_runtime_sec, movies.actual_runtime_sec), updated_at = NOW()"
+    |> buildCommand
+
+Db.pt : Text -> [Optional Text]
+Db.pt t = Codec.encode Codec.text t
+
+Db.pot : Optional Text -> [Optional Text]
+Db.pot v = [v]
+
+Db.pi : Int -> [Optional Text]
+Db.pi i = Codec.encode integer i
+
+Db.poi : Optional Int -> [Optional Text]
+Db.poi = cases
+  None   -> [None]
+  Some i -> Codec.encode integer i
+
+Db.pf : Float -> [Optional Text]
+Db.pf f = Codec.encode Codec.double f
+
+Db.pobi : Optional Int -> [Optional Text]
+Db.pobi = cases
+  None   -> [None]
+  Some i -> Codec.encode bigint i
+
+Db.withIndex : [a] -> [(Nat, a)]
+Db.withIndex xs =
+  use List +:
+  use Nat +
+  go acc i = cases
+    []      -> List.reverse acc
+    x +: ys -> go ((i, x) +: acc) (i + 1) ys
+  go [] 0 xs
+
+Db.foreach_ : (a ->{g} b) -> [a] ->{g} ()
+Db.foreach_ f xs =
+  step acc x =
+    _ = f x
+    acc
+  _ = List.foldLeft step () xs
+  ()
+
+Db.countMovies : '{IO, Exception} ()
+Db.countMovies = do
+  singleIO Db.config do
+    q = sql "SELECT COUNT(*) FROM movies" |> typedQuery bigint
+    counts = Query.execute q
+    match counts with
+      n +: _ -> printLine (Text.join "" ["movies in db: ", Int.toText n])
+      []     -> printLine "no result"
+
+Db.upsertWith
+  pcUpsert
+  pcVid
+  pcDVid
+  pcAud
+  pcDAud
+  pcSub
+  pcDSub
+  pcAct
+  pcDAct
+  pcGen
+  pcDGen
+  pcTag
+  pcDTag
+  pcCou
+  pcDCou
+  pcStu
+  pcDStu
+  pcDir
+  pcDDir
+  pcCre
+  pcDCre
+  actualRuntimeSec
+  m = 
+  transaction do
+    use List ++
+    use Nat toInt
+    use Optional map
+    k = MovieId.kodi (Movie.id m)
+    csum = Optional.getOrElse "" (Movie.checksum m)
+    mid = Movie.id m
+    t = Movie.title m
+    s = Movie.scoring m
+    sd = FileInfo.streams (Movie.fileInfo m)
+    vid = StreamDetails.video sd
+    tax = Movie.taxonomy m
+    fm = Movie.folderMeta m
+    indexedAudios = Db.withIndex (StreamDetails.audios sd)
+    indexedSubs = Db.withIndex (StreamDetails.subtitles sd)
+    indexedActors = Db.withIndex (Movie.actors m)
+    del pc =
+      _ = bindAndExecuteCommand pc (Db.pt csum)
+      ()
+    repList delPc insPc vals =
+      _ = del delPc
+      Db.foreach_
+        (v -> bindAndExecuteCommand insPc (Db.pt csum ++ Db.pt v)) vals
+    _ = printLine (Text.join "" ["upserting: ", k, " (", csum, ")"])
+    _ =
+      bindAndExecuteCommand
+        pcUpsert
+        (Db.pt k
+          ++ Db.pot (MovieId.imdb mid)
+          ++ Db.pot (MovieId.tmdb mid)
+          ++ Db.pot (MovieId.tvdb mid)
+          ++ Db.pt (Title.display t)
+          ++ Db.pt (Title.original t)
+          ++ Db.pt (Title.sort t)
+          ++ Db.pot (Movie.collection m)
+          ++ Db.poi (map toInt (Scoring.year s))
+          ++ Db.pf (Scoring.rating s)
+          ++ Db.pi (toInt (Scoring.votes s))
+          ++ Db.pt (Scoring.mpaa s)
+          ++ Db.poi (map toInt (Movie.runtime m))
+          ++ Db.pt (Movie.plot m)
+          ++ Db.pt (Movie.tagline m)
+          ++ Db.pot (Movie.folderPath m)
+          ++ Db.pot (Movie.nfoPath m)
+          ++ Db.pot (Movie.videoFilePath m)
+          ++ Db.pobi (map toInt (Movie.fileSizeBytes m))
+          ++ Db.pot (Movie.checksum m)
+          ++ Db.pot (FolderMeta.rawSize fm)
+          ++ Db.pot (FolderMeta.resolution fm)
+          ++ Db.pot (FolderMeta.videoCodec fm)
+          ++ Db.poi (map toInt (FolderMeta.bitDepth fm))
+          ++ Db.poi (map toInt (FolderMeta.runtimeMin fm))
+          ++ Db.poi (map toInt actualRuntimeSec))
+    _ = del pcDVid
+    _ =
+      bindAndExecuteCommand
+        pcVid
+        (Db.pt csum
+          ++ Db.pt (Video.codec vid)
+          ++ Db.pf (Video.aspect vid)
+          ++ Db.pi (toInt (Video.width vid))
+          ++ Db.pi (toInt (Video.height vid)))
+    _ = del pcDAud
+    _ =
+      Db.foreach_
+        (cases
+          (i, a) ->
+            bindAndExecuteCommand
+              pcAud
+              (Db.pt csum
+                ++ Db.pi (toInt i)
+                ++ Db.pt (Audio.codec a)
+                ++ Db.pt (Audio.language a)
+                ++ Db.pi (toInt (Audio.channels a))))
+        indexedAudios
+    _ = del pcDSub
+    _ =
+      Db.foreach_
+        (cases
+          (i, sub) ->
+            bindAndExecuteCommand
+              pcSub
+              (Db.pt csum ++ Db.pi (toInt i) ++ Db.pt (Subtitle.language sub)))
+        indexedSubs
+    _ = del pcDAct
+    _ =
+      Db.foreach_
+        (cases
+          (i, a) ->
+            bindAndExecuteCommand
+              pcAct
+              (Db.pt csum
+                ++ Db.pi (toInt i)
+                ++ Db.pt (Actor.name a)
+                ++ Db.pt (Actor.role a)))
+        indexedActors
+    _ = repList pcDGen pcGen (Taxonomy.genres tax)
+    _ = repList pcDTag pcTag (Taxonomy.tags tax)
+    _ = repList pcDCou pcCou (Taxonomy.countries tax)
+    _ = repList pcDStu pcStu (Taxonomy.studios tax)
+    _ = repList pcDDir pcDir (Taxonomy.directors tax)
+    _ = repList pcDCre pcCre (Taxonomy.credits tax)
+    ()
+
+type Probe.Format
+  = { duration : Float, sizeBytes : Optional Nat, bitRate : Optional Nat }
+
+type Probe.Result
+  = { format : Probe.Format }
+
+Probe.parseFloat : Text -> Float
+Probe.parseFloat t = Optional.getOrElse 0.0 (Float.fromText (trim t))
+
+Probe.optNatStringAt : Text ->{unison_json_1_4_2.Decoder} Optional Nat
+Probe.optNatStringAt key =
+  match Decoder.optional! (object.at key Decoder.text) with
+    None   -> None
+    Some s -> Nat.fromText (trim s)
+
+Probe.Format.fromJson : '{unison_json_1_4_2.Decoder} Probe.Format
+Probe.Format.fromJson = do
+  durStr = object.at! "duration" Decoder.text
+  duration = Probe.parseFloat durStr
+  sizeBytes = Probe.optNatStringAt "size"
+  bitRate = Probe.optNatStringAt "bit_rate"
+  Probe.Format.Format duration sizeBytes bitRate
+
+Probe.Result.fromJson : '{unison_json_1_4_2.Decoder} Probe.Result
+Probe.Result.fromJson = do
+  format = object.at! "format" Probe.Format.fromJson
+  Probe.Result.Result format
+
+Probe.cacheRoot : Text
+Probe.cacheRoot = "/home/bismuth/.cache/uniDork/ffprobe"
+
+Probe.readSidecar : Text ->{IO, Exception} Optional Probe.Result
+Probe.readSidecar videoPath =
+  use Text ++
+  jsonPath = FilePath (Probe.cacheRoot ++ videoPath ++ ".json")
+  match 
+    catch do
+      raw = readFileUtf8 jsonPath
+      Decoder.run Probe.Result.fromJson raw
+   with
+    Left _  -> None
+    Right r -> Some r
+
+Probe.runtimeSec : Probe.Result -> Nat
+Probe.runtimeSec r =
+  use Float <
+  d = Probe.Format.duration (Probe.Result.format r)
+  if d < 0.0 then 0
+  else
+    asText = Float.toText d
+    intPart = match Text.indexOf "." asText with
+      Some i -> Text.take i asText
+      None   -> asText
+    Optional.getOrElse 0 (Nat.fromText intPart)
+
+Db.migrate : '{IO, Exception} ()
+Db.migrate =
+  do
+    singleIO Db.config do
+      _ = Db.runDDLList [Db.moviesDdl]
+      _ = Db.runDDLList Db.childDdl
+      _ = Db.runDDLList Db.indexDdl
+      Db.runDDLList
+        [ "ALTER TABLE movies ADD COLUMN IF NOT EXISTS actual_runtime_sec INTEGER"
+        ]
+
+Tmdb.cachePath : Text -> FilePath
+Tmdb.cachePath folderName =
+  use Text ++
+  FilePath (Tmdb.cacheRoot ++ "/" ++ folderName ++ ".json")
+
+Tmdb.writeCacheEntry : Text -> Either Text Tmdb.SearchResponse ->{IO} ()
+Tmdb.writeCacheEntry folderName result =
+  use Tmdb.CachedSearch CachedSearch
+  entry = match result with
+    Right r -> CachedSearch folderName (Some r) None
+    Left e  -> CachedSearch folderName None (Some e)
+  payload = Json.toText (Tmdb.CachedSearch.toJson entry)
+  _ = catch do writeFileUtf8 (Tmdb.cachePath folderName) payload
+  ()
+
+Tmdb.cachedSearch :
+  Text -> Text -> Text -> Nat ->{IO} Either Text Tmdb.SearchResponse
+Tmdb.cachedSearch token folderName title year =
+  fromCache = catch do
+    raw = readFileUtf8 (Tmdb.cachePath folderName)
+    Decoder.run Tmdb.CachedSearch.fromJson raw
+  match fromCache with
+    Right c ->
+      match Tmdb.CachedSearch.response c with
+        Some r -> Right r
+        None   ->
+          match Tmdb.CachedSearch.error c with
+            Some e -> Left e
+            None   -> Left "cached entry has neither response nor error"
+    Left _  ->
+      result = Tmdb.search token title year
+      _ = Tmdb.writeCacheEntry folderName result
+      result
+
+type Tmdb.Result
+  = { tmdbId : Nat,
+      title : Text,
+      originalTitle : Text,
+      releaseDate : Text,
+      popularity : Float,
+      overview : Text }
+
+type Tmdb.SearchResponse
+  = { results : [Tmdb.Result] }
+
+type Tmdb.CachedSearch
+  = { folder : Text,
+      response : Optional Tmdb.SearchResponse,
+      error : Optional Text }
+
+type Tmdb.ParsedRelease
+  = { rawName : Text, title : Text, year : Nat }
+
+type Tmdb.Confidence
+  = High
+  | Low Text
+
+Tmdb.stagingDir : Text
+Tmdb.stagingDir =
+  "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies"
+
+Tmdb.cacheRoot : Text
+Tmdb.cacheRoot = "/home/bismuth/.cache/uniDork/tmdb/search"
+
+Tmdb.qualityTokens : [Text]
+Tmdb.qualityTokens =
+  [ "1080p"
+  , "720p"
+  , "2160p"
+  , "4k"
+  , "480p"
+  , "576p"
+  , "uhd"
+  , "bluray"
+  , "blu-ray"
+  , "bdrip"
+  , "webrip"
+  , "web-dl"
+  , "webdl"
+  , "web"
+  , "hdrip"
+  , "dvdrip"
+  , "hdtv"
+  , "remux"
+  , "cam"
+  , "ts"
+  , "telesync"
+  , "hdcam"
+  , "x264"
+  , "x265"
+  , "hevc"
+  , "avc"
+  , "h264"
+  , "h265"
+  , "av1"
+  , "xvid"
+  , "ddp"
+  , "ddp5"
+  , "dts"
+  , "ac3"
+  , "aac"
+  , "atmos"
+  , "truehd"
+  , "flac"
+  , "eac3"
+  , "8bit"
+  , "10bit"
+  , "12bit"
+  , "hdr"
+  , "hdr10"
+  , "hdr10+"
+  , "dv"
+  , "dolby"
+  , "amzn"
+  , "nf"
+  , "hulu"
+  , "atvp"
+  , "max"
+  , "dsnp"
+  , "mtv"
+  , "pmtp"
+  , "ma"
+  , "internal"
+  , "upscaled"
+  , "proper"
+  , "repack"
+  , "unrated"
+  , "extended"
+  , "theatrical"
+  , "remastered"
+  , "anniversary"
+  , "directors"
+  ]
+
+Tmdb.isQualityToken : Text -> Boolean
+Tmdb.isQualityToken t =
+  lower = Text.toLowercase t
+  List.any (q -> Universal.eq q lower) Tmdb.qualityTokens
+
+Tmdb.tokenAsYear : Text -> Optional Nat
+Tmdb.tokenAsYear t =
+  use Nat <= >=
+  if Universal.eq (Text.size t) 4 then
+    match Nat.fromText t with
+      Some n -> if n >= 1900 && n <= 2030 then Some n else None
+      None   -> None
+  else None
+
+Tmdb.tokenize : Text -> [Text]
+Tmdb.tokenize name =
+  use List flatMap
+  use Nat >
+  use Text split
+  s1 = split ?. name
+  s2 = flatMap (p -> split ?_ p) s1
+  s3 = flatMap (p -> split ?\s p) s2
+  List.filter (p -> Text.size p > 0) s3
+
+Tmdb.nth : Nat -> [a] -> Optional a
+Tmdb.nth i xs = List.head (List.drop i xs)
+
+Tmdb.findYearIndex : [Text] -> Optional Nat
+Tmdb.findYearIndex tokens =
+  use Nat +
+  pairs = Db.withIndex tokens
+  qualifying =
+    List.filterMap
+      (cases
+        (i, t) ->
+          match Tmdb.tokenAsYear t with
+            None   -> None
+            Some _ ->
+              match Tmdb.nth (i + 1) tokens with
+                Some next -> if Tmdb.isQualityToken next then Some i else None
+                None      -> None) pairs
+  List.head qualifying
+
+Tmdb.parseReleaseName : Text -> Optional Tmdb.ParsedRelease
+Tmdb.parseReleaseName name =
+  match Tmdb.findEnclosedYearAny name with
+    Some (titlePrefix, year) ->
+      cleaned = Tmdb.cleanTitle titlePrefix
+      if Universal.eq (Text.size cleaned) 0 then None
+      else Some (Tmdb.ParsedRelease.ParsedRelease name cleaned year)
+    None ->
+      tokens = Tmdb.tokenize name
+      match Tmdb.findYearIndex tokens with
+        None -> None
+        Some i ->
+          match Tmdb.nth i tokens with
+            None -> None
+            Some yt ->
+              match Tmdb.tokenAsYear yt with
+                None -> None
+                Some y ->
+                  titleStr = trim (Text.join " " (List.take i tokens))
+                  if Universal.eq (Text.size titleStr) 0 then None
+                  else Some (Tmdb.ParsedRelease.ParsedRelease name titleStr y)
+
+Tmdb.normalize : Text -> Text
+Tmdb.normalize t =
+  use Nat >
+  use Text drop
+  lower = Text.toLowercase t
+  punct =
+    [ "."
+    , ","
+    , ":"
+    , ";"
+    , "!"
+    , "?"
+    , "'"
+    , "\""
+    , "("
+    , ")"
+    , "["
+    , "]"
+    , "{"
+    , "}"
+    , "-"
+    , "_"
+    , "&"
+    , "/"
+    ]
+  noPunct = List.foldLeft (acc p -> replaceAll p " " acc) lower punct
+  parts = Text.split ?\s noPunct
+  nonEmpty = List.filter (p -> Text.size p > 0) parts
+  joined = Text.join " " nonEmpty
+  if startsWith "the " joined then drop 4 joined
+  else
+    if startsWith "an " joined then drop 3 joined
+    else if startsWith "a " joined then drop 2 joined else joined
+
+Tmdb.releaseYear : Text -> Optional Nat
+Tmdb.releaseYear dateStr =
+  use Nat <
+  if Text.size dateStr < 4 then None
+  else Tmdb.tokenAsYear (Text.take 4 dateStr)
+
+Tmdb.scoreCandidate : Tmdb.ParsedRelease -> Tmdb.Result -> Tmdb.Confidence
+Tmdb.scoreCandidate p r =
+  use Tmdb.Confidence Low
+  use Universal eq
+  q = Tmdb.normalize (Tmdb.ParsedRelease.title p)
+  t = Tmdb.normalize (Tmdb.Result.title r)
+  o = Tmdb.normalize (Tmdb.Result.originalTitle r)
+  titleOk = eq q t || eq q o
+  yearOk = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
+    Some y -> eq y (Tmdb.ParsedRelease.year p)
+    None   -> false
+  if titleOk && yearOk then Tmdb.Confidence.High
+  else
+    if titleOk then Low "year mismatch"
+    else if yearOk then Low "title mismatch" else Low "title and year mismatch"
+
+Tmdb.pickBest :
+  [(Tmdb.Result, Tmdb.Confidence)] -> Optional (Tmdb.Result, Tmdb.Confidence)
+Tmdb.pickBest scored =
+  isHigh = cases
+    (_, Tmdb.Confidence.High) -> true
+    _                         -> false
+  highs = List.filter isHigh scored
+  match highs with
+    []       -> None
+    [single] -> Some single
+    _        -> None
+
+Tmdb.Result.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.Result
+Tmdb.Result.fromJson = do
+  use Decoder optional! text
+  use Optional getOrElse
+  use object at at!
+  tmdbId = at! "id" Decoder.nat
+  title = at! "title" text
+  originalTitle = at! "original_title" text
+  releaseDate = getOrElse "" (optional! (at "release_date" text))
+  popularity = at! "popularity" Decoder.float
+  overview = getOrElse "" (optional! (at "overview" text))
+  Tmdb.Result.Result tmdbId title originalTitle releaseDate popularity overview
+
+Tmdb.SearchResponse.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.SearchResponse
+Tmdb.SearchResponse.fromJson = do
+  results = object.at! "results" (Decoder.array Tmdb.Result.fromJson)
+  Tmdb.SearchResponse.SearchResponse results
+
+Tmdb.CachedSearch.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.CachedSearch
+Tmdb.CachedSearch.fromJson = do
+  use Decoder optional! text
+  use object at
+  folder = object.at! "folder" text
+  response = optional! (at "response" Tmdb.SearchResponse.fromJson)
+  error = optional! (at "error" text)
+  Tmdb.CachedSearch.CachedSearch folder response error
+
+Tmdb.readCache : Text ->{IO, Exception} Optional Tmdb.CachedSearch
+Tmdb.readCache folderName =
+  use Text ++
+  jsonPath = FilePath (Tmdb.cacheRoot ++ "/" ++ folderName ++ ".json")
+  match 
+    catch do
+      raw = readFileUtf8 jsonPath
+      Decoder.run Tmdb.CachedSearch.fromJson raw
+   with
+    Left _  -> None
+    Right s -> Some s
+
+Tmdb.printCandidate : (Tmdb.Result, Tmdb.Confidence) ->{IO, Exception} ()
+Tmdb.printCandidate = cases
+  (r, c) ->
+    use Text join
+    use Tmdb.Confidence High Low
+    flag = match c with
+      High  -> "[HIGH ]"
+      Low _ -> "[low  ]"
+    yearText = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
+      Some y -> Nat.toText y
+      None   -> "????"
+    reason = match c with
+      Low r -> join "" [" (", r, ")"]
+      High  -> ""
+    printLine
+      (join
+        ""
+        [ "    "
+        , flag
+        , " tmdb:"
+        , Nat.toText (Tmdb.Result.tmdbId r)
+        , " \""
+        , Tmdb.Result.title r
+        , "\" ("
+        , yearText
+        , ") pop="
+        , Float.toText (Tmdb.Result.popularity r)
+        , reason
+        ])
+
+Tmdb.reportFolder : Text -> Text ->{IO, Exception} ()
+Tmdb.reportFolder token folderName =
+  use Nat toText
+  use Text join
+  parsed = Tmdb.parseReleaseName folderName
+  _ = printLine (join "" ["FOLDER: ", folderName])
+  match parsed with
+    None ->
+      _ = printLine "  parsed:  FAILED (no year followed by quality token)"
+      _ = printLine "  verdict: SKIP"
+      printLine ""
+    Some p ->
+      _ =
+        printLine
+          (join
+            ""
+            [ "  parsed:  title=\""
+            , Tmdb.ParsedRelease.title p
+            , "\", year="
+            , toText (Tmdb.ParsedRelease.year p)
+            ])
+      result =
+        Tmdb.cachedSearch
+          token
+          folderName
+          (Tmdb.ParsedRelease.title p)
+          (Tmdb.ParsedRelease.year p)
+      match result with
+        Left err ->
+          _ = printLine (join "" ["  error:   ", err])
+          _ = printLine "  verdict: SKIP"
+          printLine ""
+        Right resp ->
+          candidates = Tmdb.SearchResponse.results resp
+          scored = List.map (r -> (r, Tmdb.scoreCandidate p r)) candidates
+          _ =
+            printLine
+              (join "" ["  candidates: ", toText (List.size candidates)])
+          _ = Db.foreach_ Tmdb.printCandidate scored
+          _ =
+            match Tmdb.pickBest scored with
+              Some (r, _) ->
+                printLine
+                  (join
+                    ""
+                    [ "  verdict: HIGH -> tmdb:"
+                    , toText (Tmdb.Result.tmdbId r)
+                    , " \""
+                    , Tmdb.Result.title r
+                    , "\""
+                    ])
+              None ->
+                printLine "  verdict: SKIP (no single high-confidence match)"
+          printLine ""
+
+Tmdb.cleanTitle : Text -> Text
+Tmdb.cleanTitle t =
+  use Nat >
+  s1 = replaceAll "." " " t
+  s2 = replaceAll "_" " " s1
+  parts = Text.split ?\s s2
+  nonEmpty = List.filter (p -> Text.size p > 0) parts
+  trim (Text.join " " nonEmpty)
+
+Tmdb.findEnclosedYear : Text -> Text -> Text -> Optional (Text, Nat)
+Tmdb.findEnclosedYear open close name =
+  go offset =
+    use Nat +
+    use Text drop size take
+    sub = drop offset name
+    match Text.indexOf open sub with
+      None -> None
+      Some openIdx ->
+        absOpen = offset + openIdx
+        afterOpen = absOpen + size open
+        cand = take 4 (drop afterOpen name)
+        closeAt = afterOpen + 4
+        match Tmdb.tokenAsYear cand with
+          Some y ->
+            actualClose = take (size close) (drop closeAt name)
+            if Universal.eq actualClose close then
+              Some (trim (take absOpen name), y)
+            else go (absOpen + 1)
+          None -> go (absOpen + 1)
+  go 0
+
+Tmdb.findEnclosedYearAny : Text -> Optional (Text, Nat)
+Tmdb.findEnclosedYearAny name = match Tmdb.findEnclosedYear "(" ")" name with
+  Some r -> Some r
+  None   -> Tmdb.findEnclosedYear "[" "]" name
+
+Tmdb.tokenPath : Text
+Tmdb.tokenPath = "/home/bismuth/.config/uniDork/tmdb-token"
+
+Tmdb.readToken : '{IO, Exception} Text
+Tmdb.readToken = do trim (readFileUtf8 (FilePath Tmdb.tokenPath))
+
+Tmdb.apiAuthority : Authority
+Tmdb.apiAuthority = Authority None (HostName "api.themoviedb.org") None
+
+Tmdb.searchURI : Text -> Nat -> URI
+Tmdb.searchURI title year =
+  use Path /
+  path = Path.root / "3" / "search" / "movie"
+  q = Query.empty & ("query", title) & ("year", Nat.toText year)
+  URI Scheme.https (Some Tmdb.apiAuthority) path (fromQuery q) Fragment.empty
+
+Tmdb.searchRequest : Text -> Text -> Nat -> HttpRequest
+Tmdb.searchRequest token title year =
+  use HttpRequest addHeader
+  use Text ++
+  HttpRequest.get (Tmdb.searchURI title year)
+    |> addHeader "Authorization" ("Bearer " ++ token)
+    |> addHeader "Accept" "application/json"
+
+Tmdb.search : Text -> Text -> Nat ->{IO} Either Text Tmdb.SearchResponse
+Tmdb.search token title year =
+  req = Tmdb.searchRequest token title year
+  match 
+    catch do
+      Threads.run do
+        Http.run do
+          resp = request req
+          ok = ensureSuccess resp
+          body = bodyText ok
+          Decoder.run Tmdb.SearchResponse.fromJson body
+   with
+    Right v -> Right v
+    Left f  -> Left (Failure.message f)
+
+type Stage.VideoInfo
+  = { codec : Text,
+      width : Nat,
+      height : Nat,
+      bitDepth : Nat,
+      pixFmt : Text,
+      bitRate : Optional Nat }
+
+type Stage.AudioInfo
+  = { codec : Text, channels : Nat, channelLayout : Text }
+
+type Stage.ProbeResult
+  = { videoPath : Text,
+      crc32 : Text,
+      sizeBytes : Nat,
+      durationSec : Float,
+      video : Stage.VideoInfo,
+      audio : Optional Stage.AudioInfo }
+
+Stage.VideoInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.VideoInfo
+Stage.VideoInfo.fromJson = do
+  use Decoder nat text
+  use object at!
+  codec = at! "codec" text
+  width = at! "width" nat
+  height = at! "height" nat
+  bitDepth = at! "bit_depth" nat
+  pixFmt = at! "pix_fmt" text
+  bitRate = Decoder.optional! (object.at "bit_rate" nat)
+  Stage.VideoInfo.VideoInfo codec width height bitDepth pixFmt bitRate
+
+Stage.AudioInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.AudioInfo
+Stage.AudioInfo.fromJson = do
+  use Decoder text
+  use object at!
+  codec = at! "codec" text
+  channels = at! "channels" Decoder.nat
+  channelLayout = at! "channel_layout" text
+  Stage.AudioInfo.AudioInfo codec channels channelLayout
+
+Stage.ProbeResult.fromJson : '{unison_json_1_4_2.Decoder} Stage.ProbeResult
+Stage.ProbeResult.fromJson =
+  do
+    use Decoder text
+    use object at!
+    videoPath = at! "video_path" text
+    crc32 = at! "crc32" text
+    sizeBytes = at! "size_bytes" Decoder.nat
+    durationSec = at! "duration_sec" Decoder.float
+    video = at! "video" Stage.VideoInfo.fromJson
+    audio = Decoder.optional! (object.at "audio" Stage.AudioInfo.fromJson)
+    Stage.ProbeResult.ProbeResult
+      videoPath crc32 sizeBytes durationSec video audio
+
+Stage.cacheRoot : Text
+Stage.cacheRoot = "/home/bismuth/.cache/uniDork/stage"
+
+Stage.sidecarPath : Text -> FilePath
+Stage.sidecarPath folderName =
+  use Text ++
+  FilePath (Stage.cacheRoot ++ "/" ++ folderName ++ ".json")
+
+Stage.readSidecar : Text ->{IO, Exception} Optional Stage.ProbeResult
+Stage.readSidecar folderName = match 
+  catch do
+    raw = readFileUtf8 (Stage.sidecarPath folderName)
+    Decoder.run Stage.ProbeResult.fromJson raw
+ with
+  Left _  -> None
+  Right r -> Some r
+
+Rename.targetRoot : Text
+Rename.targetRoot =
+  "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/testMovies"
+
+Rename.logDir : Text
+Rename.logDir = "/home/bismuth/.cache/uniDork/rename-log"
+
+Rename.gigabytes : Nat -> Text
+Rename.gigabytes bytes =
+  use Nat % * + / >= toText
+  use Text ++
+  oneGb = 1073741824
+  tenths = (bytes * 10 + oneGb / 2) / oneGb
+  whole = tenths / 10
+  if whole >= 10 then
+    rounded = (bytes + oneGb / 2) / oneGb
+    toText rounded ++ " GB"
+  else
+    f = tenths % 10
+    toText whole ++ "." ++ toText f ++ " GB"
+
+Rename.truncSec : Float -> Nat
+Rename.truncSec d =
+  use Float <
+  if d < 0.0 then 0
+  else
+    asText = Float.toText d
+    intPart = match Text.indexOf "." asText with
+      Some i -> Text.take i asText
+      None   -> asText
+    Optional.getOrElse 0 (Nat.fromText intPart)
+
+Rename.minutes : Float -> Nat
+Rename.minutes d =
+  use Nat /
+  Rename.truncSec d / 60
+
+Rename.effectiveBitRate : Optional Nat -> Nat -> Float -> Nat
+Rename.effectiveBitRate br sizeBytes durationSec = match br with
+  Some b -> b
+  None   ->
+    use Nat * /
+    secs = Rename.truncSec durationSec
+    if Universal.eq secs 0 then 0 else sizeBytes * 8 / secs
+
+Rename.mbps : Nat -> Text
+Rename.mbps bps =
+  use Nat % * + / >= toText
+  use Text ++
+  oneMbps = 1000000
+  tenths = (bps * 10 + oneMbps / 2) / oneMbps
+  whole = tenths / 10
+  if whole >= 10 then
+    rounded = (bps + oneMbps / 2) / oneMbps
+    toText rounded ++ " Mbps"
+  else
+    f = tenths % 10
+    toText whole ++ "." ++ toText f ++ " Mbps"
+
+Rename.vfTag : Nat -> Nat -> Text
+Rename.vfTag width height =
+  use Nat >=
+  if width >= 3000 || height >= 1700 then "2160p"
+  else
+    if width >= 2300 || height >= 1300 then "1440p"
+    else
+      if width >= 1800 || height >= 800 then "1080p"
+      else
+        if width >= 1100 || height >= 700 then "720p"
+        else
+          if height >= 540 then "576p"
+          else if height >= 380 then "480p" else "SD"
+
+Rename.vcTag : Text -> Text
+Rename.vcTag raw =
+  use Universal eq
+  lower = Text.toLowercase raw
+  if eq lower "hevc" then "x265"
+  else
+    if eq lower "h265" then "x265"
+    else
+      if eq lower "h264" then "x264"
+      else
+        if eq lower "avc" then "x264"
+        else
+          if eq lower "av1" then "av1"
+          else
+            if eq lower "vp9" then "vp9"
+            else if eq lower "mpeg4" then "xvid" else lower
+
+Rename.resolutionStr : Nat -> Nat -> Text
+Rename.resolutionStr w h =
+  use Nat toText
+  use Text ++
+  toText w ++ "x" ++ toText h
+
+Rename.channelsTag : Nat -> Text
+Rename.channelsTag ch =
+  use Universal eq
+  if eq ch 1 then "1.0"
+  else
+    if eq ch 2 then "2.0"
+    else if eq ch 6 then "5.1" else if eq ch 8 then "7.1" else Nat.toText ch
+
+Rename.acTag : Text -> Text
+Rename.acTag raw =
+  use Universal eq
+  upper = Text.toUppercase raw
+  if eq upper "AC3" then "AC3"
+  else
+    if eq upper "EAC3" then "EAC3"
+    else
+      if eq upper "AAC" then "AAC"
+      else
+        if eq upper "DTS" then "DTS"
+        else
+          if eq upper "TRUEHD" then "TrueHD"
+          else
+            if eq upper "FLAC" then "FLAC"
+            else
+              if eq upper "OPUS" then "Opus"
+              else if eq upper "MP3" then "MP3" else upper
+
+Rename.fileExt : Text -> Text
+Rename.fileExt path =
+  lower = Text.toLowercase path
+  if endsWith ".mkv" lower then ".mkv"
+  else
+    if endsWith ".mp4" lower then ".mp4"
+    else
+      if endsWith ".avi" lower then ".avi"
+      else
+        if endsWith ".mov" lower then ".mov"
+        else
+          if endsWith ".wmv" lower then ".wmv"
+          else if endsWith ".flv" lower then ".flv" else ""
+
+Rename.escapeXml : Text -> Text
+Rename.escapeXml t =
+  t |> replaceAll "&" "&amp;" |> replaceAll "<" "&lt;" |> replaceAll ">" "&gt;"
+
+type Rename.Outcome
+  = NoVideo Text
+  | NoProbe Text
+  | Renamed Text Text
+  | NoMatch Text Text
+  | Conflict Text Text
+  | RenameError Text Text
+
+Rename.Outcome.toJson : Rename.Outcome -> Json
+Rename.Outcome.toJson = cases
+  Rename.Outcome.Renamed src tgt ->
+    Json.object
+      [ ("outcome", Json.text "renamed")
+      , ("source", Json.text src)
+      , ("target", Json.text tgt)
+      ]
+  Rename.Outcome.NoVideo src ->
+    Json.object [("outcome", Json.text "no_video"), ("source", Json.text src)]
+  Rename.Outcome.NoMatch src reason ->
+    Json.object
+      [ ("outcome", Json.text "no_match")
+      , ("source", Json.text src)
+      , ("reason", Json.text reason)
+      ]
+  Rename.Outcome.NoProbe src ->
+    Json.object [("outcome", Json.text "no_probe"), ("source", Json.text src)]
+  Rename.Outcome.Conflict src existing ->
+    Json.object
+      [ ("outcome", Json.text "conflict")
+      , ("source", Json.text src)
+      , ("existing", Json.text existing)
+      ]
+  Rename.Outcome.RenameError src msg ->
+    Json.object
+      [ ("outcome", Json.text "error")
+      , ("source", Json.text src)
+      , ("message", Json.text msg)
+      ]
+
+Rename.writeOutcome : Text -> Rename.Outcome ->{IO, Exception} ()
+Rename.writeOutcome folderName o =
+  use Text ++
+  path = FilePath (Rename.logDir ++ "/" ++ folderName ++ ".json")
+  writeFileUtf8 path (Json.toText (Rename.Outcome.toJson o))
+
+Rename.runOne : Text -> FilePath ->{IO, Exception} ()
+Rename.runOne token folder =
+  use Text ++
+  folderName = filePathBasename folder
+  _ = printLine ("processing: " ++ folderName)
+  outcome = Rename.processFolder token folder
+  _ =
+    match outcome with
+      Rename.Outcome.Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
+      Rename.Outcome.NoVideo _ ->
+        printLine "  skip: no video (already renamed?)"
+      Rename.Outcome.NoMatch _ reason -> printLine ("  skip: " ++ reason)
+      Rename.Outcome.NoProbe _ ->
+        printLine "  skip: no probe sidecar (run unidork-stage-probe)"
+      Rename.Outcome.Conflict _ t -> printLine ("  skip: target exists " ++ t)
+      Rename.Outcome.RenameError _ msg -> printLine ("  ERROR: " ++ msg)
+  Rename.writeOutcome folderName outcome
+
+test> Rename.gigabytes.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Rename.gigabytes 0) "0.0 GB"
+    , eq (Rename.gigabytes 1073741824) "1.0 GB"
+    , eq (Rename.gigabytes 5368709120) "5.0 GB"
+    , eq (Rename.gigabytes 8589934592) "8.0 GB"
+    , eq (Rename.gigabytes 12884901888) "12 GB"
+    , eq (Rename.gigabytes 25769803776) "24 GB"
+    , eq (Rename.gigabytes 429496729) "0.4 GB"
+    ]
+
+test> Rename.mbps.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Rename.mbps 0) "0.0 Mbps"
+    , eq (Rename.mbps 1500000) "1.5 Mbps"
+    , eq (Rename.mbps 5800000) "5.8 Mbps"
+    , eq (Rename.mbps 11000000) "11 Mbps"
+    , eq (Rename.mbps 31000000) "31 Mbps"
+    ]
+
+test> Rename.vfTag.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Rename.vfTag 3840 2160) "2160p"
+    , eq (Rename.vfTag 3840 2080) "2160p"
+    , eq (Rename.vfTag 1920 1080) "1080p"
+    , eq (Rename.vfTag 1920 800) "1080p"
+    , eq (Rename.vfTag 1920 1040) "1080p"
+    , eq (Rename.vfTag 1280 720) "720p"
+    , eq (Rename.vfTag 720 576) "576p"
+    , eq (Rename.vfTag 720 404) "480p"
+    , eq (Rename.vfTag 640 360) "SD"
+    ]
+
+test> Rename.channelsTag.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Rename.channelsTag 2) "2.0"
+    , eq (Rename.channelsTag 6) "5.1"
+    , eq (Rename.channelsTag 8) "7.1"
+    , eq (Rename.channelsTag 3) "3"
+    ]
+
+Rename.basenameNoExt : Text -> Text
+Rename.basenameNoExt filename =
+  use List reverse
+  parts = Text.split ?. filename
+  match reverse parts with
+    _ +: []   -> filename
+    _ +: rest -> Text.join "." (reverse rest)
+    []        -> filename
+
+Rename.looseVideos : FilePath ->{IO, Exception} [FilePath]
+Rename.looseVideos dir =
+  entries = directoryContents.texts dir
+  videoNames = List.filter isVideo entries
+  step acc n =
+    use List :+
+    fp = pathJoin dir n
+    if isDirectory fp then acc else acc :+ fp
+  List.foldLeft step [] videoNames
+
+Rename.runOneLoose : Text -> FilePath ->{IO, Exception} ()
+Rename.runOneLoose token videoFile =
+  use Text ++
+  filename = filePathBasename videoFile
+  name = Rename.basenameNoExt filename
+  _ = printLine ("processing (loose): " ++ filename)
+  outcome = Rename.processLooseVideo token videoFile
+  _ =
+    match outcome with
+      Rename.Outcome.Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
+      Rename.Outcome.NoVideo _ -> printLine "  skip: no video"
+      Rename.Outcome.NoMatch _ reason -> printLine ("  skip: " ++ reason)
+      Rename.Outcome.NoProbe _ ->
+        printLine "  skip: no probe sidecar (run unidork-stage-probe)"
+      Rename.Outcome.Conflict _ t -> printLine ("  skip: target exists " ++ t)
+      Rename.Outcome.RenameError _ msg -> printLine ("  ERROR: " ++ msg)
+  Rename.writeOutcome name outcome
+
+uniDork.rename : '{IO, Exception} ()
+uniDork.rename =
+  do
+    use List size
+    use Nat toText
+    use Text ++
+    use Universal eq
+    staging = FilePath Tmdb.stagingDir
+    if isDirectory staging then
+      token = Tmdb.readToken()
+      entries = directoryContents.texts staging
+      folderNames =
+        List.filter
+          (n ->
+            (if eq n "." then false
+            else if eq n ".." then false else isDirectory (pathJoin staging n)))
+          entries
+      folders = List.map (n -> pathJoin staging n) folderNames
+      loose = Rename.looseVideos staging
+      _ =
+        printLine
+          ("scanning "
+            ++ toText (size folders)
+            ++ " folder(s) and "
+            ++ toText (size loose)
+            ++ " loose video(s) under "
+            ++ Tmdb.stagingDir)
+      _ = printLine ""
+      _ = Db.foreach_ (Rename.runOne token) folders
+      Db.foreach_ (Rename.runOneLoose token) loose
+    else printLine ("staging not found: " ++ Tmdb.stagingDir)
+
+uniDork.identify : '{IO, Exception} ()
+uniDork.identify =
+  do
+    use Text join
+    use Universal eq
+    staging = FilePath Tmdb.stagingDir
+    if isDirectory staging then
+      token = Tmdb.readToken()
+      entries = directoryContents.texts staging
+      folderNames =
+        List.filter
+          (n ->
+            (if eq n "." then false
+            else if eq n ".." then false else isDirectory (pathJoin staging n)))
+          entries
+      _ =
+        printLine
+          (join
+            ""
+            [ "scanning "
+            , Nat.toText (List.size folderNames)
+            , " folder(s) under "
+            , Tmdb.stagingDir
+            ])
+      _ = printLine ""
+      Db.foreach_ (Tmdb.reportFolder token) folderNames
+    else printLine (join "" ["staging not found: ", Tmdb.stagingDir])
+
+uniDork.batchSize : Nat
+uniDork.batchSize = 50
+
+List.chunk : Nat -> [a] -> [[a]]
+List.chunk n xs =
+  use List +: size
+  use Nat <=
+  if Universal.eq (size xs) 0 then []
+  else
+    if size xs <= n then [xs]
+    else List.take n xs +: List.chunk n (List.drop n xs)
+
+uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
+uniDork.collectFolders roots =
+  addIfDir : FilePath -> [FilePath] -> Text ->{IO, Exception} [FilePath]
+  addIfDir root acc name =
+    use List +:
+    fp = pathJoin root name
+    if isDirectory fp then fp +: acc else acc
+  perRoot root =
+    basenames = directoryContents.texts root
+    _ =
+      printLine
+        (Text.join
+          ""
+          [ "scanning: "
+          , filePathText root
+          , " ("
+          , Nat.toText (List.size basenames)
+          , " entries)"
+          ])
+    List.reverse (List.foldLeft (addIfDir root) [] basenames)
+  List.flatMap perRoot roots
+
+uniDork.processOne
+  pcUpsert
+  pcVid
+  pcDVid
+  pcAud
+  pcDAud
+  pcSub
+  pcDSub
+  pcAct
+  pcDAct
+  pcGen
+  pcDGen
+  pcTag
+  pcDTag
+  pcCou
+  pcDCou
+  pcStu
+  pcDStu
+  pcDir
+  pcDDir
+  pcCre
+  pcDCre
+  folder =
+  match Nfo.processFolder folder with
+    Left _ ->
+      _ = printLine (Text.join "" ["  no nfo: ", filePathText folder])
+      ()
+    Right m ->
+      actualRuntime = match Movie.videoFilePath m with
+        None         -> None
+        Some vidPath ->
+          match Probe.readSidecar vidPath with
+            None   -> None
+            Some r -> Some (Probe.runtimeSec r)
+      Db.upsertWith
+        pcUpsert
+        pcVid
+        pcDVid
+        pcAud
+        pcDAud
+        pcSub
+        pcDSub
+        pcAct
+        pcDAct
+        pcGen
+        pcDGen
+        pcTag
+        pcDTag
+        pcCou
+        pcDCou
+        pcStu
+        pcDStu
+        pcDir
+        pcDDir
+        pcCre
+        pcDCre
+        actualRuntime
+        m
+
+uniDork.processBatch : [FilePath] ->{IO, Exception} ()
+uniDork.processBatch folders = 
+  singleIO Db.config do
+    use PreparedCommand close
+    pcUpsert = prepareCommand Db.upsertMovieSql
+    pcVid = prepareCommand Db.insertVideoSql
+    pcDVid = prepareCommand (Db.deleteChildSql "movie_video_streams")
+    pcAud = prepareCommand Db.insertAudioSql
+    pcDAud = prepareCommand (Db.deleteChildSql "movie_audio_tracks")
+    pcSub = prepareCommand Db.insertSubSql
+    pcDSub = prepareCommand (Db.deleteChildSql "movie_subtitles")
+    pcAct = prepareCommand Db.insertActorSql
+    pcDAct = prepareCommand (Db.deleteChildSql "movie_actors")
+    pcGen = prepareCommand Db.insertGenreSql
+    pcDGen = prepareCommand (Db.deleteChildSql "movie_genres")
+    pcTag = prepareCommand Db.insertTagSql
+    pcDTag = prepareCommand (Db.deleteChildSql "movie_tags")
+    pcCou = prepareCommand Db.insertCountrySql
+    pcDCou = prepareCommand (Db.deleteChildSql "movie_countries")
+    pcStu = prepareCommand Db.insertStudioSql
+    pcDStu = prepareCommand (Db.deleteChildSql "movie_studios")
+    pcDir = prepareCommand Db.insertDirectorSql
+    pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
+    pcCre = prepareCommand Db.insertCreditSql
+    pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
+    _ =
+      Db.foreach_
+        (uniDork.processOne
+          pcUpsert
+          pcVid
+          pcDVid
+          pcAud
+          pcDAud
+          pcSub
+          pcDSub
+          pcAct
+          pcDAct
+          pcGen
+          pcDGen
+          pcTag
+          pcDTag
+          pcCou
+          pcDCou
+          pcStu
+          pcDStu
+          pcDir
+          pcDDir
+          pcCre
+          pcDCre)
+        folders
+    _ = close pcUpsert
+    _ = close pcVid
+    _ = close pcDVid
+    _ = close pcAud
+    _ = close pcDAud
+    _ = close pcSub
+    _ = close pcDSub
+    _ = close pcAct
+    _ = close pcDAct
+    _ = close pcGen
+    _ = close pcDGen
+    _ = close pcTag
+    _ = close pcDTag
+    _ = close pcCou
+    _ = close pcDCou
+    _ = close pcStu
+    _ = close pcDStu
+    _ = close pcDir
+    _ = close pcDDir
+    _ = close pcCre
+    close pcDCre
+
+uniDork.runBatchSafe : Nat -> Nat -> [FilePath] ->{IO, Exception} ()
+uniDork.runBatchSafe i n batch =
+  use Nat toText
+  use Text join
+  _ =
+    printLine
+      (join
+        ""
+        [ "batch "
+        , toText i
+        , "/"
+        , toText n
+        , " ("
+        , toText (List.size batch)
+        , " folders)"
+        ])
+  match catch do uniDork.processBatch batch with
+    Right _ -> ()
+    Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
+
+uniDork.batchedMain : Text ->{IO, Exception} ()
+uniDork.batchedMain configPath =
+  use List size
+  use Nat toText
+  use Text join
+  configText = readFileUtf8 (FilePath configPath)
+  dirs = List.filterMap parseConfigLine (lines configText)
+  _ = Db.createSchema()
+  _ = printLine "collecting folders..."
+  folders = uniDork.collectFolders dirs
+  total = size folders
+  _ = printLine (join "" ["found ", toText total, " folders to process"])
+  batches = List.chunk uniDork.batchSize folders
+  nBatches = size batches
+  _ =
+    printLine
+      (join
+        ""
+        [ "processing in "
+        , toText nBatches
+        , " batches of (up to) "
+        , toText uniDork.batchSize
+        ])
+  step i batch =
+    use Nat +
+    _ = uniDork.runBatchSafe i nBatches batch
+    i + 1
+  _ = List.foldLeft step 1 batches
+  printLine "done"
+
+uniDork.batchedRun : '{IO, Exception} ()
+uniDork.batchedRun = do uniDork.batchedMain "./uniDork.conf"
+
+Nfo.tryReadFolder : FilePath ->{IO, Exception} Optional Movie
+Nfo.tryReadFolder folder =
+  files = directoryContents.texts folder
+  match findFirstNfo files with
+    None         -> None
+    Some nfoName ->
+      nfoPath = pathJoin folder nfoName
+      match catch do readFileUtf8 nfoPath with
+        Left _    -> None
+        Right xml ->
+          match Nfo.parse xml with
+            Left _  -> None
+            Right m -> Some m
+
+Nfo.extractTmdbId : Movie -> Optional Nat
+Nfo.extractTmdbId m = match MovieId.tmdb (Movie.id m) with
+  None   -> None
+  Some s -> Nat.fromText (trim s)
+
+Nfo.extractImdbId : Movie -> Optional Text
+Nfo.extractImdbId m = MovieId.imdb (Movie.id m)
+
+Nfo.extractTitle : Movie -> Optional Text
+Nfo.extractTitle m =
+  t = Title.display (Movie.title m)
+  if Universal.eq (Text.size t) 0 then None else Some t
+
+Nfo.extractYear : Movie -> Optional Nat
+Nfo.extractYear m = Scoring.year (Movie.scoring m)
+
+Rename.deriveTitleYear : Optional Movie -> Text -> Optional (Text, Nat)
+Rename.deriveTitleYear maybeNfo folderName =
+  fromNfo = match maybeNfo with
+    None   -> None
+    Some m ->
+      match (Nfo.extractTitle m, Nfo.extractYear m) with
+        (Some t, Some y) -> Some (t, y)
+        _                -> None
+  match fromNfo with
+    Some r -> Some r
+    None   ->
+      match Tmdb.parseReleaseName folderName with
+        None   -> None
+        Some p -> Some (Tmdb.ParsedRelease.title p, Tmdb.ParsedRelease.year p)
+
+Rename.checkAgreement : Optional Movie -> Text ->{IO, Exception} ()
+Rename.checkAgreement maybeNfo folderName =
+  match maybeNfo with
+    None -> ()
+    Some m ->
+      match Tmdb.parseReleaseName folderName with
+        None -> ()
+        Some p ->
+          match (Nfo.extractTitle m, Nfo.extractYear m) with
+            (Some nfoTitle, Some nfoYear) ->
+              use Nat toText
+              use Universal eq
+              regexTitle = Tmdb.ParsedRelease.title p
+              regexYear = Tmdb.ParsedRelease.year p
+              sameTitle =
+                eq (Tmdb.normalize nfoTitle) (Tmdb.normalize regexTitle)
+              sameYear = eq nfoYear regexYear
+              if sameTitle && sameYear then ()
+              else
+                printLine
+                  (Text.join
+                    ""
+                    [ "  DISAGREE: nfo=\""
+                    , nfoTitle
+                    , "\" ("
+                    , toText nfoYear
+                    , ") vs regex=\""
+                    , regexTitle
+                    , "\" ("
+                    , toText regexYear
+                    , ")"
+                    ])
+            _ -> ()
+
+Rename.executeMove :
+  Text -> FilePath -> Nat -> Stage.ProbeResult ->{IO, Exception} Rename.Outcome
+Rename.executeMove token sourceFolder tmdbId pr =
+  use Rename.Outcome RenameError
+  use Text ++
+  sourceText = filePathText sourceFolder
+  match cachedDetails token tmdbId with
+    Left err -> RenameError sourceText (Text.join "" ["details fetch: ", err])
+    Right d ->
+      sourceVideo = FilePath (Stage.ProbeResult.videoPath pr)
+      videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
+      base = fileBaseName d pr
+      targetFolderText = Rename.targetRoot ++ "/" ++ folderName d pr
+      targetFolder = FilePath targetFolderText
+      targetVideo = pathJoin targetFolder (base ++ videoExt)
+      targetNfo = pathJoin targetFolder (base ++ ".nfo")
+      if isDirectory targetFolder then
+        Rename.Outcome.Conflict sourceText targetFolderText
+      else
+        match 
+          catch do
+            _ = createDirectory targetFolder
+            _ = writeFileUtf8 targetNfo (buildNfo d pr)
+            renameFile sourceVideo targetVideo
+         with
+          Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
+          Left f  -> RenameError sourceText (Failure.message f)
+
+Rename.processFolder : Text -> FilePath ->{IO, Exception} Rename.Outcome
+Rename.processFolder token folder =
+  use Rename.Outcome NoMatch NoProbe
+  use Text ++
+  folderName = filePathBasename folder
+  folderText = filePathText folder
+  files = directoryContents.texts folder
+  match findFirstVideo files with
+    None -> Rename.Outcome.NoVideo folderText
+    Some _ ->
+      maybeNfo = Nfo.tryReadFolder folder
+      _ = match maybeNfo with
+        Some _ -> printLine "  found NFO in folder"
+        None   -> ()
+      _ = Rename.checkAgreement maybeNfo folderName
+      directId = match maybeNfo with
+        Some m -> Nfo.extractTmdbId m
+        None   -> None
+      match directId with
+        Some tmdbId ->
+          _ = printLine ("  using TMDB ID from NFO: " ++ Nat.toText tmdbId)
+          match Stage.readSidecar folderName with
+            None    -> NoProbe folderText
+            Some pr -> Rename.executeMove token folder tmdbId pr
+        None ->
+          match Rename.deriveTitleYear maybeNfo folderName with
+            None -> NoMatch folderText "no title/year from NFO or folder name"
+            Some (title, year) ->
+              searchResult = Tmdb.cachedSearch token folderName title year
+              match searchResult with
+                Left err -> NoMatch folderText (Text.join "" ["search: ", err])
+                Right resp ->
+                  candidates = Tmdb.SearchResponse.results resp
+                  pseudoParse =
+                    Tmdb.ParsedRelease.ParsedRelease folderName title year
+                  scored =
+                    List.map
+                      (r -> (r, Tmdb.scoreCandidate pseudoParse r)) candidates
+                  match Tmdb.pickBest scored with
+                    None ->
+                      NoMatch folderText "no single high-confidence match"
+                    Some (r, _) ->
+                      match Stage.readSidecar folderName with
+                        None -> NoProbe folderText
+                        Some pr ->
+                          Rename.executeMove
+                            token folder (Tmdb.Result.tmdbId r) pr
+
+Rename.processLooseVideo : Text -> FilePath ->{IO, Exception} Rename.Outcome
+Rename.processLooseVideo token videoFile =
+  use Rename.Outcome NoMatch
+  filename = filePathBasename videoFile
+  name = Rename.basenameNoExt filename
+  sourceText = filePathText videoFile
+  match Tmdb.parseReleaseName name with
+    None -> NoMatch sourceText "parse failed (no year + quality token)"
+    Some p ->
+      searchResult =
+        Tmdb.cachedSearch
+          token name (Tmdb.ParsedRelease.title p) (Tmdb.ParsedRelease.year p)
+      match searchResult with
+        Left err -> NoMatch sourceText (Text.join "" ["search: ", err])
+        Right resp ->
+          candidates = Tmdb.SearchResponse.results resp
+          scored = List.map (r -> (r, Tmdb.scoreCandidate p r)) candidates
+          match Tmdb.pickBest scored with
+            None -> NoMatch sourceText "no single high-confidence match"
+            Some (r, _) ->
+              match Stage.readSidecar name with
+                None -> Rename.Outcome.NoProbe sourceText
+                Some pr ->
+                  Rename.executeMove token videoFile (Tmdb.Result.tmdbId r) pr
+
+-- The definitions below no longer typecheck with the changes above.
+-- Please fix the errors and try `update` again.
+
+Rename.fileBaseName : MovieDetails -> ProbeResult -> Text
+Rename.fileBaseName d pr =
+  use Text ++
+  vid = ProbeResult.video pr
+  ny = titleYear d
+  audioPart =
+    match audio pr with
+      None -> "noaudio-0"
+      Some a ->
+        acTag (AudioInfo.codec a) ++ "-" ++ channelsTag (AudioInfo.channels a)
+  bracketed =
+    vcTag (VideoInfo.codec vid)
+      ++ "_"
+      ++ Nat.toText (VideoInfo.bitDepth vid)
+      ++ "b_"
+      ++ resolutionStr (VideoInfo.width vid) (VideoInfo.height vid)
+      ++ "_"
+      ++ mbps (Rename.effectiveBitRate
+                 (VideoInfo.bitRate vid)
+                 (ProbeResult.sizeBytes pr)
+                 (ProbeResult.durationSec pr))
+      ++ "_"
+      ++ audioPart
+  ny ++ " [" ++ bracketed ++ "] ~" ++ crc32 pr
+
+Rename.folderName : MovieDetails -> ProbeResult -> Text
+Rename.folderName d pr =
+  use Nat toText
+  use Text ++
+  vid = ProbeResult.video pr
+  ny = titleYear d
+  parts =
+    gigabytes (ProbeResult.sizeBytes pr)
+      ++ "."
+      ++ vfTag (VideoInfo.width vid) (VideoInfo.height vid)
+      ++ "."
+      ++ vcTag (VideoInfo.codec vid)
+      ++ "."
+      ++ toText (VideoInfo.bitDepth vid)
+      ++ "b."
+      ++ toText (Rename.minutes (durationSec pr))
+      ++ "min"
+  ny ++ " [" ++ parts ++ "] ~" ++ crc32 pr
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
 -- ====================================================================
 -- uniDork: scan folders of Kodi-style NFO files and import into PostgreSQL.
 --
@@ -1807,39 +4383,86 @@ Rename.logDir = "/home/bismuth/.cache/uniDork/rename-log"
 --   {ac}=AC3|AAC|..., {channels}=5.1|7.1|2.0|...
 -- ============================================================
 
--- Bytes -> "X.Y" gigabytes, 1 decimal, integer-only.
+-- Bytes -> filebot-style size string.
+--   < 10 GB → "X.Y GB" (one decimal, rounded)
+--   ≥ 10 GB → "XX GB"  (integer, rounded)
 Rename.gigabytes : Nat -> Text
 Rename.gigabytes bytes =
   use Text ++
-  use Nat *
-  use Nat /
-  tenths = bytes * 10 / 1073741824
-  whole = tenths / 10
-  frac = Nat.mod tenths 10
-  Nat.toText whole ++ "." ++ Nat.toText frac
-
--- Truncate Float seconds to Nat minutes.
-Rename.minutes : Float -> Nat
-Rename.minutes durationSec =
-  use Nat /
-  if Float.lt durationSec 0.0 then 0
+  use Nat * / + >=
+  oneGb = 1073741824
+  tenths = (bytes * 10 + oneGb / 2) / oneGb
+  whole  = tenths / 10
+  if whole >= 10 then
+    rounded = (bytes + oneGb / 2) / oneGb
+    Nat.toText rounded ++ " GB"
   else
-    asText = Float.toText durationSec
+    f = Nat.mod tenths 10
+    Nat.toText whole ++ "." ++ Nat.toText f ++ " GB"
+
+-- Truncate non-negative Float seconds to Nat. Negative or NaN → 0.
+Rename.truncSec : Float -> Nat
+Rename.truncSec d =
+  if Float.lt d 0.0 then 0
+  else
+    asText = Float.toText d
     intPart = match Text.indexOf "." asText with
       Some i -> Text.take i asText
       None   -> asText
-    sec = Optional.getOrElse 0 (Nat.fromText intPart)
-    sec / 60
+    Optional.getOrElse 0 (Nat.fromText intPart)
 
--- Vertical-resolution tag from height.
-Rename.vfTag : Nat -> Text
-Rename.vfTag height =
-  if Universal.eq height 2160 then "2160p"
-  else if Universal.eq height 1440 then "1440p"
-  else if Universal.eq height 1080 then "1080p"
-  else if Universal.eq height 720 then "720p"
-  else if Universal.eq height 576 then "576p"
-  else if Universal.eq height 480 then "480p"
+-- Minutes from duration seconds (truncating).
+Rename.minutes : Float -> Nat
+Rename.minutes d =
+  use Nat /
+  Rename.truncSec d / 60
+
+-- Bits/sec. Prefer ffprobe's bit_rate. Otherwise size * 8 / duration.
+-- Returns 0 if duration is 0 (avoids divide-by-zero).
+Rename.effectiveBitRate : Optional Nat -> Nat -> Float -> Nat
+Rename.effectiveBitRate br sizeBytes durationSec =
+  match br with
+    Some b -> b
+    None ->
+      use Nat * /
+      secs = Rename.truncSec durationSec
+      if Universal.eq secs 0 then 0
+      else (sizeBytes * 8) / secs
+
+-- Bits/sec -> filebot-style Mbps string. Same shape as gigabytes:
+--   < 10 Mbps → "X.Y Mbps"
+--   ≥ 10 Mbps → "XX Mbps"
+-- Uses decimal Mbps (10^6) — standard for bit rates.
+Rename.mbps : Nat -> Text
+Rename.mbps bps =
+  use Text ++
+  use Nat * / + >=
+  oneMbps = 1000000
+  tenths = (bps * 10 + oneMbps / 2) / oneMbps
+  whole  = tenths / 10
+  if whole >= 10 then
+    rounded = (bps + oneMbps / 2) / oneMbps
+    Nat.toText rounded ++ " Mbps"
+  else
+    f = Nat.mod tenths 10
+    Nat.toText whole ++ "." ++ Nat.toText f ++ " Mbps"
+
+-- Resolution tag from width and height.
+--
+-- Real-world ffprobe heights vary with aspect ratio (a widescreen 1080p
+-- source at 1920 wide is commonly 800, 804, or 1040, almost never
+-- exactly 1080). Height alone is not enough. Width is the stable signal
+-- for the source resolution, so we accept either a width threshold or a
+-- height threshold for each bucket. This matches filebot's {vf}.
+Rename.vfTag : Nat -> Nat -> Text
+Rename.vfTag width height =
+  use Nat >=
+  if (width >= 3000) || (height >= 1700) then "2160p"
+  else if (width >= 2300) || (height >= 1300) then "1440p"
+  else if (width >= 1800) || (height >=  800) then "1080p"
+  else if (width >= 1100) || (height >=  700) then "720p"
+  else if                    height >=  540   then "576p"
+  else if                    height >=  380   then "480p"
   else "SD"
 
 -- Video codec mapping to filebot's lowercase short names.
@@ -1860,17 +4483,17 @@ Rename.resolutionStr w h =
   use Text ++
   Nat.toText w ++ "x" ++ Nat.toText h
 
--- bit_rate (bits/sec) -> "X.Y" Mbps. None -> "0.0".
-Rename.mbps : Optional Nat -> Text
-Rename.mbps = cases
-  None -> "0.0"
-  Some br ->
-    use Text ++
-    use Nat /
-    tenths = br / 100000
-    whole = tenths / 10
-    frac = Nat.mod tenths 10
-    Nat.toText whole ++ "." ++ Nat.toText frac
+-- -- bit_rate (bits/sec) -> "X.Y" Mbps. None -> "0.0".
+-- Rename.mbps : Optional Nat -> Text
+-- Rename.mbps = cases
+--   None -> "0.0"
+--   Some br ->
+--     use Text ++
+--     use Nat /
+--     tenths = br / 100000
+--     whole = tenths / 10
+--     frac = Nat.mod tenths 10
+--     Nat.toText whole ++ "." ++ Nat.toText frac
 
 -- Audio channel count -> layout label.
 Rename.channelsTag : Nat -> Text
@@ -2001,30 +4624,33 @@ Rename.runOne token folder =
 
 test> Rename.gigabytes.test =
   List.flatMap check
-    [ Universal.eq (Rename.gigabytes 1073741824) "1.0"
-    , Universal.eq (Rename.gigabytes 8589934592) "8.0"
-    , Universal.eq (Rename.gigabytes 5368709120) "5.0"
-    , Universal.eq (Rename.gigabytes 0) "0.0" ]
-
-test> Rename.vfTag.test =
-  List.flatMap check
-    [ Universal.eq (Rename.vfTag 2160) "2160p"
-    , Universal.eq (Rename.vfTag 1080) "1080p"
-    , Universal.eq (Rename.vfTag 720) "720p"
-    , Universal.eq (Rename.vfTag 999) "SD" ]
-
-test> Rename.vcTag.test =
-  List.flatMap check
-    [ Universal.eq (Rename.vcTag "hevc") "x265"
-    , Universal.eq (Rename.vcTag "HEVC") "x265"
-    , Universal.eq (Rename.vcTag "h264") "x264"
-    , Universal.eq (Rename.vcTag "av1") "av1" ]
+    [ Universal.eq (Rename.gigabytes           0) "0.0 GB"
+    , Universal.eq (Rename.gigabytes  1073741824) "1.0 GB"
+    , Universal.eq (Rename.gigabytes  5368709120) "5.0 GB"
+    , Universal.eq (Rename.gigabytes  8589934592) "8.0 GB"
+    , Universal.eq (Rename.gigabytes 12884901888) "12 GB"
+    , Universal.eq (Rename.gigabytes 25769803776) "24 GB"
+    , Universal.eq (Rename.gigabytes   429496729) "0.4 GB" ]
 
 test> Rename.mbps.test =
   List.flatMap check
-    [ Universal.eq (Rename.mbps None) "0.0"
-    , Universal.eq (Rename.mbps (Some 12500000)) "12.5"
-    , Universal.eq (Rename.mbps (Some 1500000)) "1.5" ]
+    [ Universal.eq (Rename.mbps        0) "0.0 Mbps"
+    , Universal.eq (Rename.mbps  1500000) "1.5 Mbps"
+    , Universal.eq (Rename.mbps  5800000) "5.8 Mbps"
+    , Universal.eq (Rename.mbps 11000000) "11 Mbps"
+    , Universal.eq (Rename.mbps 31000000) "31 Mbps" ]
+
+test> Rename.vfTag.test =
+  List.flatMap check
+    [ Universal.eq (Rename.vfTag 3840 2160) "2160p"
+    , Universal.eq (Rename.vfTag 3840 2080) "2160p"
+    , Universal.eq (Rename.vfTag 1920 1080) "1080p"
+    , Universal.eq (Rename.vfTag 1920  800) "1080p"
+    , Universal.eq (Rename.vfTag 1920 1040) "1080p"
+    , Universal.eq (Rename.vfTag 1280  720) "720p"
+    , Universal.eq (Rename.vfTag  720  576) "576p"
+    , Universal.eq (Rename.vfTag  720  404) "480p"
+    , Universal.eq (Rename.vfTag  640  360) "SD" ]
 
 test> Rename.channelsTag.test =
   List.flatMap check
