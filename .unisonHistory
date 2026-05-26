@@ -1,3 +1,31 @@
+update
+run Db.resetSchema
+update
+run Db.createSchema
+run Db.resetSchema
+..
+update
+view bindAndExecuteCommand
+find : postgres.Query r a b ->{IO} [b]
+find : postgres.Statement r (Text ->{} a) -> Text -> postgres.Statement r a
+find : postgres.Statement r (Text ->{} a) -> Text ->
+find : postgres.Query r (Text ->{} a) b -> Text -> postgres.Query r a b
+view typedQuery
+view Query
+find typedQuery
+update
+view uniDork.rename
+view uniDork.identify
+view unidork.run
+view unidork
+view uniDork
+update
+run Db.countMovies
+run uniDork.identify
+delete.type Tmdb.Confidence
+update
+delete.type Tmdb.Confidence
+update
 quit
 run uniDork.identify
 update
@@ -70,31 +98,3 @@ run uniDork.batchedRun
 run Db.countMovies
 run uniDork.batchedRun
 run Db.countMovies
-run Db.resetSchema
-run Db.countMovies
-run uniDork.batchedRun
-run Db.countMovies
-run uniDork.batchedRun
-run uniDork.streamRun
-run Db.resetSchema
-update
-run uniDork.streamRun
-run Db.resetSchema
-clear
-run uniDork.streamRun
-run Db.resetSchema
-clear
-run uniDork.streamRun
-run Db.resetSchema
-update
-find PostgresClientConfig
-project.start uniDork
-quit
-uniDork
-projects
-run uniDork.run
-update
-run uniDork.run
-update
-docs lib.runarorama_postgres_2_5_1.README
-doc lib.runarorama_postgres_2_5_1.README

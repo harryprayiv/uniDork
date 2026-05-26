@@ -10,11 +10,7 @@
   };
 
   cache = {
-    ffprobeDir     = "$HOME/.cache/uniDork/ffprobe";
-    tmdbDir        = "$HOME/.cache/uniDork/tmdb/search";
-    tmdbDetailsDir = "$HOME/.cache/uniDork/tmdb/details";
-    stageDir       = "$HOME/.cache/uniDork/stage";
-    renameLog      = "$HOME/.cache/uniDork/rename-log";
+    ffprobeDir = "$HOME/.cache/uniDork/ffprobe";
   };
 
   library = {

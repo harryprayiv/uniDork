@@ -1,20 +1,22 @@
 { pkgs, lib ? pkgs.lib }:
 
-pkgs.unison.lib.buildFromTranscript {
+let
+  ucm = pkgs.unison-ucm;
+  prebuiltUc = ../bin/unidork-import.uc;
+in
+pkgs.stdenv.mkDerivation {
   pname = "uniDork";
   version = "0.1.0";
 
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = ../scratch.u;
-  };
+  nativeBuildInputs = [ pkgs.makeWrapper ];
+  dontUnpack = true;
+  dontBuild = true;
+  dontConfigure = true;
 
-  transcript = ../compile.md;
-
-  compiledHash = "sha256-fRDQxQDx7SnWh0hlrZCTfQ10xMyOKd3WYPo+2oQpICs=";
-
-  meta = {
-    description = "uniDork movie library importer";
-    mainProgram = "unidork-import";
-  };
+  installPhase = ''
+    mkdir -p $out/bin $out/share
+    cp ${prebuiltUc} $out/share/unidork-import.uc
+    makeWrapper "${ucm}/bin/ucm" "$out/bin/unidork-import" \
+      --add-flags "run.compiled $out/share/unidork-import.uc"
+  '';
 }
