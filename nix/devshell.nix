@@ -36,6 +36,7 @@ pkgs.mkShell {
     export UNIDORK_CONFIG="${config.library.configFile}"
     export UNIDORK_STAGING="${config.staging.movies}"
     export UNIDORK_RENAME_TARGET="${config.rename.targetDir}"
+    export UNIDORK_MOVIE_FORMAT="${config.rename.movieFormat}"
 
     echo ""
     echo "  uniDork — run 'unidork help' for the orchestrator."

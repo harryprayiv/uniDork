@@ -30,7 +30,8 @@ pkgs.writeShellApplication {
     : "''${UNIDORK_CONFIG:=${config.library.configFile}}"
     : "''${UNIDORK_STAGING:=${config.staging.movies}}"
     : "''${UNIDORK_RENAME_TARGET:=${config.rename.targetDir}}"
-    export UNIDORK_FFPROBE_CACHE UNIDORK_CONFIG UNIDORK_STAGING UNIDORK_RENAME_TARGET
+    : "''${UNIDORK_MOVIE_FORMAT:=${config.rename.movieFormat}}"
+    export UNIDORK_FFPROBE_CACHE UNIDORK_CONFIG UNIDORK_STAGING UNIDORK_RENAME_TARGET UNIDORK_MOVIE_FORMAT
 
     log_dir="$HOME/.cache/uniDork/logs"
     mkdir -p "$log_dir"
@@ -44,11 +45,9 @@ pkgs.writeShellApplication {
       fi
     }
 
-    # Wraps unidork-import to suppress unison-pg cleanup noise on stderr.
-    # Real errors still go to the per-command log file.
     run_unison_subcommand() {
-      local sub="$1"
-      unidork-import "$sub"
+      local sub="$1"; shift || true
+      unidork-import "$sub" "$@"
     }
 
     cmd_start()  { pg-start; }
@@ -70,7 +69,11 @@ pkgs.writeShellApplication {
         echo "for a read-only TMDB report: unidork identify"
         exit 1
       fi
-      run_unison_subcommand rename
+      if [ -z "''${UNIDORK_MOVIE_FORMAT:-}" ]; then
+        echo "UNIDORK_MOVIE_FORMAT not set; check nix/config.nix" >&2
+        exit 1
+      fi
+      run_unison_subcommand rename "$UNIDORK_MOVIE_FORMAT"
     }
 
     cmd_status() {

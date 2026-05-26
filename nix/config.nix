@@ -23,6 +23,8 @@
 
   rename = {
     targetDir = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/testMovies";
+    movieFormat = "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}/{ny} {tags} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}_{group}] ~{crc32}";
+    tvFormat = "{ny}/{'Season '+s}/{n} {s00e00} {t} ~{crc32}";
   };
 
   tmdb = {

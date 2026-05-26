@@ -4,6 +4,10 @@ compile uniDork.cli ./bin/unidork-import
 update
 compile uniDork.cli ./bin/unidork-import
 update
+compile uniDork.cli ./bin/unidork-import
+update
+compile uniDork.cli ./bin/unidork-import
+update
 view Tmdb.reportFolderWith Tmdb.reportLooseVideoWith uniDork.identify
 view Tmdb.reportFolderWith Tmdb.reportLooseVideoWith
 compile uniDork.cli ./bin/unidork-import

@@ -2479,13 +2479,15 @@ Rename.effectiveBitRate br sizeBytes durationSec = match br with
     if Universal.eq secs 0 then 0 else sizeBytes * 8 / secs
 
 Rename.executeMoveWith :
-  Tmdb.Result -> FilePath -> Stage.ProbeResult ->{IO, Exception} Rename.Outcome
-Rename.executeMoveWith r sourceVideo pr =
+  [Rename.FormatPart] -> [Rename.FormatPart] ->
+    Tmdb.Result -> FilePath -> Stage.ProbeResult -> Text ->{IO, Exception} Rename.Outcome
+Rename.executeMoveWith folderFmt fileFmt r sourceVideo pr originalName =
   use Text ++
   sourceText = filePathText sourceVideo
   videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
-  base = Rename.fileBaseName r pr
-  targetFolderText = Rename.targetRoot ++ "/" ++ Rename.folderName r pr
+  base = Rename.renderWith fileFmt r pr originalName
+  targetFolderText =
+    Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
   targetFolder = FilePath targetFolderText
   targetVideo = pathJoin targetFolder (base ++ videoExt)
   targetNfo = pathJoin targetFolder (base ++ ".nfo")
@@ -2501,7 +2503,9 @@ Rename.executeMoveWith r sourceVideo pr =
       Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
       Left f  -> Rename.Outcome.RenameError sourceText (Failure.message f)
 
-Rename.processFolderWith pqStage pqLargest pqSearch pcSearch pqDet pcDet token folder =
+Rename.processFolderWith
+  folderFmt fileFmt
+  pqStage pqLargest pqSearch pcSearch pqDet pcDet token folder =
   use Rename.Outcome NoMatch NoProbe NoVideo
   folderName = filePathBasename folder
   folderText = filePathText folder
@@ -2516,7 +2520,8 @@ Rename.processFolderWith pqStage pqLargest pqSearch pcSearch pqDet pcDet token f
         pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin
        with
         Left err -> NoMatch folderText err
-        Right r  -> Rename.executeMoveWith r videoPath pr
+        Right r  ->
+          Rename.executeMoveWith folderFmt fileFmt r videoPath pr folderName
     None ->
       files = directoryContents.texts folder
       match findFirstVideo files with
@@ -2524,7 +2529,9 @@ Rename.processFolderWith pqStage pqLargest pqSearch pcSearch pqDet pcDet token f
         Some videoName ->
           NoProbe (filePathText (pathJoin folder videoName))
 
-Rename.processLooseVideoWith pqStage pqSearch pcSearch pqDet pcDet token videoFile =
+Rename.processLooseVideoWith
+  folderFmt fileFmt
+  pqStage pqSearch pcSearch pqDet pcDet token videoFile =
   use Rename.Outcome NoMatch NoProbe
   filename = filePathBasename videoFile
   name = Rename.basenameNoExt filename
@@ -2537,14 +2544,18 @@ Rename.processLooseVideoWith pqStage pqSearch pcSearch pqDet pcDet token videoFi
         pqSearch pcSearch pqDet pcDet token name None probeMin
        with
         Left err -> NoMatch sourceText err
-        Right r  -> Rename.executeMoveWith r videoFile pr
+        Right r  ->
+          Rename.executeMoveWith folderFmt fileFmt r videoFile pr name
 
-Rename.runOneWith pqStage pqLargest pqSearch pcSearch pqDet pcDet pcLog token folder =
+Rename.runOneWith
+  folderFmt fileFmt
+  pqStage pqLargest pqSearch pcSearch pqDet pcDet pcLog token folder =
   use Text ++
   folderName = filePathBasename folder
   _ = printLine ("processing: " ++ folderName)
   outcome =
     Rename.processFolderWith
+      folderFmt fileFmt
       pqStage pqLargest pqSearch pcSearch pqDet pcDet token folder
   _ = match outcome with
     Rename.Outcome.Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
@@ -2557,12 +2568,15 @@ Rename.runOneWith pqStage pqLargest pqSearch pcSearch pqDet pcDet pcLog token fo
     Rename.Outcome.RenameError _ msg -> printLine ("  ERROR: " ++ msg)
   Rename.writeOutcomeWith pcLog outcome
 
-Rename.runOneLooseWith pqStage pqSearch pcSearch pqDet pcDet pcLog token videoFile =
+Rename.runOneLooseWith
+  folderFmt fileFmt
+  pqStage pqSearch pcSearch pqDet pcDet pcLog token videoFile =
   use Text ++
   filename = filePathBasename videoFile
   _ = printLine ("processing (loose): " ++ filename)
   outcome =
     Rename.processLooseVideoWith
+      folderFmt fileFmt
       pqStage pqSearch pcSearch pqDet pcDet token videoFile
   _ = match outcome with
     Rename.Outcome.Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
@@ -2846,6 +2860,228 @@ Rename.Outcome.toJson = cases
       , ("message", Json.text msg)
       ]
 
+-- ============================================================
+-- Rename format DSL
+--
+-- A filebot-style template like:
+--   "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}"
+-- is parsed into a [FormatPart], then applied to a Context to
+-- produce the final text.
+-- ============================================================
+
+type Rename.FormatPart
+  = Literal Text
+  | Token Text
+
+-- Default templates. Editing these is the supported customization point.
+Rename.folderFormat : Text
+Rename.folderFormat =
+  "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}"
+
+Rename.fileFormat : Text
+Rename.fileFormat =
+  "{ny} {tags} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}_{group}] ~{crc32}"
+
+-- Parse a template string into literal/token parts.
+Rename.parseFormat : Text -> [Rename.FormatPart]
+Rename.parseFormat template =
+  use List ++
+  use Nat >
+  segments = Text.split ?{ template
+  match segments with
+    []           -> []
+    [single]     ->
+      if Text.size single > 0
+      then [Rename.FormatPart.Literal single]
+      else []
+    first +: rest ->
+      head =
+        if Text.size first > 0
+        then [Rename.FormatPart.Literal first]
+        else []
+      head ++ List.flatMap Rename.parseSegment rest
+
+Rename.parseSegment : Text -> [Rename.FormatPart]
+Rename.parseSegment seg =
+  use List ++
+  use Nat + >
+  match Text.indexOf "}" seg with
+    None   ->
+      [Rename.FormatPart.Literal (Text.join "" ["{", seg])]
+    Some i ->
+      tokenName = Text.take i seg
+      rest = Text.drop (i + 1) seg
+      tokenPart = [Rename.FormatPart.Token tokenName]
+      if Text.size rest > 0
+      then tokenPart ++ [Rename.FormatPart.Literal rest]
+      else tokenPart
+
+-- The data a format needs to resolve any token.
+type Rename.Context
+  = { tmdb : Tmdb.Result
+    , probe : Stage.ProbeResult
+    , group : Optional Text
+    , tags : [Text]
+    , originalName : Text
+    }
+
+Rename.buildContext :
+  Tmdb.Result -> Stage.ProbeResult -> Text -> Rename.Context
+Rename.buildContext r pr originalName =
+  Rename.Context.Context
+    r
+    pr
+    (Rename.extractGroup originalName)
+    (Rename.extractTags originalName)
+    originalName
+
+-- Resolve a single token. Unknown tokens become "".
+Rename.resolveToken : Rename.Context -> Text -> Text
+Rename.resolveToken ctx tok =
+  use Rename.Context tmdb probe group tags
+  r = tmdb ctx
+  pr = probe ctx
+  vid = Stage.ProbeResult.video pr
+  match tok with
+    "ny"         -> Rename.titleYear r
+    "n"          -> Rename.sanitize (Tmdb.Result.title r)
+    "y"          -> match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
+                      Some y -> Nat.toText y
+                      None   -> "0000"
+    "gigabytes"  -> Rename.gigabytes (Stage.ProbeResult.sizeBytes pr)
+    "vf"         -> Rename.vfTag
+                      (Stage.VideoInfo.width vid)
+                      (Stage.VideoInfo.height vid)
+    "vc"         -> Rename.vcTag (Stage.VideoInfo.codec vid)
+    "bitdepth"   -> Nat.toText (Stage.VideoInfo.bitDepth vid)
+    "minutes"    -> Nat.toText
+                      (Rename.minutes (Stage.ProbeResult.durationSec pr))
+    "crc32"      -> Stage.ProbeResult.crc32 pr
+    "resolution" -> Rename.resolutionStr
+                      (Stage.VideoInfo.width vid)
+                      (Stage.VideoInfo.height vid)
+    "mbps"       -> Rename.mbps
+                      (Rename.effectiveBitRate
+                        (Stage.VideoInfo.bitRate vid)
+                        (Stage.ProbeResult.sizeBytes pr)
+                        (Stage.ProbeResult.durationSec pr))
+    "ac"         -> match Stage.ProbeResult.audio pr with
+                      Some a -> Rename.acTag (Stage.AudioInfo.codec a)
+                      None   -> "noaudio"
+    "channels"   -> match Stage.ProbeResult.audio pr with
+                      Some a -> Rename.channelsTag (Stage.AudioInfo.channels a)
+                      None   -> "0"
+    "group"      -> Optional.getOrElse "" (group ctx)
+    "tags"       -> Text.join " " (tags ctx)
+    _            -> ""
+
+Rename.applyFormat : [Rename.FormatPart] -> Rename.Context -> Text
+Rename.applyFormat parts ctx =
+  render = cases
+    Rename.FormatPart.Literal t  -> t
+    Rename.FormatPart.Token name -> Rename.resolveToken ctx name
+  Text.join "" (List.map render parts)
+
+-- ============================================================
+-- Helpers: group/tag extraction, whitespace + underscore tightening
+-- ============================================================
+
+Rename.isLikelyGroupToken : Text -> Boolean
+Rename.isLikelyGroupToken t =
+  use Nat < >=
+  sz = Text.size t
+  if sz < 2 then false
+  else
+    if sz >= 30 then false
+    else
+      hasSpace = match Text.indexOf " " t with
+        Some _ -> true
+        None   -> false
+      hasDot = match Text.indexOf "." t with
+        Some _ -> true
+        None   -> false
+      if hasSpace then false
+      else if hasDot then false else true
+
+-- Try: token after the last "-" if it's a single clean word.
+-- Else: last whitespace-separated word, unless it's a quality marker.
+Rename.extractGroup : Text -> Optional Text
+Rename.extractGroup name =
+  trimmedName = trim name
+  byDash = match List.reverse (Text.split ?- trimmedName) with
+    last +: _ ->
+      lt = trim last
+      if Rename.isLikelyGroupToken lt then Some lt else None
+    []        -> None
+  match byDash with
+    Some g -> Some g
+    None   ->
+      match List.reverse (Text.split ?\s trimmedName) with
+        last +: _ ->
+          lt = trim last
+          if Rename.isLikelyGroupToken lt then
+            if Tmdb.isQualityToken lt then None
+            else Some lt
+          else None
+        [] -> None
+
+Rename.editionKeywords : [Text]
+Rename.editionKeywords =
+  [ "EXTENDED", "REMASTERED", "UNRATED", "THEATRICAL"
+  , "DIRECTORS.CUT", "DIRECTORS_CUT", "DIRECTORS CUT"
+  , "PROPER", "REPACK", "ANNIVERSARY"
+  , "IMAX", "OPEN.MATTE", "OPEN_MATTE", "OPENMATTE"
+  ]
+
+Rename.extractTags : Text -> [Text]
+Rename.extractTags name =
+  upper = Text.toUppercase name
+  List.filter
+    (kw -> match Text.indexOf kw upper with
+      Some _ -> true
+      None   -> false)
+    Rename.editionKeywords
+
+Rename.collapseSpaces : Text -> Text
+Rename.collapseSpaces t =
+  use Nat >
+  parts = Text.split ?\s t
+  nonEmpty = List.filter (p -> Text.size p > 0) parts
+  Text.join " " nonEmpty
+
+-- Run replaceAll up to a few times so consecutive empty tokens collapse fully.
+Rename.shrink : Text -> Text -> Text -> Text
+Rename.shrink needle replacement t =
+  t
+    |> replaceAll needle replacement
+    |> replaceAll needle replacement
+    |> replaceAll needle replacement
+    |> replaceAll needle replacement
+    |> replaceAll needle replacement
+
+-- Final pass: collapse whitespace, then remove dangling underscores that
+-- empty tokens leave behind inside bracketed sections.
+Rename.tighten : Text -> Text
+Rename.tighten t =
+  t
+    |> Rename.collapseSpaces
+    |> Rename.shrink "__" "_"
+    |> replaceAll "_]" "]"
+    |> replaceAll "[_" "["
+    |> replaceAll "_ " " "
+    |> replaceAll " _" " "
+    |> trim
+
+-- ============================================================
+-- Public render entry points used by Rename.executeMoveWith
+-- ============================================================
+
+Rename.renderWith :
+  [Rename.FormatPart] -> Tmdb.Result -> Stage.ProbeResult -> Text -> Text
+Rename.renderWith parsed r pr originalName =
+  ctx = Rename.buildContext r pr originalName
+  Rename.tighten (Rename.applyFormat parsed ctx)
+
 test> Rename.gigabytes.test =
   use Universal eq
   List.flatMap
@@ -2893,6 +3129,54 @@ test> Rename.channelsTag.test =
     , eq (Rename.channelsTag 6) "5.1"
     , eq (Rename.channelsTag 8) "7.1"
     , eq (Rename.channelsTag 3) "3"
+    ]
+
+test> Rename.parseFormat.test =
+  use Universal eq
+  lit = Rename.FormatPart.Literal
+  tok = Rename.FormatPart.Token
+  List.flatMap
+    check
+    [ eq (Rename.parseFormat "") []
+    , eq (Rename.parseFormat "hello") [lit "hello"]
+    , eq (Rename.parseFormat "{a}") [tok "a"]
+    , eq (Rename.parseFormat "x{a}y") [lit "x", tok "a", lit "y"]
+    , eq (Rename.parseFormat "{a}{b}") [tok "a", tok "b"]
+    , eq
+        (Rename.parseFormat "{ny} [{vf}]")
+        [tok "ny", lit " [", tok "vf", lit "]"]
+    ]
+
+test> Rename.tighten.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Rename.tighten "hello  world") "hello world"
+    , eq (Rename.tighten "  hello   world  ") "hello world"
+    , eq (Rename.tighten "a__b") "a_b"
+    , eq (Rename.tighten "a___b") "a_b"
+    , eq (Rename.tighten "[x_y_]") "[x_y]"
+    , eq (Rename.tighten "[_x_y]") "[x_y]"
+    ]
+
+test> Rename.extractGroup.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq
+        (Rename.extractGroup "Under.Siege.1992.1080p.x265-Tigole")
+        (Some "Tigole")
+    , eq
+        (Rename.extractGroup "Some Movie 2020 1080p BluRay x265 Tigole")
+        (Some "Tigole")
+    , eq
+        (Rename.extractGroup "Title.2020.1080p.WEB-DL.x265-RG")
+        (Some "RG")
+    , eq (Rename.extractGroup "Generic Movie 2020 1080p") None
+    , eq
+        (Rename.extractGroup
+          "War Machine 2026 1080p WEB-DL HEVC x265 10Bit DDP5.1 Subs KINGDOM_RG")
+        (Some "KINGDOM_RG")
     ]
 
 Rename.basenameNoExt : Text -> Text
@@ -2975,11 +3259,13 @@ uniDork.identify = do
       PreparedCommand.close pcDet
   else printLine ("staging not found: " ++ Tmdb.stagingDir)
 
-uniDork.rename : '{IO, Exception} ()
-uniDork.rename = do
+uniDork.renameWith : Text -> Text -> '{IO, Exception} ()
+uniDork.renameWith folderFmtText fileFmtText = do
   use Nat toText
   use Text ++ join
   use Universal eq
+  folderFmt = Rename.parseFormat folderFmtText
+  fileFmt = Rename.parseFormat fileFmtText
   staging = FilePath Tmdb.stagingDir
   if isDirectory staging then
     _ = catch do
@@ -3020,15 +3306,35 @@ uniDork.rename = do
       _ =
         Db.foreach_
           (Rename.runOneWith
+            folderFmt fileFmt
             pqStage pqLargest pqSearch pcSearch pqDet pcDet pcLog token) folders
       _ =
         Db.foreach_
           (Rename.runOneLooseWith
+            folderFmt fileFmt
             pqStage pqSearch pcSearch pqDet pcDet pcLog token) loose
       _ = PreparedCommand.close pcSearch
       _ = PreparedCommand.close pcDet
       PreparedCommand.close pcLog
   else printLine ("staging not found: " ++ Tmdb.stagingDir)
+
+uniDork.renameWithCombinedFormat : Text -> '{IO, Exception} ()
+uniDork.renameWithCombinedFormat fullFormat = do
+  use Text ++
+  parts = Text.split ?/ fullFormat
+  match List.reverse parts with
+    []         ->
+      _ = printLine "empty format"
+      ()
+    [_]        ->
+      _ = printLine "format must contain '/' separating folder and file templates"
+      ()
+    fileFmt +: folderParts ->
+      folderFmt = Text.join "/" (List.reverse folderParts)
+      !(uniDork.renameWith folderFmt fileFmt)
+
+uniDork.rename : '{IO, Exception} ()
+uniDork.rename = uniDork.renameWith Rename.folderFormat Rename.fileFormat
 
 uniDork.batchSize : Nat
 uniDork.batchSize = 50
@@ -3282,9 +3588,12 @@ uniDork.cli : '{IO, Exception} ()
 uniDork.cli = do
   args = !IO.getArgs
   match args with
-    "import"   +: _ -> uniDork.batchedRun()
-    "identify" +: _ -> uniDork.identify()
-    "rename"   +: _ -> uniDork.rename()
+    "import"   +: _    -> uniDork.batchedRun()
+    "identify" +: _    -> uniDork.identify()
+    "rename"   +: rest ->
+      match rest with
+        format +: _ -> !(uniDork.renameWithCombinedFormat format)
+        []          -> uniDork.rename()
     _ ->
-      _ = printLine "usage: unidork-import <import|identify|rename>"
+      _ = printLine "usage: unidork-import <import|identify|rename> [format]"
       ()
