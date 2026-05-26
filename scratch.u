@@ -369,6 +369,21 @@ Movie.toNdjsonLine m =
 Movie.fromNdjsonLine : Text -> Either Failure Movie
 Movie.fromNdjsonLine line = catch do Decoder.run Movie.fromJson (trim line)
 
+Tmdb.Result.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.Result
+Tmdb.Result.fromJson = do
+  use Decoder optional! text
+  use Optional getOrElse
+  use object at at!
+  tmdbId = at! "id" Decoder.nat
+  title = at! "title" text
+  originalTitle = at! "original_title" text
+  originalLanguage = getOrElse "" (optional! (at "original_language" text))
+  releaseDate = getOrElse "" (optional! (at "release_date" text))
+  popularity = at! "popularity" Decoder.float
+  overview = getOrElse "" (optional! (at "overview" text))
+  Tmdb.Result.Result
+    tmdbId title originalTitle originalLanguage releaseDate popularity overview
+
 Tmdb.Result.toJson : Tmdb.Result -> Json
 Tmdb.Result.toJson r =
   use Json text
@@ -376,6 +391,7 @@ Tmdb.Result.toJson r =
     [ ("id", Json.nat (Tmdb.Result.tmdbId r))
     , ("title", text (Tmdb.Result.title r))
     , ("original_title", text (Tmdb.Result.originalTitle r))
+    , ("original_language", text (Tmdb.Result.originalLanguage r))
     , ("release_date", text (Tmdb.Result.releaseDate r))
     , ("popularity", Json.float (Tmdb.Result.popularity r))
     , ("overview", text (Tmdb.Result.overview r))
@@ -1177,6 +1193,34 @@ type Probe.Format
 type Probe.Result
   = { format : Probe.Format }
 
+type Probe.AudioTrack
+  = { index : Nat,
+      codec : Text,
+      language : Optional Text,
+      title : Optional Text,
+      channels : Nat,
+      channelLayout : Text,
+      isDefault : Boolean,
+      isComment : Boolean,
+      isVisualImpaired : Boolean }
+
+Probe.AudioTrack.fromJson : '{unison_json_1_4_2.Decoder} Probe.AudioTrack
+Probe.AudioTrack.fromJson = do
+  use Decoder optional! text nat boolean
+  use object at at!
+  index = at! "index" nat
+  codec = at! "codec" text
+  language = optional! (at "language" text)
+  title = optional! (at "title" text)
+  channels = at! "channels" nat
+  channelLayout = at! "channel_layout" text
+  isDefault = at! "default" boolean
+  isComment = at! "comment" boolean
+  isVisualImpaired = at! "visual_impaired" boolean
+  Probe.AudioTrack.AudioTrack
+    index codec language title channels channelLayout
+    isDefault isComment isVisualImpaired
+
 Probe.parseFloat : Text -> Float
 Probe.parseFloat t = Optional.getOrElse 0.0 (Float.fromText (trim t))
 
@@ -1275,6 +1319,7 @@ type Tmdb.Result
   = { tmdbId : Nat,
       title : Text,
       originalTitle : Text,
+      originalLanguage : Text,
       releaseDate : Text,
       popularity : Float,
       overview : Text }
@@ -1438,9 +1483,6 @@ Tmdb.parseReleaseName name =
                     Some
                       (Tmdb.ParsedRelease.ParsedRelease name titleStr y None)
 
--- Build a ParsedRelease from folder name plus optional NFO.
--- NFO title/year override folder-name regex when both are present.
--- NFO tmdb id rides along whether or not NFO supplied title/year.
 Tmdb.buildParsedRelease :
   Text -> Optional Movie -> Optional Tmdb.ParsedRelease
 Tmdb.buildParsedRelease folderName maybeNfo =
@@ -1536,19 +1578,6 @@ Tmdb.pickBest scored =
     Some (best, n) -> match best with
       (_, s) ->
         if Universal.eq n 1 && s >= threshold then Some best else None
-
-Tmdb.Result.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.Result
-Tmdb.Result.fromJson = do
-  use Decoder optional! text
-  use Optional getOrElse
-  use object at at!
-  tmdbId = at! "id" Decoder.nat
-  title = at! "title" text
-  originalTitle = at! "original_title" text
-  releaseDate = getOrElse "" (optional! (at "release_date" text))
-  popularity = at! "popularity" Decoder.float
-  overview = getOrElse "" (optional! (at "overview" text))
-  Tmdb.Result.Result tmdbId title originalTitle releaseDate popularity overview
 
 Tmdb.SearchResponse.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.SearchResponse
 Tmdb.SearchResponse.fromJson = do
@@ -1871,6 +1900,215 @@ Stage.readSidecar folderName = match
  with
   Left _  -> None
   Right r -> Some r
+
+type Relang.Decision
+  = AlreadyCorrect Nat                -- index of track that's already default
+  | SwitchTo Nat Nat                  -- old default index, new default index
+  | OriginalNotPresent Text           -- e.g. "no eng track found"
+  | UnsupportedLanguage Text          -- TMDB code not in our table
+  | NoCurrentDefault Nat              -- weird file, no track flagged default
+
+Relang.currentDefault : [Probe.AudioTrack] -> Optional Nat
+Relang.currentDefault tracks =
+  match List.find Probe.AudioTrack.isDefault tracks with
+    Some t -> Some (Probe.AudioTrack.index t)
+    None   -> None
+
+Relang.decide : Text -> [Probe.AudioTrack] -> Relang.Decision
+Relang.decide tmdbOrigLang tracks =
+  match Relang.toIso6392 tmdbOrigLang with
+    None      -> Relang.Decision.UnsupportedLanguage tmdbOrigLang
+    Some code -> match Relang.selectTrack code tracks with
+      None    -> Relang.Decision.OriginalNotPresent code
+      Some tr ->
+        chosenIdx = Probe.AudioTrack.index tr
+        match Relang.currentDefault tracks with
+          None        -> Relang.Decision.NoCurrentDefault chosenIdx
+          Some curIdx ->
+            if Universal.eq curIdx chosenIdx then
+              Relang.Decision.AlreadyCorrect curIdx
+            else Relang.Decision.SwitchTo curIdx chosenIdx
+
+Relang.Decision.toJson : Relang.Decision -> Json
+Relang.Decision.toJson = cases
+  Relang.Decision.AlreadyCorrect i ->
+    Json.object
+      [("kind", Json.text "already_correct"), ("default_index", Json.nat i)]
+  Relang.Decision.SwitchTo o n ->
+    Json.object
+      [ ("kind", Json.text "switch")
+      , ("old_default_index", Json.nat o)
+      , ("new_default_index", Json.nat n)
+      ]
+  Relang.Decision.OriginalNotPresent code ->
+    Json.object
+      [ ("kind", Json.text "original_not_present")
+      , ("expected_language", Json.text code)
+      ]
+  Relang.Decision.UnsupportedLanguage code ->
+    Json.object
+      [("kind", Json.text "unsupported_language"), ("tmdb_code", Json.text code)]
+  Relang.Decision.NoCurrentDefault i ->
+    Json.object
+      [("kind", Json.text "no_current_default"), ("chosen_index", Json.nat i)]
+
+Relang.toIso6392 : Text -> Optional Text
+Relang.toIso6392 = cases
+  "en" -> Some "eng"
+  "ja" -> Some "jpn"
+  "ko" -> Some "kor"
+  "zh" -> Some "zho"
+  "fr" -> Some "fra"
+  "de" -> Some "deu"
+  "it" -> Some "ita"
+  "es" -> Some "spa"
+  "pt" -> Some "por"
+  "ru" -> Some "rus"
+  "sv" -> Some "swe"
+  "da" -> Some "dan"
+  "no" -> Some "nor"
+  "nl" -> Some "nld"
+  "fi" -> Some "fin"
+  "pl" -> Some "pol"
+  "tr" -> Some "tur"
+  "hi" -> Some "hin"
+  "ar" -> Some "ara"
+  "he" -> Some "heb"
+  "th" -> Some "tha"
+  "vi" -> Some "vie"
+  "id" -> Some "ind"
+  "hu" -> Some "hun"
+  "cs" -> Some "ces"
+  "ro" -> Some "ron"
+  "el" -> Some "ell"
+  "uk" -> Some "ukr"
+  _    -> None
+
+Relang.titleAliases : Text -> [Text]
+Relang.titleAliases = cases
+  "eng" -> ["english", "eng", "en"]
+  "ita" -> ["italian", "italiano", "ita", "it"]
+  "jpn" -> ["japanese", "jpn", "jp"]
+  "kor" -> ["korean", "kor", "kr"]
+  "fra" -> ["french", "francais", "français", "fra", "fre", "fr", "vf", "vff"]
+  "deu" -> ["german", "deutsch", "ger", "deu", "de"]
+  "spa" -> ["spanish", "espanol", "español", "spa", "esp", "es"]
+  "por" -> ["portuguese", "portugues", "português", "por", "pt"]
+  "rus" -> ["russian", "rus", "ru"]
+  "zho" -> ["chinese", "mandarin", "cantonese", "zho", "chi", "zh"]
+  "swe" -> ["swedish", "svenska", "swe", "sv"]
+  "dan" -> ["danish", "dansk", "dan", "da"]
+  "nor" -> ["norwegian", "norsk", "nor", "no"]
+  "nld" -> ["dutch", "nederlands", "nld", "dut", "nl"]
+  "fin" -> ["finnish", "suomi", "fin", "fi"]
+  "pol" -> ["polish", "polski", "pol", "pl"]
+  _     -> []
+
+Relang.splitMany : [Char] -> Text -> [Text]
+Relang.splitMany seps t =
+  use List flatMap
+  step acc c = flatMap (p -> Text.split c p) acc
+  result = List.foldLeft step [t] seps
+  List.filter (p -> if Universal.eq p "" then false else true) result
+
+Relang.titleSeparators : [Char]
+Relang.titleSeparators = [?\s, ?-, ?_, ?., ?,, ?(, ?), ?[, ?], ?/]
+
+Relang.titleMatches : Text -> Probe.AudioTrack -> Boolean
+Relang.titleMatches code tr =
+  match Probe.AudioTrack.title tr with
+    None    -> false
+    Some tt ->
+      aliases = Relang.titleAliases code
+      lower = Text.toLowercase tt
+      words = Relang.splitMany Relang.titleSeparators lower
+      List.any (w -> List.any (a -> Universal.eq w a) aliases) words
+
+Relang.containsAnySubstring : [Text] -> Text -> Boolean
+Relang.containsAnySubstring needles haystack =
+  List.any
+    (n -> match Text.indexOf n haystack with
+      Some _ -> true
+      None   -> false)
+    needles
+
+Relang.titleSuggestsCommentary : Text -> Boolean
+Relang.titleSuggestsCommentary tt =
+  lower = Text.toLowercase tt
+  markers =
+    [ "comment"
+    , "descriptive"
+    , "director"
+    , "vfx"
+    , "isolated"
+    , "audio description"
+    , "narration"
+    , "for the visually"
+    ]
+  Relang.containsAnySubstring markers lower
+
+Relang.isCommentaryOrDescriptive : Probe.AudioTrack -> Boolean
+Relang.isCommentaryOrDescriptive tr =
+  if Probe.AudioTrack.isComment tr then true
+  else
+    if Probe.AudioTrack.isVisualImpaired tr then true
+    else match Probe.AudioTrack.title tr with
+      None    -> false
+      Some tt -> Relang.titleSuggestsCommentary tt
+
+Relang.losslessCodecs : [Text]
+Relang.losslessCodecs =
+  ["truehd", "dts-hd", "flac", "pcm_s24le", "pcm_s16le", "mlp"]
+
+Relang.lossyCodecs : [Text]
+Relang.lossyCodecs =
+  ["dts", "eac3", "ac3", "aac", "opus", "vorbis", "mp3"]
+
+Relang.codecRank : Text -> Nat
+Relang.codecRank c =
+  lower = Text.toLowercase c
+  isIn xs = List.any (x -> Universal.eq x lower) xs
+  if isIn Relang.losslessCodecs then 2
+  else if isIn Relang.lossyCodecs then 1 else 0
+
+Relang.betterThan : Probe.AudioTrack -> Probe.AudioTrack -> Boolean
+Relang.betterThan a b =
+  use Nat 
+  use Universal eq
+  ca = Probe.AudioTrack.channels a
+  cb = Probe.AudioTrack.channels b
+  if eq ca cb then
+    ra = Relang.codecRank (Probe.AudioTrack.codec a)
+    rb = Relang.codecRank (Probe.AudioTrack.codec b)
+    if eq ra rb then Probe.AudioTrack.index a < Probe.AudioTrack.index b
+    else
+      if eq ra (Nat.max ra rb) && (if eq ra rb then false else true) then true
+      else false
+  else
+    if eq ca (Nat.max ca cb) then true else false
+
+Relang.bestOf : [Probe.AudioTrack] -> Optional Probe.AudioTrack
+Relang.bestOf tracks =
+  step acc cur = match acc with
+    None      -> Some cur
+    Some best -> if Relang.betterThan cur best then Some cur else Some best
+  List.foldLeft step None tracks
+
+Relang.selectTrack :
+  Text -> [Probe.AudioTrack] -> Optional Probe.AudioTrack
+Relang.selectTrack origLang3 tracks =
+  strict =
+    List.filter
+      (t -> Universal.eq (Probe.AudioTrack.language t) (Some origLang3))
+      tracks
+  candidates = if Universal.eq (List.size strict) 0 then
+    List.filter (Relang.titleMatches origLang3) tracks
+  else strict
+  surviving =
+    List.filter
+      (t -> if Relang.isCommentaryOrDescriptive t then false else true)
+      candidates
+  Relang.bestOf surviving
 
 Rename.targetRoot : Text
 Rename.targetRoot =
