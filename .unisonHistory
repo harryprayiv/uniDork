@@ -1,100 +1,19 @@
+compile uniDork.cli ./bin/unidork-import
 update
-run Db.resetSchema
+compile uniDork.cli ./bin/unidork-import
 update
-run Db.createSchema
-run Db.resetSchema
-..
+compile uniDork.cli ./bin/unidork-import
 update
-view bindAndExecuteCommand
-find : postgres.Query r a b ->{IO} [b]
-find : postgres.Statement r (Text ->{} a) -> Text -> postgres.Statement r a
-find : postgres.Statement r (Text ->{} a) -> Text ->
-find : postgres.Query r (Text ->{} a) b -> Text -> postgres.Query r a b
-view typedQuery
-view Query
-find typedQuery
+view Tmdb.reportFolderWith Tmdb.reportLooseVideoWith uniDork.identify
+view Tmdb.reportFolderWith Tmdb.reportLooseVideoWith
+compile uniDork.cli ./bin/unidork-import
 update
-view uniDork.rename
-view uniDork.identify
-view unidork.run
-view unidork
-view uniDork
+dupdate
+compile uniDork.cli ./bin/unidork-import
 update
-run Db.countMovies
-run uniDork.identify
-delete.type Tmdb.Confidence
+compile uniDork.cli ./bin/unidork-import
 update
-delete.type Tmdb.Confidence
+compile uniDork.cli ./bin/unidork-import
 update
-quit
-run uniDork.identify
+delete.term Rename.executeMove
 update
-run uniDork.identify
-update
-view lib.unison_http_16_0_0.client.examples.simple
-view lib.unison_http_16_0_0.client.examples.query
-find URI.fromText
-ls lib.unison_http_16_0_0.HttpResponse
-ls lib.unison_http_16_0_0.client.examples
-ls lib.unison_http_16_0_0.client.Http
-ls lib.unison_http_16_0_0.Method
-ls lib.unison_http_16_0_0.Headers
-ls lib.unison_http_16_0_0.client
-ls lib.unison_http_16_0_0.HttpRequest
-ls lib.unison_http_16_0_0
-ls lib
-lib.install @unison/http
-update
-run Db.countMovies
-run uniDork.batchedRun
-run Db.countMovies
-run Db.resetSchema
-compile uniDork.batchedRun bin/uni-import
-run Db.countMovies
-run uniDork.batchedRun
-run Db.migrate
-update
-quit
-run Db.migrate
-update
-run Db.migrate
-quit
-update
-find readAllUtf8
-find runCommand
-find Process
-run Db.countMovies
-run uniDork.batchedRun
-update
-run Db.countMovies
-run uniDork.batchedRun
-run Db.resetSchema
-update
-run uniDork.batchedRun
-update
-run Db.countMovies
-run uniDork.batchedRun
-run Db.countMovies
-run Db.resetSchema
-update
-find Throw.
-display lib.unison_xml_2_1_2.Soup.tracingErrors.doc
-find Soup.
-run Db.countMovies
-run uniDork.batchedRun
-run Db.countMovies
-run Db.resetSchema
-run uniDork.batchedRun
-update
-run uniDork.batchedRun
-run Db.countMovies
-run Db.resetSchema
-update
-run uniDork.batchedRun
-run Db.countMovies
-run Db.resetSchema
-run Db.countMovies
-run uniDork.batchedRun
-run Db.countMovies
-run uniDork.batchedRun
-run Db.countMovies

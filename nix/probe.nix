@@ -36,9 +36,9 @@ in
       [ "$pending" -eq 0 ] && { echo "[library-probe] all cached"; exit 0; }
 
       export UNIDORK_FFPROBE_CACHE_DIR="$cache_root"
-      # The parallel worker body is intentionally single-quoted: $v, $out, and
-      # $UNIDORK_FFPROBE_CACHE_DIR are evaluated by the worker shell that
-      # GNU parallel spawns, not by this outer shell.
+      # The parallel worker body is intentionally single-quoted: the shell
+      # variables inside are evaluated by the worker shell that GNU parallel
+      # spawns, not by this outer shell.
       # shellcheck disable=SC2016
       printf '%s\0' "''${to_probe[@]}" | parallel -0 -j "$jobs" --bar '
         v={}
@@ -91,7 +91,10 @@ in
 
       # Load the entire cache snapshot in one psql call. Avoids per-file roundtrips.
       # Map: source_path -> probed_at (epoch seconds).
-      declare -A cache_map
+      # NOTE: the =() initializer matters. Under `set -u`, a bare `declare -A`
+      # leaves the array in an unbound state, and the first length or element
+      # access trips nounset when zero rows come back from the SELECT.
+      declare -A cache_map=()
       while IFS=$'\t' read -r cpath cprobed_at; do
         [ -n "$cpath" ] || continue
         cache_map["$cpath"]="$cprobed_at"
@@ -105,7 +108,10 @@ in
       #   exit 0 if path is in cache AND probed_at >= file_mtime; else exit 1.
       is_cached() {
         local p="$1" file_mtime="$2" probed_at
-        probed_at="''${cache_map[$p]:-}"
+        if [[ ! -v cache_map[$p] ]]; then
+          return 1
+        fi
+        probed_at="''${cache_map[$p]}"
         [ -n "$probed_at" ] || return 1
         [ "$probed_at" -ge "$file_mtime" ]
       }
@@ -147,6 +153,17 @@ ON CONFLICT (source_path) DO UPDATE SET
 SQL
       }
 
+      # Delete by folder path. Heredoc form because `psql -c` does not perform
+      # psql client-side variable substitution (:'var'), only stdin/-f do.
+      delete_folder_rows() {
+        local folder_path="$1"
+        psql ${psqlArgs} -v folder="$folder_path" >/dev/null <<'SQL'
+DELETE FROM stage_probes WHERE folder_path = :'folder';
+SQL
+      }
+
+      # Probe one video. Updates the appropriate counter and returns.
+      # Outcomes: cached -> skipped_done++; success -> processed++; error -> failed++.
       probe_one() {
         local video="$1" folder_path="$2"
         local video_basename file_mtime
@@ -163,12 +180,20 @@ SQL
 
         local crc
         crc="$(rhash --crc32 -p '%C' "$video" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
-        [ -n "$crc" ] || { echo "  crc failed" >&2; return 1; }
+        if [ -z "$crc" ]; then
+          echo "  crc failed" >&2
+          failed=$((failed + 1))
+          return 1
+        fi
         echo "  crc32:   $crc"
 
         local raw
         raw="$(ffprobe -v quiet -print_format json -show_format -show_streams "$video" 2>/dev/null || true)"
-        [ -n "$raw" ] || { echo "  ffprobe failed" >&2; return 1; }
+        if [ -z "$raw" ]; then
+          echo "  ffprobe failed" >&2
+          failed=$((failed + 1))
+          return 1
+        fi
 
         local probe_json
         probe_json="$(jq --arg vp "$video" --arg crc "$crc" --argjson probe "$raw" -n '
@@ -204,26 +229,32 @@ SQL
             }')"
 
         if ! upsert_probe "$video" "$folder_path" "$video_basename" "$crc" "$probe_json"; then
-          echo "  db upsert failed" >&2; return 1
+          echo "  db upsert failed" >&2
+          failed=$((failed + 1))
+          return 1
         fi
 
-        # Keep the in-memory map in sync so a second loop pass (or a future
-        # caller in the same script) sees this file as cached.
+        # Keep the in-memory map in sync so a second pass sees this as cached.
         cache_map["$video"]="$(date +%s)"
+        processed=$((processed + 1))
         return 0
       }
 
       for folder in "''${folders[@]}"; do
         name="$(basename "$folder")"
-        video=""; max_size=0
+
+        # Collect EVERY top-level video in this folder. Probe-vs-rename used to
+        # disagree: probe picked the largest, rename picked the first. Probing
+        # every top-level video makes the lookup robust regardless of which
+        # rename picks.
+        folder_videos=()
         while IFS= read -r -d "" v; do
-          sz=$(stat -c '%s' "$v")
-          if [ "$sz" -gt "$max_size" ]; then max_size="$sz"; video="$v"; fi
+          folder_videos+=("$v")
         done < <(find "$folder" -maxdepth 1 -type f \
           '(' -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
             -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print0)
 
-        if [ -z "$video" ]; then
+        if [ ''${#folder_videos[@]} -eq 0 ]; then
           subdir_video="$(find "$folder" -type f \
             '(' -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
               -o -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" ')' -print -quit 2>/dev/null)"
@@ -231,25 +262,25 @@ SQL
           if [ -z "$subdir_video" ]; then
             if [ "$delete_empty" = "1" ]; then
               echo "DELETING:  $name"; rm -rf "$folder"
-              psql ${psqlArgs} -v folder="''${folder%/}" >/dev/null \
-                -c "DELETE FROM stage_probes WHERE folder_path = :'folder'"
+              delete_folder_rows "''${folder%/}"
               deleted=$((deleted + 1))
             else
               echo "no video:  $name (would delete; DELETE_EMPTY=0)"
             fi
           else
-            echo "subdir vid: $name (left alone)"; skipped_subdir=$((skipped_subdir + 1))
+            echo "subdir vid: $name (left alone)"
+            skipped_subdir=$((skipped_subdir + 1))
           fi
           continue
         fi
 
-        if probe_one "$video" "''${folder%/}"; then processed=$((processed + 1))
-        else failed=$((failed + 1)); fi
+        for video in "''${folder_videos[@]}"; do
+          probe_one "$video" "''${folder%/}" || true
+        done
       done
 
       for video in "''${loose_videos[@]}"; do
-        if probe_one "$video" ""; then processed=$((processed + 1))
-        else failed=$((failed + 1)); fi
+        probe_one "$video" "" || true
       done
 
       echo ""

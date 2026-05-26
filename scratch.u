@@ -1707,6 +1707,28 @@ Stage.selectProbeSql =
     %% var Codec.text
     |> typedQuery Codec.text
 
+Stage.selectLargestInFolderSql =
+  sql "SELECT probe_json FROM stage_probes WHERE folder_path = "
+    %% var Codec.text
+    %% sql " ORDER BY ((probe_json::json)->>'size_bytes')::bigint DESC NULLS LAST LIMIT 1"
+    |> typedQuery Codec.text
+
+Stage.largestInFolderWith pq folderPath =
+  match
+    catch do
+      portal = bindQuery pq (Db.pt folderPath)
+      (rows, _) = executeQueryPortal portal 0
+      rows
+   with
+    Left _ -> None
+    Right rs ->
+      match rs with
+        []       -> None
+        raw +: _ ->
+          match catch do Decoder.run Stage.ProbeResult.fromJson raw with
+            Right r -> Some r
+            Left _  -> None
+
 Stage.readFromDb : Text ->{IO} Optional Stage.ProbeResult
 Stage.readFromDb sourcePath =
   match 
@@ -2479,27 +2501,28 @@ Rename.executeMoveWith r sourceVideo pr =
       Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
       Left f  -> Rename.Outcome.RenameError sourceText (Failure.message f)
 
-Rename.processFolderWith pqStage pqSearch pcSearch pqDet pcDet token folder =
+Rename.processFolderWith pqStage pqLargest pqSearch pcSearch pqDet pcDet token folder =
   use Rename.Outcome NoMatch NoProbe NoVideo
   folderName = filePathBasename folder
   folderText = filePathText folder
-  files = directoryContents.texts folder
-  match findFirstVideo files with
-    None -> NoVideo folderText
-    Some videoName ->
-      videoPath = pathJoin folder videoName
-      videoPathText = filePathText videoPath
+  match Stage.largestInFolderWith pqLargest folderText with
+    Some pr ->
+      videoPathText = Stage.ProbeResult.videoPath pr
+      videoPath = FilePath videoPathText
       maybeNfo = Nfo.tryReadFolder folder
       _ = Rename.checkAgreement maybeNfo folderName
-      match Stage.readWith pqStage videoPathText with
-        None -> NoProbe videoPathText
-        Some pr ->
-          probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
-          match Rename.matchTmdbWith
-            pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin
-           with
-            Left err -> NoMatch folderText err
-            Right r  -> Rename.executeMoveWith r videoPath pr
+      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
+      match Rename.matchTmdbWith
+        pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin
+       with
+        Left err -> NoMatch folderText err
+        Right r  -> Rename.executeMoveWith r videoPath pr
+    None ->
+      files = directoryContents.texts folder
+      match findFirstVideo files with
+        None -> NoVideo folderText
+        Some videoName ->
+          NoProbe (filePathText (pathJoin folder videoName))
 
 Rename.processLooseVideoWith pqStage pqSearch pcSearch pqDet pcDet token videoFile =
   use Rename.Outcome NoMatch NoProbe
@@ -2516,12 +2539,13 @@ Rename.processLooseVideoWith pqStage pqSearch pcSearch pqDet pcDet token videoFi
         Left err -> NoMatch sourceText err
         Right r  -> Rename.executeMoveWith r videoFile pr
 
-Rename.runOneWith pqStage pqSearch pcSearch pqDet pcDet pcLog token folder =
+Rename.runOneWith pqStage pqLargest pqSearch pcSearch pqDet pcDet pcLog token folder =
   use Text ++
   folderName = filePathBasename folder
   _ = printLine ("processing: " ++ folderName)
   outcome =
-    Rename.processFolderWith pqStage pqSearch pcSearch pqDet pcDet token folder
+    Rename.processFolderWith
+      pqStage pqLargest pqSearch pcSearch pqDet pcDet token folder
   _ = match outcome with
     Rename.Outcome.Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
     Rename.Outcome.NoVideo _ -> printLine "  skip: no video"
@@ -2701,7 +2725,7 @@ Rename.titleYear r =
   yearText = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
     Some y -> Nat.toText y
     None   -> "0000"
-  Tmdb.Result.title r ++ " (" ++ yearText ++ ")"
+  Rename.sanitize (Tmdb.Result.title r) ++ " (" ++ yearText ++ ")"
 
 Rename.escapeXml : Text -> Text
 Rename.escapeXml t =
@@ -2880,6 +2904,23 @@ Rename.basenameNoExt filename =
     _ +: rest -> Text.join "." (reverse rest)
     []        -> filename
 
+Rename.sanitize : Text -> Text
+Rename.sanitize t =
+  use Nat >
+  dropChars = ["'", "\"", "`"]
+  spaceChars =
+    [ ":", ";", ",", ".", "/", "\\", "?", "*", "<", ">", "|"
+    , "!", "@", "#", "$", "%", "^", "&", "+", "=", "~"
+    , "(", ")", "[", "]", "{", "}"
+    , "—", "–"
+    , "\n", "\t", "\r"
+    ]
+  dropped = List.foldLeft (acc c -> replaceAll c "" acc) t dropChars
+  spaced = List.foldLeft (acc c -> replaceAll c " " acc) dropped spaceChars
+  parts = Text.split ?\s spaced
+  nonEmpty = List.filter (p -> Text.size p > 0) parts
+  trim (Text.join " " nonEmpty)
+
 Rename.looseVideos : FilePath ->{IO, Exception} [FilePath]
 Rename.looseVideos dir =
   entries = directoryContents.texts dir
@@ -2970,6 +3011,7 @@ uniDork.rename = do
     _ = printLine ""
     singleIO Db.config do
       pqStage = prepareQuery Stage.selectProbeSql
+      pqLargest = prepareQuery Stage.selectLargestInFolderSql
       pqSearch = prepareQuery Tmdb.selectSearchSql
       pcSearch = prepareCommand Tmdb.upsertSearchSql
       pqDet = prepareQuery Tmdb.selectDetailsSql
@@ -2978,7 +3020,7 @@ uniDork.rename = do
       _ =
         Db.foreach_
           (Rename.runOneWith
-            pqStage pqSearch pcSearch pqDet pcDet pcLog token) folders
+            pqStage pqLargest pqSearch pcSearch pqDet pcDet pcLog token) folders
       _ =
         Db.foreach_
           (Rename.runOneLooseWith
