@@ -36,6 +36,9 @@ in
       [ "$pending" -eq 0 ] && { echo "[library-probe] all cached"; exit 0; }
 
       export UNIDORK_FFPROBE_CACHE_DIR="$cache_root"
+      # The parallel worker body is intentionally single-quoted: $v, $out, and
+      # $UNIDORK_FFPROBE_CACHE_DIR are evaluated by the worker shell that
+      # GNU parallel spawns, not by this outer shell.
       # shellcheck disable=SC2016
       printf '%s\0' "''${to_probe[@]}" | parallel -0 -j "$jobs" --bar '
         v={}
@@ -75,7 +78,37 @@ in
         exit 1
       fi
 
+      # Fail loudly if the schema isn't there yet. The Unison `import` command
+      # creates it via Db.createSchema; bash doesn't own the schema definition.
+      schema_check="$(psql ${psqlArgs} -At -c "SELECT to_regclass('public.stage_probes')")"
+      if [ "$schema_check" != "stage_probes" ]; then
+        echo "[stage-probe] stage_probes table missing." >&2
+        echo "[stage-probe] bootstrap with: unidork import   (creates the schema)" >&2
+        exit 1
+      fi
+
       echo "[stage-probe] staging=$stage_root delete_empty=$delete_empty"
+
+      # Load the entire cache snapshot in one psql call. Avoids per-file roundtrips.
+      # Map: source_path -> probed_at (epoch seconds).
+      declare -A cache_map
+      while IFS=$'\t' read -r cpath cprobed_at; do
+        [ -n "$cpath" ] || continue
+        cache_map["$cpath"]="$cprobed_at"
+      done < <(psql ${psqlArgs} -At -F $'\t' \
+                 -c "SELECT source_path, EXTRACT(EPOCH FROM probed_at)::bigint FROM stage_probes")
+
+      cached_rows=''${#cache_map[@]}
+      echo "[stage-probe] cache snapshot rows=$cached_rows"
+
+      # is_cached <path> <file_mtime_epoch>
+      #   exit 0 if path is in cache AND probed_at >= file_mtime; else exit 1.
+      is_cached() {
+        local p="$1" file_mtime="$2" probed_at
+        probed_at="''${cache_map[$p]:-}"
+        [ -n "$probed_at" ] || return 1
+        [ "$probed_at" -ge "$file_mtime" ]
+      }
 
       shopt -s nullglob
       folders=("$stage_root"/*/)
@@ -91,7 +124,6 @@ in
 
       upsert_probe() {
         local video="$1" folder_path="$2" video_basename="$3" crc="$4" probe_json="$5"
-
         psql ${psqlArgs} \
           -v src="$video" \
           -v folder="$folder_path" \
@@ -117,19 +149,14 @@ SQL
 
       probe_one() {
         local video="$1" folder_path="$2"
-        local video_basename
+        local video_basename file_mtime
         video_basename="$(basename "$video")"
-
-        local file_mtime probe_mtime cached_crc
         file_mtime="$(stat -c '%Y' "$video")"
-        cached_crc="$(psql ${psqlArgs} -At -v src="$video" -c "SELECT crc32 FROM stage_probes WHERE source_path = :'src'" 2>/dev/null || true)"
 
-        if [ -n "$cached_crc" ]; then
-          probe_mtime="$(psql ${psqlArgs} -At -v src="$video" -c "SELECT EXTRACT(EPOCH FROM probed_at)::int FROM stage_probes WHERE source_path = :'src'" 2>/dev/null || echo 0)"
-          if [ "$probe_mtime" -ge "$file_mtime" ]; then
-            echo "cached:    $cached_crc  $video_basename"
-            skipped_done=$((skipped_done + 1)); return 0
-          fi
+        if is_cached "$video" "$file_mtime"; then
+          echo "cached:    $video_basename"
+          skipped_done=$((skipped_done + 1))
+          return 0
         fi
 
         echo "probing:   $video_basename"
@@ -179,6 +206,10 @@ SQL
         if ! upsert_probe "$video" "$folder_path" "$video_basename" "$crc" "$probe_json"; then
           echo "  db upsert failed" >&2; return 1
         fi
+
+        # Keep the in-memory map in sync so a second loop pass (or a future
+        # caller in the same script) sees this file as cached.
+        cache_map["$video"]="$(date +%s)"
         return 0
       }
 
@@ -201,7 +232,7 @@ SQL
             if [ "$delete_empty" = "1" ]; then
               echo "DELETING:  $name"; rm -rf "$folder"
               psql ${psqlArgs} -v folder="''${folder%/}" >/dev/null \
-                -c "DELETE FROM stage_probes WHERE folder_path = :'folder'" 2>/dev/null || true
+                -c "DELETE FROM stage_probes WHERE folder_path = :'folder'"
               deleted=$((deleted + 1))
             else
               echo "no video:  $name (would delete; DELETE_EMPTY=0)"
