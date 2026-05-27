@@ -36,9 +36,6 @@ in
       [ "$pending" -eq 0 ] && { echo "[library-probe] all cached"; exit 0; }
 
       export UNIDORK_FFPROBE_CACHE_DIR="$cache_root"
-      # The parallel worker body is intentionally single-quoted: the shell
-      # variables inside are evaluated by the worker shell that GNU parallel
-      # spawns, not by this outer shell.
       # shellcheck disable=SC2016
       printf '%s\0' "''${to_probe[@]}" | parallel -0 -j "$jobs" --bar '
         v={}
@@ -78,8 +75,6 @@ in
         exit 1
       fi
 
-      # Fail loudly if the schema isn't there yet. The Unison `import` command
-      # creates it via Db.createSchema; bash doesn't own the schema definition.
       schema_check="$(psql ${psqlArgs} -At -c "SELECT to_regclass('public.stage_probes')")"
       if [ "$schema_check" != "stage_probes" ]; then
         echo "[stage-probe] stage_probes table missing." >&2
@@ -89,11 +84,6 @@ in
 
       echo "[stage-probe] staging=$stage_root delete_empty=$delete_empty"
 
-      # Load the entire cache snapshot in one psql call. Avoids per-file roundtrips.
-      # Map: source_path -> probed_at (epoch seconds).
-      # NOTE: the =() initializer matters. Under `set -u`, a bare `declare -A`
-      # leaves the array in an unbound state, and the first length or element
-      # access trips nounset when zero rows come back from the SELECT.
       declare -A cache_map=()
       while IFS=$'\t' read -r cpath cprobed_at; do
         [ -n "$cpath" ] || continue
@@ -104,8 +94,6 @@ in
       cached_rows=''${#cache_map[@]}
       echo "[stage-probe] cache snapshot rows=$cached_rows"
 
-      # is_cached <path> <file_mtime_epoch>
-      #   exit 0 if path is in cache AND probed_at >= file_mtime; else exit 1.
       is_cached() {
         local p="$1" file_mtime="$2" probed_at
         if [[ ! -v cache_map[$p] ]]; then
@@ -153,8 +141,6 @@ ON CONFLICT (source_path) DO UPDATE SET
 SQL
       }
 
-      # Delete by folder path. Heredoc form because `psql -c` does not perform
-      # psql client-side variable substitution (:'var'), only stdin/-f do.
       delete_folder_rows() {
         local folder_path="$1"
         psql ${psqlArgs} -v folder="$folder_path" >/dev/null <<'SQL'
@@ -162,8 +148,6 @@ DELETE FROM stage_probes WHERE folder_path = :'folder';
 SQL
       }
 
-      # Probe one video. Updates the appropriate counter and returns.
-      # Outcomes: cached -> skipped_done++; success -> processed++; error -> failed++.
       probe_one() {
         local video="$1" folder_path="$2"
         local video_basename file_mtime
@@ -198,7 +182,8 @@ SQL
         local probe_json
         probe_json="$(jq --arg vp "$video" --arg crc "$crc" --argjson probe "$raw" -n '
           ($probe.streams // [] | map(select(.codec_type == "video")) | .[0] // {}) as $v
-          | ($probe.streams // [] | map(select(.codec_type == "audio")) | .[0] // null) as $a
+          | ($probe.streams // [] | map(select(.codec_type == "audio"))) as $as
+          | ($probe.streams // [] | map(select(.codec_type == "subtitle"))) as $ss
           | ($probe.format // {}) as $f
           | ($v.pix_fmt // "") as $pf
           | (if ($v.bits_per_raw_sample // null) != null
@@ -220,12 +205,21 @@ SQL
                 bit_rate: (if ($v.bit_rate // "") == "" then null
                            else ($v.bit_rate | tonumber? // null) end)
               },
-              audio: (if $a == null then null
-                      else {
-                        codec: ($a.codec_name // ""),
-                        channels: ($a.channels // 0),
-                        channel_layout: ($a.channel_layout // "")
-                      } end)
+              audios: ($as | map({
+                codec: (.codec_name // ""),
+                channels: (.channels // 0),
+                channel_layout: (.channel_layout // ""),
+                language: ((.tags // {}) | (.language // .LANGUAGE // "")),
+                title: ((.tags // {}) | (.title // .TITLE // "")),
+                default: (((.disposition // {}).default // 0) == 1)
+              })),
+              subtitles: ($ss | map({
+                codec: (.codec_name // ""),
+                language: ((.tags // {}) | (.language // .LANGUAGE // "")),
+                title: ((.tags // {}) | (.title // .TITLE // "")),
+                default: (((.disposition // {}).default // 0) == 1),
+                forced: (((.disposition // {}).forced // 0) == 1)
+              }))
             }')"
 
         if ! upsert_probe "$video" "$folder_path" "$video_basename" "$crc" "$probe_json"; then
@@ -234,7 +228,6 @@ SQL
           return 1
         fi
 
-        # Keep the in-memory map in sync so a second pass sees this as cached.
         cache_map["$video"]="$(date +%s)"
         processed=$((processed + 1))
         return 0
@@ -243,10 +236,6 @@ SQL
       for folder in "''${folders[@]}"; do
         name="$(basename "$folder")"
 
-        # Collect EVERY top-level video in this folder. Probe-vs-rename used to
-        # disagree: probe picked the largest, rename picked the first. Probing
-        # every top-level video makes the lookup robust regardless of which
-        # rename picks.
         folder_videos=()
         while IFS= read -r -d "" v; do
           folder_videos+=("$v")
