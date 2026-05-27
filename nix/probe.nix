@@ -84,6 +84,47 @@ in
 
       echo "[stage-probe] staging=$stage_root delete_empty=$delete_empty"
 
+      cleanup_renamed_sources() {
+        local removed_folders=0
+        local removed_files=0
+        local source_path source_dir
+
+        while IFS= read -r source_path; do
+          [ -n "$source_path" ] || continue
+          source_dir="$(dirname "$source_path")"
+
+          if [ "$source_dir" = "$stage_root" ]; then
+            if [ -f "$source_path" ]; then
+              echo "stale loose:  $(basename "$source_path")"
+              rm -f "$source_path"
+              psql ${psqlArgs} -v src="$source_path" >/dev/null <<'SQL'
+DELETE FROM stage_probes WHERE source_path = :'src';
+SQL
+              removed_files=$((removed_files + 1))
+            fi
+            continue
+          fi
+
+          if [[ "$source_dir" == "$stage_root"/* ]] && [ -d "$source_dir" ]; then
+            echo "stale folder: $(basename "$source_dir")"
+            rm -rf "$source_dir"
+            psql ${psqlArgs} -v folder="$source_dir" >/dev/null <<'SQL'
+DELETE FROM stage_probes WHERE folder_path = :'folder';
+SQL
+            removed_folders=$((removed_folders + 1))
+          fi
+        done < <(psql ${psqlArgs} -At \
+          -c "SELECT DISTINCT source_path FROM rename_log WHERE outcome IN ('renamed', 'duplicate_removed')")
+
+        if [ "$removed_folders" -gt 0 ] || [ "$removed_files" -gt 0 ]; then
+          echo "[stage-probe] cleanup: folders=$removed_folders loose=$removed_files"
+        fi
+      }
+
+      if [ "$(psql ${psqlArgs} -At -c "SELECT to_regclass('public.rename_log')")" = "rename_log" ]; then
+        cleanup_renamed_sources
+      fi
+
       declare -A cache_map=()
       while IFS=$'\t' read -r cpath cprobed_at; do
         [ -n "$cpath" ] || continue

@@ -1,3 +1,326 @@
+-- The definitions below depend on the deleted definitions.
+-- Please fix the errors and run `update`.
+
+Rename.executeMoveWith pqDup folderFmt fileFmt r d sourceVideo pr originalName =
+  use Text ++
+  sourceText = filePathText sourceVideo
+  sourceCrc = Stage.ProbeResult.crc32 pr
+  match Rename.findPriorTargetForCrcWith pqDup sourceCrc with
+    Some priorTarget ->
+      Rename.Outcome.DuplicateRemoved sourceText priorTarget
+    None ->
+      videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
+      base = Rename.renderWith fileFmt r pr originalName
+      targetFolderText =
+        Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
+      targetFolder = FilePath targetFolderText
+      targetVideo = pathJoin targetFolder (base ++ videoExt)
+      targetNfo = pathJoin targetFolder (Rename.nfoBase base ++ ".nfo")
+      if isDirectory targetFolder then
+        Rename.Outcome.Conflict sourceText targetFolderText
+      else
+        match
+          catch do
+            _ = createDirectory targetFolder
+            _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
+            renameFile sourceVideo targetVideo
+        with
+          Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
+          Left f -> Rename.Outcome.RenameError sourceText (Failure.message f)
+
+Rename.processFolderWith
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqLargest
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  token
+  folder =
+  folderName = filePathBasename folder
+  folderText = filePathText folder
+  match Stage.largestInFolderWith pqLargest folderText with
+    Some pr ->
+      videoPathText = Stage.ProbeResult.videoPath pr
+      videoPath = FilePath videoPathText
+      maybeNfo = Nfo.tryReadFolder folder
+      _ = Rename.checkAgreement maybeNfo folderName
+      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
+      match Rename.matchTmdbWith
+        pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin with
+        Left err -> Rename.Outcome.NoMatch folderText err
+        Right r  ->
+          details =
+            match Tmdb.cachedDetailsWith
+              pqDet pcDet token (Tmdb.Result.tmdbId r) with
+              Right dd -> dd
+              Left _   -> Tmdb.detailsFromResult r
+          Rename.executeMoveWith
+            pqDup folderFmt fileFmt r details videoPath pr folderName
+    None ->
+      files = directoryContents.texts folder
+      match findFirstVideo files with
+        None -> Rename.Outcome.NoVideo folderText
+        Some videoName ->
+          Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
+
+Rename.processLooseVideoWith
+  pqDup folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet token videoFile =
+  filename = filePathBasename videoFile
+  name = Rename.basenameNoExt filename
+  sourceText = filePathText videoFile
+  match Stage.readWith pqStage sourceText with
+    None    -> Rename.Outcome.NoProbe sourceText
+    Some pr ->
+      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
+      match Rename.matchTmdbWith
+        pqSearch pcSearch pqDet pcDet token name None probeMin with
+        Left err -> Rename.Outcome.NoMatch sourceText err
+        Right r  ->
+          details =
+            match Tmdb.cachedDetailsWith
+              pqDet pcDet token (Tmdb.Result.tmdbId r) with
+              Right dd -> dd
+              Left _   -> Tmdb.detailsFromResult r
+          Rename.executeMoveWith pqDup folderFmt fileFmt r details videoFile pr name
+
+Rename.runOneLooseWith :
+  PreparedQuery r6 a6 Text
+  -> [FormatPart]
+  -> [FormatPart]
+  -> PreparedQuery r5 a5 Text
+  -> PreparedQuery r4 a4 Text
+  -> PreparedCommand r3 a3
+  -> PreparedQuery r2 a2 Text
+  -> PreparedCommand r1 a1
+  -> PreparedCommand r a
+  -> Text
+  -> FilePath
+  ->{IO, Exception, Postgres} ()
+Rename.runOneLooseWith
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  pcLog
+  token
+  videoFile =
+  use Text ++
+  filename = filePathBasename videoFile
+  _ = printLine ("processing (loose): " ++ filename)
+  outcome =
+    processLooseVideoWith
+      pqDup
+      folderFmt
+      fileFmt
+      pqStage
+      pqSearch
+      pcSearch
+      pqDet
+      pcDet
+      token
+      videoFile
+  _ =
+    match outcome with
+      Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
+      DuplicateRemoved _ tgt ->
+        printLine
+          ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
+      NoVideo _ -> printLine "  skip: no video"
+      NoMatch _ reason -> printLine ("  skip: " ++ reason)
+      NoProbe src ->
+        printLine
+          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
+      Conflict _ t ->
+        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
+      RenameError _ msg -> printLine ("  ERROR: " ++ msg)
+  writeOutcomeWith pcLog outcome
+
+Rename.runOneWith :
+  PreparedQuery r6 a6 Text
+  -> [FormatPart]
+  -> [FormatPart]
+  -> pqStage
+  -> PreparedQuery r5 a5 Text
+  -> PreparedQuery r4 a4 Text
+  -> PreparedCommand r3 a3
+  -> PreparedQuery r2 a2 Text
+  -> PreparedCommand r1 a1
+  -> PreparedCommand r a
+  -> Text
+  -> FilePath
+  ->{IO, Exception, Postgres} ()
+Rename.runOneWith
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqLargest
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  pcLog
+  token
+  folder =
+  use Text ++
+  folderName = filePathBasename folder
+  _ = printLine ("processing: " ++ folderName)
+  outcome =
+    processFolderWith
+      pqDup
+      folderFmt
+      fileFmt
+      pqStage
+      pqLargest
+      pqSearch
+      pcSearch
+      pqDet
+      pcDet
+      token
+      folder
+  _ =
+    match outcome with
+      Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
+      DuplicateRemoved _ tgt ->
+        printLine
+          ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
+      NoVideo _ -> printLine "  skip: no video"
+      NoMatch _ reason -> printLine ("  skip: " ++ reason)
+      NoProbe src ->
+        printLine
+          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
+      Conflict _ t ->
+        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
+      RenameError _ msg -> printLine ("  ERROR: " ++ msg)
+  writeOutcomeWith pcLog outcome
+
+uniDork.cli : '{IO, Exception} ()
+uniDork.cli = do
+  args = getArgs()
+  match args with
+    "import" +: _    -> batchedRun()
+    "identify" +: _  -> identify()
+    "rename" +: rest ->
+      match rest with
+        format +: _ -> renameWithCombinedFormat format ()
+        []          -> rename()
+    _                ->
+      _ = printLine "usage: unidork-import <import|identify|rename> [format]"
+      ()
+
+uniDork.rename : '{IO, Exception} ()
+uniDork.rename = renameWith folderFormat fileFormat
+
+uniDork.renameWith : Text -> Text -> '{IO, Exception} ()
+uniDork.renameWith folderFmtText fileFmtText =
+  do
+    use Db foreach_
+    use List size
+    use Nat toText
+    use PreparedCommand close
+    use Text ++
+    use Universal eq
+    folderFmt = parseFormat folderFmtText
+    fileFmt = parseFormat fileFmtText
+    staging = FilePath stagingDir
+    if isDirectory staging then
+      _ = catch do
+        if isDirectory (FilePath targetRoot) then ()
+        else
+          _ = createDirectory (FilePath targetRoot)
+          ()
+      token = readToken()
+      entries = directoryContents.texts staging
+      folderNames =
+        List.filter
+          (n ->
+            (if eq n "." then false
+            else if eq n ".." then false else isDirectory (pathJoin staging n)))
+          entries
+      folders = List.map (n -> pathJoin staging n) folderNames
+      loose = looseVideos staging
+      _ =
+        printLine
+          (Text.join
+            ""
+            [ "rename: "
+            , toText (size folders)
+            , " folder(s), "
+            , toText (size loose)
+            , " loose video(s) under "
+            , stagingDir
+            ])
+      _ = printLine ""
+      singleIO Db.config do
+        pqStage = prepareQuery selectProbeSql
+        pqLargest = prepareQuery selectLargestInFolderSql
+        pqSearch = prepareQuery selectSearchSql
+        pcSearch = prepareCommand upsertSearchSql
+        pqDet = prepareQuery selectDetailsSql
+        pcDet = prepareCommand upsertDetailsSql
+        pcLog = prepareCommand insertLogSql
+        pqDup = prepareQuery selectRenamedTargetByCrcSql
+        _ =
+          foreach_
+            (runOneWith
+              pqDup
+              folderFmt
+              fileFmt
+              pqStage
+              pqLargest
+              pqSearch
+              pcSearch
+              pqDet
+              pcDet
+              pcLog
+              token)
+            folders
+        _ =
+          foreach_
+            (runOneLooseWith
+              pqDup
+              folderFmt
+              fileFmt
+              pqStage
+              pqSearch
+              pcSearch
+              pqDet
+              pcDet
+              pcLog
+              token)
+            loose
+        _ = close pcSearch
+        _ = close pcDet
+        _ = close pcLog
+        ()
+    else printLine ("staging not found: " ++ stagingDir)
+
+uniDork.renameWithCombinedFormat : Text -> '{IO, Exception} ()
+uniDork.renameWithCombinedFormat fullFormat =
+  do
+    use List reverse
+    parts = Text.split ?/ fullFormat
+    match reverse parts with
+      [] ->
+        _ = printLine "empty format"
+        ()
+      [_] ->
+        _ =
+          printLine
+            "format must contain '/' separating folder and file templates"
+        ()
+      fileFmt +: folderParts ->
+        folderFmt = Text.join "/" (reverse folderParts)
+        renameWith folderFmt fileFmt ()
+
 type MovieId
   = { kodi : Text,
       imdb : Optional Text,
@@ -1377,48 +1700,6 @@ Rename.insertLogSql =
 -- Cleanup helpers (unchanged from prior turn, included for completeness)
 -- ============================================================
 
-Rename.cleanupSource : Boolean
-Rename.cleanupSource = true
-
-Rename.isStagingChild : FilePath -> Boolean
-Rename.isStagingChild path =
-  use Text ++
-  use Nat >
-  pt = filePathText path
-  prefix = Tmdb.stagingDir ++ "/"
-  startsWith prefix pt && Text.size pt > Text.size prefix
-
-Rename.rmRf : FilePath ->{IO, Exception} ()
-Rename.rmRf path =
-  use Universal eq
-  isDir = match catch do isDirectory path with
-    Right b -> b
-    Left _  -> false
-  if isDir then
-    rawKids = match catch do directoryContents.texts path with
-      Right ks -> ks
-      Left _   -> []
-    kids =
-      List.filter
-        (n ->
-          if eq n "." then false
-          else if eq n ".." then false
-          else true)
-        rawKids
-    _ = Db.foreach_
-          (n -> catch do Rename.rmRf (pathJoin path n))
-          kids
-    _ = catch do removeDirectory path
-    ()
-  else
-    _ = catch do removeFile path
-    ()
-
-Rename.safeRmRf : FilePath ->{IO, Exception} ()
-Rename.safeRmRf path =
-  if Rename.isStagingChild path then Rename.rmRf path
-  else ()
-
 -- ============================================================
 -- Outcome with DuplicateRemoved variant
 -- ============================================================
@@ -1731,292 +2012,282 @@ Stage.ProbeResult.primaryAudio pr = List.head (Stage.ProbeResult.audios pr)
 --     Right v -> Right v
 --     Left f  -> Left (Failure.message f)
 
-Rename.executeMoveWith pqDup folderFmt fileFmt r d sourceVideo cleanupPath pr originalName =
-  use Text ++
-  sourceText = filePathText sourceVideo
-  sourceCrc = Stage.ProbeResult.crc32 pr
-  doCleanup label =
-    if Rename.cleanupSource then
-      _ = printLine ("  cleanup (" ++ label ++ "): " ++ filePathText cleanupPath)
-      _ = catch do Rename.safeRmRf cleanupPath
-      ()
-    else ()
-  match Rename.findPriorTargetForCrcWith pqDup sourceCrc with
-    Some priorTarget ->
-      _ = doCleanup "duplicate"
-      Rename.Outcome.DuplicateRemoved sourceText priorTarget
-    None ->
-      videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
-      base = Rename.renderWith fileFmt r pr originalName
-      targetFolderText =
-        Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
-      targetFolder = FilePath targetFolderText
-      targetVideo = pathJoin targetFolder (base ++ videoExt)
-      targetNfo = pathJoin targetFolder (Rename.nfoBase base ++ ".nfo")
-      if isDirectory targetFolder then
-        Rename.Outcome.Conflict sourceText targetFolderText
-      else
-        match
-          catch do
-            _ = createDirectory targetFolder
-            _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
-            renameFile sourceVideo targetVideo
-        with
-          Right _ ->
-            _ = doCleanup "renamed"
-            Rename.Outcome.Renamed sourceText targetFolderText
-          Left f -> Rename.Outcome.RenameError sourceText (Failure.message f)
+-- Rename.executeMoveWith pqDup folderFmt fileFmt r d sourceVideo pr originalName =
+--   use Text ++
+--   sourceText = filePathText sourceVideo
+--   sourceCrc = Stage.ProbeResult.crc32 pr
+--   match Rename.findPriorTargetForCrcWith pqDup sourceCrc with
+--     Some priorTarget ->
+--       Rename.Outcome.DuplicateRemoved sourceText priorTarget
+--     None ->
+--       videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
+--       base = Rename.renderWith fileFmt r pr originalName
+--       targetFolderText =
+--         Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
+--       targetFolder = FilePath targetFolderText
+--       targetVideo = pathJoin targetFolder (base ++ videoExt)
+--       targetNfo = pathJoin targetFolder (Rename.nfoBase base ++ ".nfo")
+--       if isDirectory targetFolder then
+--         Rename.Outcome.Conflict sourceText targetFolderText
+--       else
+--         match
+--           catch do
+--             _ = createDirectory targetFolder
+--             _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
+--             renameFile sourceVideo targetVideo
+--         with
+--           Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
+--           Left f -> Rename.Outcome.RenameError sourceText (Failure.message f)
 
 -- ============================================================
 -- processFolderWith / processLooseVideoWith: thread pqDup through
 -- ============================================================
 
-Rename.processFolderWith
-  pqDup
-  folderFmt
-  fileFmt
-  pqStage
-  pqLargest
-  pqSearch
-  pcSearch
-  pqDet
-  pcDet
-  token
-  folder =
-  folderName = filePathBasename folder
-  folderText = filePathText folder
-  match Stage.largestInFolderWith pqLargest folderText with
-    Some pr ->
-      videoPathText = Stage.ProbeResult.videoPath pr
-      videoPath = FilePath videoPathText
-      maybeNfo = Nfo.tryReadFolder folder
-      _ = Rename.checkAgreement maybeNfo folderName
-      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
-      match Rename.matchTmdbWith
-        pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin with
-        Left err -> Rename.Outcome.NoMatch folderText err
-        Right r  ->
-          details =
-            match Tmdb.cachedDetailsWith
-              pqDet pcDet token (Tmdb.Result.tmdbId r) with
-              Right dd -> dd
-              Left _   -> Tmdb.detailsFromResult r
-          Rename.executeMoveWith
-            pqDup folderFmt fileFmt r details videoPath folder pr folderName
-    None ->
-      files = directoryContents.texts folder
-      match findFirstVideo files with
-        None -> Rename.Outcome.NoVideo folderText
-        Some videoName ->
-          Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
+-- Rename.processFolderWith
+--   pqDup
+--   folderFmt
+--   fileFmt
+--   pqStage
+--   pqLargest
+--   pqSearch
+--   pcSearch
+--   pqDet
+--   pcDet
+--   token
+--   folder =
+--   folderName = filePathBasename folder
+--   folderText = filePathText folder
+--   match Stage.largestInFolderWith pqLargest folderText with
+--     Some pr ->
+--       videoPathText = Stage.ProbeResult.videoPath pr
+--       videoPath = FilePath videoPathText
+--       maybeNfo = Nfo.tryReadFolder folder
+--       _ = Rename.checkAgreement maybeNfo folderName
+--       probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
+--       match Rename.matchTmdbWith
+--         pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin with
+--         Left err -> Rename.Outcome.NoMatch folderText err
+--         Right r  ->
+--           details =
+--             match Tmdb.cachedDetailsWith
+--               pqDet pcDet token (Tmdb.Result.tmdbId r) with
+--               Right dd -> dd
+--               Left _   -> Tmdb.detailsFromResult r
+--           Rename.executeMoveWith
+--             pqDup folderFmt fileFmt r details videoPath pr folderName
+--     None ->
+--       files = directoryContents.texts folder
+--       match findFirstVideo files with
+--         None -> Rename.Outcome.NoVideo folderText
+--         Some videoName ->
+--           Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
 
-Rename.processLooseVideoWith
-  pqDup folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet token videoFile =
-  filename = filePathBasename videoFile
-  name = Rename.basenameNoExt filename
-  sourceText = filePathText videoFile
-  match Stage.readWith pqStage sourceText with
-    None    -> Rename.Outcome.NoProbe sourceText
-    Some pr ->
-      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
-      match Rename.matchTmdbWith
-        pqSearch pcSearch pqDet pcDet token name None probeMin with
-        Left err -> Rename.Outcome.NoMatch sourceText err
-        Right r  ->
-          details =
-            match Tmdb.cachedDetailsWith
-              pqDet pcDet token (Tmdb.Result.tmdbId r) with
-              Right dd -> dd
-              Left _   -> Tmdb.detailsFromResult r
-          Rename.executeMoveWith
-            pqDup folderFmt fileFmt r details videoFile videoFile pr name
+-- Rename.processLooseVideoWith
+--   pqDup folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet token videoFile =
+--   filename = filePathBasename videoFile
+--   name = Rename.basenameNoExt filename
+--   sourceText = filePathText videoFile
+--   match Stage.readWith pqStage sourceText with
+--     None    -> Rename.Outcome.NoProbe sourceText
+--     Some pr ->
+--       probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
+--       match Rename.matchTmdbWith
+--         pqSearch pcSearch pqDet pcDet token name None probeMin with
+--         Left err -> Rename.Outcome.NoMatch sourceText err
+--         Right r  ->
+--           details =
+--             match Tmdb.cachedDetailsWith
+--               pqDet pcDet token (Tmdb.Result.tmdbId r) with
+--               Right dd -> dd
+--               Left _   -> Tmdb.detailsFromResult r
+--           Rename.executeMoveWith pqDup folderFmt fileFmt r details videoFile pr name
 
--- ============================================================
--- runOneWith / runOneLooseWith: thread pqDup, print the new outcome
--- ============================================================
+-- -- ============================================================
+-- -- runOneWith / runOneLooseWith: thread pqDup, print the new outcome
+-- -- ============================================================
 
-Rename.runOneWith
-  pqDup
-  folderFmt
-  fileFmt
-  pqStage
-  pqLargest
-  pqSearch
-  pcSearch
-  pqDet
-  pcDet
-  pcLog
-  token
-  folder =
-  use Text ++
-  folderName = filePathBasename folder
-  _ = printLine ("processing: " ++ folderName)
-  outcome =
-    Rename.processFolderWith
-      pqDup
-      folderFmt
-      fileFmt
-      pqStage
-      pqLargest
-      pqSearch
-      pcSearch
-      pqDet
-      pcDet
-      token
-      folder
-  _ =
-    match outcome with
-      Rename.Outcome.Renamed _ tgt ->
-        printLine ("  RENAMED -> " ++ tgt)
-      Rename.Outcome.DuplicateRemoved _ tgt ->
-        printLine ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
-      Rename.Outcome.NoVideo _ ->
-        printLine "  skip: no video"
-      Rename.Outcome.NoMatch _ reason ->
-        printLine ("  skip: " ++ reason)
-      Rename.Outcome.NoProbe src ->
-        printLine
-          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
-      Rename.Outcome.Conflict _ t ->
-        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
-      Rename.Outcome.RenameError _ msg ->
-        printLine ("  ERROR: " ++ msg)
-  Rename.writeOutcomeWith pcLog outcome
+-- Rename.runOneWith
+--   pqDup
+--   folderFmt
+--   fileFmt
+--   pqStage
+--   pqLargest
+--   pqSearch
+--   pcSearch
+--   pqDet
+--   pcDet
+--   pcLog
+--   token
+--   folder =
+--   use Text ++
+--   folderName = filePathBasename folder
+--   _ = printLine ("processing: " ++ folderName)
+--   outcome =
+--     Rename.processFolderWith
+--       pqDup
+--       folderFmt
+--       fileFmt
+--       pqStage
+--       pqLargest
+--       pqSearch
+--       pcSearch
+--       pqDet
+--       pcDet
+--       token
+--       folder
+--   _ =
+--     match outcome with
+--       Rename.Outcome.Renamed _ tgt ->
+--         printLine ("  RENAMED -> " ++ tgt)
+--       Rename.Outcome.DuplicateRemoved _ tgt ->
+--         printLine ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
+--       Rename.Outcome.NoVideo _ ->
+--         printLine "  skip: no video"
+--       Rename.Outcome.NoMatch _ reason ->
+--         printLine ("  skip: " ++ reason)
+--       Rename.Outcome.NoProbe src ->
+--         printLine
+--           ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
+--       Rename.Outcome.Conflict _ t ->
+--         printLine ("  skip: target exists; no prior rename for this crc " ++ t)
+--       Rename.Outcome.RenameError _ msg ->
+--         printLine ("  ERROR: " ++ msg)
+--   Rename.writeOutcomeWith pcLog outcome
 
-Rename.runOneLooseWith
-  pqDup
-  folderFmt
-  fileFmt
-  pqStage
-  pqSearch
-  pcSearch
-  pqDet
-  pcDet
-  pcLog
-  token
-  videoFile =
-  use Text ++
-  filename = filePathBasename videoFile
-  _ = printLine ("processing (loose): " ++ filename)
-  outcome =
-    Rename.processLooseVideoWith
-      pqDup
-      folderFmt
-      fileFmt
-      pqStage
-      pqSearch
-      pcSearch
-      pqDet
-      pcDet
-      token
-      videoFile
-  _ =
-    match outcome with
-      Rename.Outcome.Renamed _ tgt ->
-        printLine ("  RENAMED -> " ++ tgt)
-      Rename.Outcome.DuplicateRemoved _ tgt ->
-        printLine ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
-      Rename.Outcome.NoVideo _ ->
-        printLine "  skip: no video"
-      Rename.Outcome.NoMatch _ reason ->
-        printLine ("  skip: " ++ reason)
-      Rename.Outcome.NoProbe src ->
-        printLine
-          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
-      Rename.Outcome.Conflict _ t ->
-        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
-      Rename.Outcome.RenameError _ msg ->
-        printLine ("  ERROR: " ++ msg)
-  Rename.writeOutcomeWith pcLog outcome
+-- Rename.runOneLooseWith
+--   pqDup
+--   folderFmt
+--   fileFmt
+--   pqStage
+--   pqSearch
+--   pcSearch
+--   pqDet
+--   pcDet
+--   pcLog
+--   token
+--   videoFile =
+--   use Text ++
+--   filename = filePathBasename videoFile
+--   _ = printLine ("processing (loose): " ++ filename)
+--   outcome =
+--     Rename.processLooseVideoWith
+--       pqDup
+--       folderFmt
+--       fileFmt
+--       pqStage
+--       pqSearch
+--       pcSearch
+--       pqDet
+--       pcDet
+--       token
+--       videoFile
+--   _ =
+--     match outcome with
+--       Rename.Outcome.Renamed _ tgt ->
+--         printLine ("  RENAMED -> " ++ tgt)
+--       Rename.Outcome.DuplicateRemoved _ tgt ->
+--         printLine ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
+--       Rename.Outcome.NoVideo _ ->
+--         printLine "  skip: no video"
+--       Rename.Outcome.NoMatch _ reason ->
+--         printLine ("  skip: " ++ reason)
+--       Rename.Outcome.NoProbe src ->
+--         printLine
+--           ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
+--       Rename.Outcome.Conflict _ t ->
+--         printLine ("  skip: target exists; no prior rename for this crc " ++ t)
+--       Rename.Outcome.RenameError _ msg ->
+--         printLine ("  ERROR: " ++ msg)
+--   Rename.writeOutcomeWith pcLog outcome
 
--- ============================================================
--- renameWith: prepare and close pqDup alongside the other statements
--- ============================================================
+-- -- ============================================================
+-- -- renameWith: prepare and close pqDup alongside the other statements
+-- -- ============================================================
 
-uniDork.renameWith : Text -> Text -> '{IO, Exception} ()
-uniDork.renameWith folderFmtText fileFmtText =
-  do
-    use List size
-    use Nat toText
-    use PreparedCommand close
-    use PreparedQuery closeQuery
-    use Text ++
-    use Universal eq
-    folderFmt = Rename.parseFormat folderFmtText
-    fileFmt = Rename.parseFormat fileFmtText
-    staging = FilePath Tmdb.stagingDir
-    if isDirectory staging then
-      _ = catch do
-        if isDirectory (FilePath Rename.targetRoot) then ()
-        else
-          _ = createDirectory (FilePath Rename.targetRoot)
-          ()
-      token = Tmdb.readToken()
-      entries = directoryContents.texts staging
-      folderNames =
-        List.filter
-          (n ->
-            (if eq n "." then false
-            else if eq n ".." then false
-            else isDirectory (pathJoin staging n)))
-          entries
-      folders = List.map (n -> pathJoin staging n) folderNames
-      loose = Rename.looseVideos staging
-      _ =
-        printLine
-          (Text.join
-            ""
-            [ "rename: "
-            , toText (size folders)
-            , " folder(s), "
-            , toText (size loose)
-            , " loose video(s) under "
-            , Tmdb.stagingDir
-            ])
-      _ = printLine ""
-      singleIO Db.config do
-        pqStage   = prepareQuery   Stage.selectProbeSql
-        pqLargest = prepareQuery   Stage.selectLargestInFolderSql
-        pqSearch  = prepareQuery   Tmdb.selectSearchSql
-        pcSearch  = prepareCommand Tmdb.upsertSearchSql
-        pqDet     = prepareQuery   Tmdb.selectDetailsSql
-        pcDet     = prepareCommand Tmdb.upsertDetailsSql
-        pcLog     = prepareCommand Rename.insertLogSql
-        pqDup     = prepareQuery   Rename.selectRenamedTargetByCrcSql
-        _ =
-          Db.foreach_
-            (Rename.runOneWith
-              pqDup
-              folderFmt
-              fileFmt
-              pqStage
-              pqLargest
-              pqSearch
-              pcSearch
-              pqDet
-              pcDet
-              pcLog
-              token)
-            folders
-        _ =
-          Db.foreach_
-            (Rename.runOneLooseWith
-              pqDup
-              folderFmt
-              fileFmt
-              pqStage
-              pqSearch
-              pcSearch
-              pqDet
-              pcDet
-              pcLog
-              token)
-            loose
-        _ = close pcSearch
-        _ = close pcDet
-        _ = close pcLog
-        ()
-    else printLine ("staging not found: " ++ Tmdb.stagingDir)
+-- uniDork.renameWith : Text -> Text -> '{IO, Exception} ()
+-- uniDork.renameWith folderFmtText fileFmtText =
+--   do
+--     use List size
+--     use Nat toText
+--     use PreparedCommand close
+--     use PreparedQuery closeQuery
+--     use Text ++
+--     use Universal eq
+--     folderFmt = Rename.parseFormat folderFmtText
+--     fileFmt = Rename.parseFormat fileFmtText
+--     staging = FilePath Tmdb.stagingDir
+--     if isDirectory staging then
+--       _ = catch do
+--         if isDirectory (FilePath Rename.targetRoot) then ()
+--         else
+--           _ = createDirectory (FilePath Rename.targetRoot)
+--           ()
+--       token = Tmdb.readToken()
+--       entries = directoryContents.texts staging
+--       folderNames =
+--         List.filter
+--           (n ->
+--             (if eq n "." then false
+--             else if eq n ".." then false
+--             else isDirectory (pathJoin staging n)))
+--           entries
+--       folders = List.map (n -> pathJoin staging n) folderNames
+--       loose = Rename.looseVideos staging
+--       _ =
+--         printLine
+--           (Text.join
+--             ""
+--             [ "rename: "
+--             , toText (size folders)
+--             , " folder(s), "
+--             , toText (size loose)
+--             , " loose video(s) under "
+--             , Tmdb.stagingDir
+--             ])
+--       _ = printLine ""
+--       singleIO Db.config do
+--         pqStage   = prepareQuery   Stage.selectProbeSql
+--         pqLargest = prepareQuery   Stage.selectLargestInFolderSql
+--         pqSearch  = prepareQuery   Tmdb.selectSearchSql
+--         pcSearch  = prepareCommand Tmdb.upsertSearchSql
+--         pqDet     = prepareQuery   Tmdb.selectDetailsSql
+--         pcDet     = prepareCommand Tmdb.upsertDetailsSql
+--         pcLog     = prepareCommand Rename.insertLogSql
+--         pqDup     = prepareQuery   Rename.selectRenamedTargetByCrcSql
+--         _ =
+--           Db.foreach_
+--             (Rename.runOneWith
+--               pqDup
+--               folderFmt
+--               fileFmt
+--               pqStage
+--               pqLargest
+--               pqSearch
+--               pcSearch
+--               pqDet
+--               pcDet
+--               pcLog
+--               token)
+--             folders
+--         _ =
+--           Db.foreach_
+--             (Rename.runOneLooseWith
+--               pqDup
+--               folderFmt
+--               fileFmt
+--               pqStage
+--               pqSearch
+--               pcSearch
+--               pqDet
+--               pcDet
+--               pcLog
+--               token)
+--             loose
+--         _ = close pcSearch
+--         _ = close pcDet
+--         _ = close pcLog
+--         ()
+--     else printLine ("staging not found: " ++ Tmdb.stagingDir)
 
 -- Rename.Outcome.parts :
 --   Rename.Outcome -> (Text, Text, Optional Text, Optional Text)
@@ -3811,118 +4082,6 @@ uniDork.identify =
         close pcDet
     else printLine ("staging not found: " ++ Tmdb.stagingDir)
 
--- uniDork.renameWith : Text -> Text -> '{IO, Exception} ()
--- uniDork.renameWith folderFmtText fileFmtText =
---   do
---     use List size
---     use Nat toText
---     use PreparedCommand close
---     use Text ++
---     use Universal eq
---     folderFmt = Rename.parseFormat folderFmtText
---     fileFmt = Rename.parseFormat fileFmtText
---     staging = FilePath Tmdb.stagingDir
---     if isDirectory staging then
---       _ = catch do
---         if isDirectory (FilePath Rename.targetRoot) then ()
---         else
---           _ = createDirectory (FilePath Rename.targetRoot)
---           ()
---       token = Tmdb.readToken()
---       entries = directoryContents.texts staging
---       folderNames =
---         List.filter
---           (n ->
---             (if eq n "." then false
---             else if eq n ".." then false else isDirectory (pathJoin staging n)))
---           entries
---       folders = List.map (n -> pathJoin staging n) folderNames
---       loose = Rename.looseVideos staging
---       _ =
---         printLine
---           (Text.join
---             ""
---             [ "rename: "
---             , toText (size folders)
---             , " folder(s), "
---             , toText (size loose)
---             , " loose video(s) under "
---             , Tmdb.stagingDir
---             ])
---       _ = printLine ""
---       singleIO Db.config do
---         pqStage = prepareQuery Stage.selectProbeSql
---         pqLargest = prepareQuery Stage.selectLargestInFolderSql
---         pqSearch = prepareQuery Tmdb.selectSearchSql
---         pcSearch = prepareCommand Tmdb.upsertSearchSql
---         pqDet = prepareQuery Tmdb.selectDetailsSql
---         pcDet = prepareCommand Tmdb.upsertDetailsSql
---         pcLog = prepareCommand Rename.insertLogSql
---         _ =
---           Db.foreach_
---             (Rename.runOneWith
---               folderFmt
---               fileFmt
---               pqStage
---               pqLargest
---               pqSearch
---               pcSearch
---               pqDet
---               pcDet
---               pcLog
---               token)
---             folders
---         _ =
---           Db.foreach_
---             (Rename.runOneLooseWith
---               folderFmt
---               fileFmt
---               pqStage
---               pqSearch
---               pcSearch
---               pqDet
---               pcDet
---               pcLog
---               token)
---             loose
---         _ = close pcSearch
---         _ = close pcDet
---         close pcLog
---     else printLine ("staging not found: " ++ Tmdb.stagingDir)
-
-uniDork.renameWithCombinedFormat : Text -> '{IO, Exception} ()
-uniDork.renameWithCombinedFormat fullFormat =
-  do
-    use List reverse
-    parts = Text.split ?/ fullFormat
-    match reverse parts with
-      [] ->
-        _ = printLine "empty format"
-        ()
-      [_] ->
-        _ =
-          printLine
-            "format must contain '/' separating folder and file templates"
-        ()
-      fileFmt +: folderParts ->
-        folderFmt = Text.join "/" (reverse folderParts)
-        uniDork.renameWith folderFmt fileFmt ()
-
-uniDork.rename : '{IO, Exception} ()
-uniDork.rename = uniDork.renameWith Rename.folderFormat Rename.fileFormat
-
-uniDork.batchSize : Nat
-uniDork.batchSize = 50
-
-List.chunk : Nat -> [a] -> [[a]]
-List.chunk n xs =
-  use List +: size
-  use Nat <=
-  if Universal.eq (size xs) 0 then []
-  else
-    if size xs <= n then [xs]
-    else List.take n xs +: List.chunk n (List.drop n xs)
-
 uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
 uniDork.collectFolders roots =
   addIfDir : FilePath -> [FilePath] -> Text ->{IO, Exception} [FilePath]
@@ -4167,20 +4326,6 @@ Nfo.extractTitle m =
 Nfo.extractYear : Movie -> Optional Nat
 Nfo.extractYear m = Scoring.year (Movie.scoring m)
 
-uniDork.cli : '{IO, Exception} ()
-uniDork.cli = do
-  args = getArgs()
-  match args with
-    "import" +: _    -> uniDork.batchedRun()
-    "identify" +: _  -> uniDork.identify()
-    "rename" +: rest ->
-      match rest with
-        format +: _ -> uniDork.renameWithCombinedFormat format ()
-        []          -> uniDork.rename()
-    _                ->
-      _ = printLine "usage: unidork-import <import|identify|rename> [format]"
-      ()
-
 Stage.AudioInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.AudioInfo
 Stage.AudioInfo.fromJson =
   do
@@ -4225,9 +4370,6 @@ Stage.ProbeResult.fromJson =
         [] (optional! (at "subtitles" (array Stage.SubtitleInfo.fromJson)))
     Stage.ProbeResult.ProbeResult
       videoPath crc32 sizeBytes durationSec video audios subtitles
-
--- Stage.ProbeResult.primaryAudio : Stage.ProbeResult -> Optional Stage.AudioInfo
--- Stage.ProbeResult.primaryAudio pr = List.head (Stage.ProbeResult.audios pr)
 
 Rename.audioPart : Stage.ProbeResult -> Text
 Rename.audioPart pr =
@@ -4616,96 +4758,6 @@ Nfo.generate _r d pr =
 
 Rename.nfoBase : Text -> Text
 Rename.nfoBase _videoBase = "movie"
-
--- Rename.executeMoveWith :
---   [Rename.FormatPart]
---   -> [Rename.FormatPart]
---   -> Tmdb.Result
---   -> Tmdb.Details
---   -> FilePath
---   -> Stage.ProbeResult
---   -> Text
---   ->{IO, Exception} Rename.Outcome
--- Rename.executeMoveWith folderFmt fileFmt r d sourceVideo pr originalName =
---   use Text ++
---   sourceText = filePathText sourceVideo
---   videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
---   base = Rename.renderWith fileFmt r pr originalName
---   targetFolderText =
---     Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
---   targetFolder = FilePath targetFolderText
---   targetVideo = pathJoin targetFolder (base ++ videoExt)
---   targetNfo = pathJoin targetFolder (Rename.nfoBase base ++ ".nfo")
---   if isDirectory targetFolder then
---     Rename.Outcome.Conflict sourceText targetFolderText
---   else
---     match 
---       catch do
---         _ = createDirectory targetFolder
---         _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
---         renameFile sourceVideo targetVideo
---      with
---       Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
---       Left f  -> Rename.Outcome.RenameError sourceText (Failure.message f)
-
--- Rename.processFolderWith
---   folderFmt
---   fileFmt
---   pqStage
---   pqLargest
---   pqSearch
---   pcSearch
---   pqDet
---   pcDet
---   token
---   folder =
---   folderName = filePathBasename folder
---   folderText = filePathText folder
---   match Stage.largestInFolderWith pqLargest folderText with
---     Some pr ->
---       videoPathText = Stage.ProbeResult.videoPath pr
---       videoPath = FilePath videoPathText
---       maybeNfo = Nfo.tryReadFolder folder
---       _ = Rename.checkAgreement maybeNfo folderName
---       probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
---       match Rename.matchTmdbWith
---         pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin with
---         Left err -> Rename.Outcome.NoMatch folderText err
---         Right r ->
---           details =
---             match Tmdb.cachedDetailsWith
---               pqDet pcDet token (Tmdb.Result.tmdbId r) with
---               Right dd -> dd
---               Left _   -> Tmdb.detailsFromResult r
---           Rename.executeMoveWith
---             folderFmt fileFmt r details videoPath pr folderName
---     None ->
---       files = directoryContents.texts folder
---       match findFirstVideo files with
---         None -> Rename.Outcome.NoVideo folderText
---         Some videoName ->
---           Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
-
--- Rename.processLooseVideoWith
---   folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet token videoFile =
---   filename = filePathBasename videoFile
---   name = Rename.basenameNoExt filename
---   sourceText = filePathText videoFile
---   match Stage.readWith pqStage sourceText with
---     None -> Rename.Outcome.NoProbe sourceText
---     Some pr ->
---       probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
---       match Rename.matchTmdbWith
---         pqSearch pcSearch pqDet pcDet token name None probeMin with
---         Left err -> Rename.Outcome.NoMatch sourceText err
---         Right r ->
---           details =
---             match Tmdb.cachedDetailsWith
---               pqDet pcDet token (Tmdb.Result.tmdbId r) with
---               Right dd -> dd
---               Left _   -> Tmdb.detailsFromResult r
---           Rename.executeMoveWith folderFmt fileFmt r details videoFile pr name
-
 
 test> Rename.gigabytes.test =
   use Universal eq
