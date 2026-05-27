@@ -18,7 +18,18 @@
           overlays = [ unison-nix.overlay ];
         };
 
-        config       = import ./nix/config.nix { };
+        baseConfig = import ./nix/config.nix { };
+
+        libraryConfigFile =
+          pkgs.writeText "uniDork.conf"
+            (pkgs.lib.concatStringsSep "\n" baseConfig.library.roots + "\n");
+
+        config = baseConfig // {
+          library = baseConfig.library // {
+            configFile = libraryConfigFile;
+          };
+        };
+
         uniDork      = import ./nix/build.nix     { inherit pkgs; };
         postgres     = import ./nix/postgres.nix  { inherit pkgs; inherit (config) database; };
         probe        = import ./nix/probe.nix     { inherit pkgs; inherit (config) cache library staging database; };
@@ -36,6 +47,7 @@
           inherit pkgs config uniDork postgres probe orchestrator;
         };
       });
+
   nixConfig = {
     extra-experimental-features = ["nix-command flakes" "ca-derivations"];
     allow-import-from-derivation = "true";

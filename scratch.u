@@ -3552,7 +3552,14 @@ uniDork.batchedMain configPath =
   printLine "done"
 
 uniDork.batchedRun : '{IO, Exception} ()
-uniDork.batchedRun = do uniDork.batchedMain "./uniDork.conf"
+uniDork.batchedRun = do
+  args = !IO.getArgs
+  configPath = match args with
+    _ +: rest -> match rest with
+      p +: _ -> p
+      []     -> "./uniDork.conf"
+    [] -> "./uniDork.conf"
+  uniDork.batchedMain configPath
 
 Nfo.tryReadFolder : FilePath ->{IO, Exception} Optional Movie
 Nfo.tryReadFolder folder =

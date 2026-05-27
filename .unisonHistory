@@ -1,3 +1,7 @@
+update
+update uniDork.batchedRun
+compile uniDork.cli ./bin/unidork-import
+update
 compile uniDork.cli ./bin/unidork-import
 update
 compile uniDork.cli ./bin/unidork-import

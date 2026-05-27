@@ -14,9 +14,10 @@
   };
 
   library = {
-    configFile = ../uniDork.conf;
+    roots = [
+      "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Movies"
+    ];
   };
-
   staging = {
     movies = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies";
   };

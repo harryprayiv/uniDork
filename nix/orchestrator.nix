@@ -57,7 +57,7 @@ pkgs.writeShellApplication {
     cmd_probe_stage() { ensure_pg; unidork-stage-probe; }
     cmd_probe()       { cmd_probe_lib; cmd_probe_stage; }
 
-    cmd_import()    { ensure_pg; run_unison_subcommand import; }
+    cmd_import()    { ensure_pg; run_unison_subcommand import "$UNIDORK_CONFIG"; }
     cmd_identify()  { ensure_pg; run_unison_subcommand identify; }
 
     cmd_rename() {
