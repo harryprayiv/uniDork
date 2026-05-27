@@ -1,5 +1,12 @@
 compile uniDork.cli ./bin/unidork-import
 update
+compile uniDork.cli ./bin/unidork-import
+update
+compile uniDork.cli ./bin/unidork-import
+update
+quit
+compile uniDork.cli ./bin/unidork-import
+update
 delete.term Stage.ProbeResult.audio
 update
 quit
