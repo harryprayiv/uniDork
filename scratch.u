@@ -1,199 +1,3 @@
--- The definitions below depend on the deleted definitions.
--- Please fix the errors and run `update`.
-
-Rename.executeMoveWith
-  pqDup folderFmt fileFmt r d sourceVideo pr originalName subsToken =
-  use Text ++
-  sourceText = filePathText sourceVideo
-  sourceCrc = Stage.ProbeResult.crc32 pr
-  match Rename.findPriorTargetForCrcWith pqDup sourceCrc with
-    Some priorTarget ->
-      Rename.Outcome.DuplicateRemoved sourceText priorTarget
-    None ->
-      videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
-      base = Rename.renderWith fileFmt r pr originalName
-      targetFolderText =
-        Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
-      targetFolder = FilePath targetFolderText
-      targetVideo = pathJoin targetFolder (base ++ videoExt)
-      targetNfo = pathJoin targetFolder (Rename.nfoBase base ++ ".nfo")
-      if isDirectory targetFolder then
-        Rename.Outcome.Conflict sourceText targetFolderText
-      else
-        match
-          catch do
-            _ = createDirectory targetFolder
-            _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
-            renameFile sourceVideo targetVideo
-        with
-          Right _ ->
-            _ = catch do Rename.maybeFetchSubs subsToken d targetFolder base
-            Rename.Outcome.Renamed sourceText targetFolderText
-          Left f -> Rename.Outcome.RenameError sourceText (Failure.message f)
-
-Rename.processFolderWith
-  pqDup
-  folderFmt
-  fileFmt
-  pqStage
-  pqLargest
-  pqSearch
-  pcSearch
-  pqDet
-  pcDet
-  token
-  subsToken
-  folder =
-  folderName = filePathBasename folder
-  folderText = filePathText folder
-  match Stage.largestInFolderWith pqLargest folderText with
-    Some pr ->
-      videoPathText = Stage.ProbeResult.videoPath pr
-      videoPath = FilePath videoPathText
-      maybeNfo = Nfo.tryReadFolder folder
-      _ = Rename.checkAgreement maybeNfo folderName
-      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
-      match Rename.matchTmdbWith
-        pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin with
-        Left err -> Rename.Outcome.NoMatch folderText err
-        Right r  ->
-          details =
-            match Tmdb.cachedDetailsWith
-              pqDet pcDet token (Tmdb.Result.tmdbId r) with
-              Right dd -> dd
-              Left _   -> Tmdb.detailsFromResult r
-          Rename.executeMoveWith
-            pqDup folderFmt fileFmt r details videoPath pr folderName subsToken
-    None ->
-      files = directoryContents.texts folder
-      match findFirstVideo files with
-        None -> Rename.Outcome.NoVideo folderText
-        Some videoName ->
-          Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
-
-Rename.processLooseVideoWith
-  pqDup
-  folderFmt
-  fileFmt
-  pqStage
-  pqSearch
-  pcSearch
-  pqDet
-  pcDet
-  token
-  subsToken
-  videoFile =
-  filename = filePathBasename videoFile
-  name = Rename.basenameNoExt filename
-  sourceText = filePathText videoFile
-  match Stage.readWith pqStage sourceText with
-    None    -> Rename.Outcome.NoProbe sourceText
-    Some pr ->
-      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
-      match Rename.matchTmdbWith
-        pqSearch pcSearch pqDet pcDet token name None probeMin with
-        Left err -> Rename.Outcome.NoMatch sourceText err
-        Right r  ->
-          details =
-            match Tmdb.cachedDetailsWith
-              pqDet pcDet token (Tmdb.Result.tmdbId r) with
-              Right dd -> dd
-              Left _   -> Tmdb.detailsFromResult r
-          Rename.executeMoveWith
-            pqDup folderFmt fileFmt r details videoFile pr name subsToken
-
-Rename.runOneLooseWith
-  pqDup
-  folderFmt
-  fileFmt
-  pqStage
-  pqSearch
-  pcSearch
-  pqDet
-  pcDet
-  pcLog
-  token
-  subsToken
-  videoFile =
-  use Text ++
-  filename = filePathBasename videoFile
-  _ = printLine ("processing (loose): " ++ filename)
-  outcome =
-    processLooseVideoWith
-      pqDup
-      folderFmt
-      fileFmt
-      pqStage
-      pqSearch
-      pcSearch
-      pqDet
-      pcDet
-      token
-      subsToken
-      videoFile
-  _ =
-    match outcome with
-      Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
-      DuplicateRemoved _ tgt ->
-        printLine
-          ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
-      NoVideo _ -> printLine "  skip: no video"
-      NoMatch _ reason -> printLine ("  skip: " ++ reason)
-      NoProbe src ->
-        printLine
-          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
-      Conflict _ t ->
-        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
-      RenameError _ msg -> printLine ("  ERROR: " ++ msg)
-  writeOutcomeWith pcLog outcome
-
-Rename.runOneWith
-  pqDup
-  folderFmt
-  fileFmt
-  pqStage
-  pqLargest
-  pqSearch
-  pcSearch
-  pqDet
-  pcDet
-  pcLog
-  token
-  subsToken
-  folder =
-  use Text ++
-  folderName = filePathBasename folder
-  _ = printLine ("processing: " ++ folderName)
-  outcome =
-    processFolderWith
-      pqDup
-      folderFmt
-      fileFmt
-      pqStage
-      pqLargest
-      pqSearch
-      pcSearch
-      pqDet
-      pcDet
-      token
-      subsToken
-      folder
-  _ =
-    match outcome with
-      Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
-      DuplicateRemoved _ tgt ->
-        printLine
-          ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
-      NoVideo _ -> printLine "  skip: no video"
-      NoMatch _ reason -> printLine ("  skip: " ++ reason)
-      NoProbe src ->
-        printLine
-          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
-      Conflict _ t ->
-        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
-      RenameError _ msg -> printLine ("  ERROR: " ++ msg)
-  writeOutcomeWith pcLog outcome
-
 uniDork.cli : '{IO, Exception} ()
 uniDork.cli = do
   args = getArgs()
@@ -325,6 +129,268 @@ uniDork.renameWithCombinedFormat fullFormat =
       fileFmt +: folderParts ->
         folderFmt = Text.join "/" (reverse folderParts)
         renameWith folderFmt fileFmt ()
+
+uniDork.identify : '{IO, Exception} ()
+uniDork.identify =
+  do
+    use List size
+    use Nat toText
+    use PreparedCommand close
+    use Text ++
+    use Universal eq
+    staging = FilePath Tmdb.stagingDir
+    if isDirectory staging then
+      token = Tmdb.readToken()
+      entries = directoryContents.texts staging
+      folderNames =
+        List.filter
+          (n ->
+            (if eq n "." then false
+            else if eq n ".." then false else isDirectory (pathJoin staging n)))
+          entries
+      folders = List.map (n -> pathJoin staging n) folderNames
+      loose = Rename.looseVideos staging
+      _ =
+        printLine
+          (Text.join
+            ""
+            [ "scanning "
+            , toText (size folders)
+            , " folder(s) and "
+            , toText (size loose)
+            , " loose video(s) under "
+            , Tmdb.stagingDir
+            ])
+      _ = printLine ""
+      singleIO Db.config do
+        pq = prepareQuery Tmdb.selectSearchSql
+        pc = prepareCommand Tmdb.upsertSearchSql
+        pqStage = prepareQuery Stage.selectProbeSql
+        pqDet = prepareQuery Tmdb.selectDetailsSql
+        pcDet = prepareCommand Tmdb.upsertDetailsSql
+        _ =
+          Db.foreach_
+            (Tmdb.reportFolderWith pq pc pqStage pqDet pcDet token) folders
+        _ =
+          Db.foreach_
+            (Tmdb.reportLooseVideoWith pq pc pqStage pqDet pcDet token) loose
+        _ = close pc
+        close pcDet
+    else printLine ("staging not found: " ++ Tmdb.stagingDir)
+
+uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
+uniDork.collectFolders roots =
+  addIfDir : FilePath -> [FilePath] -> Text ->{IO, Exception} [FilePath]
+  addIfDir root acc name =
+    use List +:
+    fp = pathJoin root name
+    if isDirectory fp then fp +: acc else acc
+  perRoot root =
+    basenames = directoryContents.texts root
+    _ =
+      printLine
+        (Text.join
+          ""
+          [ "scanning: "
+          , filePathText root
+          , " ("
+          , Nat.toText (List.size basenames)
+          , " entries)"
+          ])
+    List.reverse (List.foldLeft (addIfDir root) [] basenames)
+  List.flatMap perRoot roots
+
+uniDork.processOne
+  pcUpsert
+  pcVid
+  pcDVid
+  pcAud
+  pcDAud
+  pcSub
+  pcDSub
+  pcAct
+  pcDAct
+  pcGen
+  pcDGen
+  pcTag
+  pcDTag
+  pcCou
+  pcDCou
+  pcStu
+  pcDStu
+  pcDir
+  pcDDir
+  pcCre
+  pcDCre
+  folder =
+  match Nfo.processFolder folder with
+    Left _ ->
+      _ = printLine (Text.join "" ["  no nfo: ", filePathText folder])
+      ()
+    Right m ->
+      actualRuntime = match Movie.videoFilePath m with
+        None         -> None
+        Some vidPath ->
+          match Probe.readSidecar vidPath with
+            None   -> None
+            Some r -> Some (Probe.runtimeSec r)
+      Db.upsertWith
+        pcUpsert
+        pcVid
+        pcDVid
+        pcAud
+        pcDAud
+        pcSub
+        pcDSub
+        pcAct
+        pcDAct
+        pcGen
+        pcDGen
+        pcTag
+        pcDTag
+        pcCou
+        pcDCou
+        pcStu
+        pcDStu
+        pcDir
+        pcDDir
+        pcCre
+        pcDCre
+        actualRuntime
+        m
+
+uniDork.processBatch : [FilePath] ->{IO, Exception} ()
+uniDork.processBatch folders = 
+  singleIO Db.config do
+    use PreparedCommand close
+    pcUpsert = prepareCommand Db.upsertMovieSql
+    pcVid = prepareCommand Db.insertVideoSql
+    pcDVid = prepareCommand (Db.deleteChildSql "movie_video_streams")
+    pcAud = prepareCommand Db.insertAudioSql
+    pcDAud = prepareCommand (Db.deleteChildSql "movie_audio_tracks")
+    pcSub = prepareCommand Db.insertSubSql
+    pcDSub = prepareCommand (Db.deleteChildSql "movie_subtitles")
+    pcAct = prepareCommand Db.insertActorSql
+    pcDAct = prepareCommand (Db.deleteChildSql "movie_actors")
+    pcGen = prepareCommand Db.insertGenreSql
+    pcDGen = prepareCommand (Db.deleteChildSql "movie_genres")
+    pcTag = prepareCommand Db.insertTagSql
+    pcDTag = prepareCommand (Db.deleteChildSql "movie_tags")
+    pcCou = prepareCommand Db.insertCountrySql
+    pcDCou = prepareCommand (Db.deleteChildSql "movie_countries")
+    pcStu = prepareCommand Db.insertStudioSql
+    pcDStu = prepareCommand (Db.deleteChildSql "movie_studios")
+    pcDir = prepareCommand Db.insertDirectorSql
+    pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
+    pcCre = prepareCommand Db.insertCreditSql
+    pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
+    _ =
+      Db.foreach_
+        (uniDork.processOne
+          pcUpsert
+          pcVid
+          pcDVid
+          pcAud
+          pcDAud
+          pcSub
+          pcDSub
+          pcAct
+          pcDAct
+          pcGen
+          pcDGen
+          pcTag
+          pcDTag
+          pcCou
+          pcDCou
+          pcStu
+          pcDStu
+          pcDir
+          pcDDir
+          pcCre
+          pcDCre)
+        folders
+    _ = close pcUpsert
+    _ = close pcVid
+    _ = close pcDVid
+    _ = close pcAud
+    _ = close pcDAud
+    _ = close pcSub
+    _ = close pcDSub
+    _ = close pcAct
+    _ = close pcDAct
+    _ = close pcGen
+    _ = close pcDGen
+    _ = close pcTag
+    _ = close pcDTag
+    _ = close pcCou
+    _ = close pcDCou
+    _ = close pcStu
+    _ = close pcDStu
+    _ = close pcDir
+    _ = close pcDDir
+    _ = close pcCre
+    close pcDCre
+
+uniDork.runBatchSafe : Nat -> Nat -> [FilePath] ->{IO, Exception} ()
+uniDork.runBatchSafe i n batch =
+  use Nat toText
+  use Text join
+  _ =
+    printLine
+      (join
+        ""
+        [ "batch "
+        , toText i
+        , "/"
+        , toText n
+        , " ("
+        , toText (List.size batch)
+        , " folders)"
+        ])
+  match catch do uniDork.processBatch batch with
+    Right _ -> ()
+    Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
+
+uniDork.batchedMain : Text ->{IO, Exception} ()
+uniDork.batchedMain configPath =
+  use List size
+  use Nat toText
+  use Text join
+  configText = readFileUtf8 (FilePath configPath)
+  dirs = List.filterMap parseConfigLine (lines configText)
+  _ = Db.createSchema()
+  _ = printLine "collecting folders..."
+  folders = uniDork.collectFolders dirs
+  total = size folders
+  _ = printLine (join "" ["found ", toText total, " folders to process"])
+  batches = List.chunk uniDork.batchSize folders
+  nBatches = size batches
+  _ =
+    printLine
+      (join
+        ""
+        [ "processing in "
+        , toText nBatches
+        , " batches of (up to) "
+        , toText uniDork.batchSize
+        ])
+  step i batch =
+    use Nat +
+    _ = uniDork.runBatchSafe i nBatches batch
+    i + 1
+  _ = List.foldLeft step 1 batches
+  printLine "done"
+
+uniDork.batchedRun : '{IO, Exception} ()
+uniDork.batchedRun = do
+  args = getArgs()
+  configPath = match args with
+    _ +: rest ->
+      match rest with
+        p +: _ -> p
+        []     -> "./uniDork.conf"
+    []        -> "./uniDork.conf"
+  uniDork.batchedMain configPath
 
 type MovieId
   = { kodi : Text,
@@ -697,116 +763,6 @@ Movie.toNdjsonLine m =
 Movie.fromNdjsonLine : Text -> Either Failure Movie
 Movie.fromNdjsonLine line = catch do Decoder.run Movie.fromJson (trim line)
 
-Tmdb.Result.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.Result
-Tmdb.Result.fromJson =
-  do
-    use Decoder optional! text
-    use Optional getOrElse
-    use object at at!
-    tmdbId = at! "id" Decoder.nat
-    title = at! "title" text
-    originalTitle = at! "original_title" text
-    originalLanguage = getOrElse "" (optional! (at "original_language" text))
-    releaseDate = getOrElse "" (optional! (at "release_date" text))
-    popularity = at! "popularity" Decoder.float
-    overview = getOrElse "" (optional! (at "overview" text))
-    Tmdb.Result.Result
-      tmdbId
-      title
-      originalTitle
-      originalLanguage
-      releaseDate
-      popularity
-      overview
-
-Tmdb.Result.toJson : Tmdb.Result -> Json
-Tmdb.Result.toJson r =
-  use Json text
-  Json.object
-    [ ("id", Json.nat (Tmdb.Result.tmdbId r))
-    , ("title", text (Tmdb.Result.title r))
-    , ("original_title", text (Tmdb.Result.originalTitle r))
-    , ("original_language", text (Tmdb.Result.originalLanguage r))
-    , ("release_date", text (Tmdb.Result.releaseDate r))
-    , ("popularity", Json.float (Tmdb.Result.popularity r))
-    , ("overview", text (Tmdb.Result.overview r))
-    ]
-
-Tmdb.SearchResponse.toJson : Tmdb.SearchResponse -> Json
-Tmdb.SearchResponse.toJson r =
-  Json.object
-    [ ( "results"
-      , Json.array
-          (List.map Tmdb.Result.toJson (Tmdb.SearchResponse.results r))
-      )
-    ]
-
-Tmdb.normalize : Text -> Text
-Tmdb.normalize t =
-  use List foldLeft
-  use Nat >
-  use Text drop
-  lower = Text.toLowercase t
-  dropChars =
-    [ "'"
-    , "\""
-    , "`"
-    , "‘"
-    , "’"
-    , "“"
-    , "”"
-    ]
-  spaceChars =
-    [ "."
-    , ","
-    , ":"
-    , "꞉"
-    , "ː"
-    , ";"
-    , "!"
-    , "?"
-    , "("
-    , ")"
-    , "["
-    , "]"
-    , "{"
-    , "}"
-    , "-"
-    , "–"
-    , "—"
-    , "_"
-    , "&"
-    , "/"
-    ]
-  dropped = foldLeft (acc c -> replaceAll c "" acc) lower dropChars
-  noPunct = foldLeft (acc p -> replaceAll p " " acc) dropped spaceChars
-  parts = Text.split ?\s noPunct
-  nonEmpty = List.filter (p -> Text.size p > 0) parts
-  joined = Text.join " " nonEmpty
-  if startsWith "the " joined then drop 4 joined
-  else
-    if startsWith "an " joined then drop 3 joined
-    else if startsWith "a " joined then drop 2 joined else joined
-
-Tmdb.CachedSearch.toJson : Tmdb.CachedSearch -> Json
-Tmdb.CachedSearch.toJson c =
-  use Json text
-  use List ++
-  base = [("folder", text (Tmdb.CachedSearch.folder c))]
-  resp = match Tmdb.CachedSearch.response c with
-    Some r -> [("response", Tmdb.SearchResponse.toJson r)]
-    None   -> []
-  err = match Tmdb.CachedSearch.error c with
-    Some e -> [("error", text e)]
-    None   -> []
-  Json.object (base ++ resp ++ err)
-
-test> Movie.roundtrip.test =
-  encoded = Movie.toNdjsonLine exampleMovie
-  match Movie.fromNdjsonLine encoded with
-    Left failure -> [Fail (Failure.message failure)]
-    Right m      -> check (Universal.eq m exampleMovie)
-
 textBetween : Text -> Text -> Text -> Optional Text
 textBetween startD endD t = match Text.indexOf startD t with
   None   -> None
@@ -1087,6 +1043,298 @@ Nfo.parse xml = match withXML xml Nfo.parseMovie with
   Right (m +: _) -> Right m
   Right []       -> Left "no <movie> element found"
 
+Nfo.padLeft : Nat -> Text -> Text -> Text
+Nfo.padLeft target pad t =
+  use Nat <
+  use Text ++
+  if Text.size t < target then Nfo.padLeft target pad (pad ++ t) else t
+
+Nfo.aspectRatio : Nat -> Nat -> Text
+Nfo.aspectRatio w h =
+  use Nat % * + / toText
+  use Text ++
+  if Universal.eq h 0 then "0.000"
+  else
+    rounded = (w * 1000 + h / 2) / h
+    whole = rounded / 1000
+    frac = rounded % 1000
+    fracStr = Nfo.padLeft 3 "0" (toText frac)
+    toText whole ++ "." ++ fracStr
+
+Nfo.sortTitle : Text -> Text -> Text
+Nfo.sortTitle title releaseDate =
+  use Nat >
+  use Text ++ drop
+  lower = Text.toLowercase title
+  stripped =
+    if startsWith "the " lower then drop 4 title
+    else
+      if startsWith "an " lower then drop 3 title
+      else if startsWith "a " lower then drop 2 title else title
+  if Text.size releaseDate > 0 then stripped ++ " :: " ++ releaseDate
+  else stripped
+
+Nfo.audioBlock : Stage.AudioInfo -> [Text]
+Nfo.audioBlock a =
+  use Text ++
+  esc = Rename.escapeXml
+  [ "      <audio>"
+  , "        <codec>" ++ esc (Stage.AudioInfo.codec a) ++ "</codec>"
+  , "        <language>" ++ esc (Stage.AudioInfo.language a) ++ "</language>"
+  , "        <channels>"
+      ++ Nat.toText (Stage.AudioInfo.channels a)
+      ++ "</channels>"
+  , "      </audio>"
+  ]
+
+Nfo.subtitleBlock : Stage.SubtitleInfo -> [Text]
+Nfo.subtitleBlock s =
+  use Text ++
+  esc = Rename.escapeXml
+  [ "      <subtitle>"
+  , "        <language>"
+      ++ esc (Stage.SubtitleInfo.language s)
+      ++ "</language>"
+  , "      </subtitle>"
+  ]
+
+Nfo.fileinfoBlock : Stage.ProbeResult -> [Text]
+Nfo.fileinfoBlock pr =
+  use List flatMap
+  use Nat toText
+  esc = Rename.escapeXml
+  vid = Stage.ProbeResult.video pr
+  vc = Stage.VideoInfo.codec vid
+  vw = Stage.VideoInfo.width vid
+  vh = Stage.VideoInfo.height vid
+  videoLines =
+    [ "      <video>"
+    , "        <codec>" Text.++ esc vc Text.++ "</codec>"
+    , "        <aspect>" Text.++ Nfo.aspectRatio vw vh Text.++ "</aspect>"
+    , "        <width>" Text.++ toText vw Text.++ "</width>"
+    , "        <height>" Text.++ toText vh Text.++ "</height>"
+    , "      </video>"
+    ]
+  audioLines = flatMap Nfo.audioBlock (Stage.ProbeResult.audios pr)
+  subtitleLines = flatMap Nfo.subtitleBlock (Stage.ProbeResult.subtitles pr)
+  result =
+    ["  <fileinfo>", "    <streamdetails>"]
+      List.++ videoLines
+      List.++ audioLines
+      List.++ subtitleLines
+      List.++ ["    </streamdetails>", "  </fileinfo>"]
+  result
+
+Nfo.genreLine : Text -> Text
+Nfo.genreLine g =
+  use Text ++
+  "  <genre>" ++ Rename.escapeXml g ++ "</genre>"
+
+Nfo.countryLine : Text -> Text
+Nfo.countryLine c =
+  use Text ++
+  "  <country>" ++ Rename.escapeXml c ++ "</country>"
+
+Nfo.studioLine : Text -> Text
+Nfo.studioLine s =
+  use Text ++
+  "  <studio>" ++ Rename.escapeXml s ++ "</studio>"
+
+Nfo.directorLine : Text -> Text
+Nfo.directorLine d =
+  use Text ++
+  "  <director>" ++ Rename.escapeXml d ++ "</director>"
+
+Nfo.writerLine : Text -> Text
+Nfo.writerLine w =
+  use Text ++
+  "  <credits>" ++ Rename.escapeXml w ++ "</credits>"
+
+Nfo.actorBlock : (Text, Text) -> [Text]
+Nfo.actorBlock = cases
+  (name, role) ->
+    use Text ++
+    esc = Rename.escapeXml
+    [ "  <actor>"
+    , "    <name>" ++ esc name ++ "</name>"
+    , "    <role>" ++ esc role ++ "</role>"
+    , "  </actor>"
+    ]
+
+Nfo.tagLine : Text -> Text
+Nfo.tagLine t =
+  use Text ++
+  "  <tag>" ++ Rename.escapeXml t ++ "</tag>"
+
+Nfo.generate : Tmdb.Result -> Tmdb.Details -> Stage.ProbeResult -> Text
+Nfo.generate _r d pr =
+  use List map
+  use Nat >
+  use Text join size
+  use Universal eq
+  esc = Rename.escapeXml
+  yearText = match Tmdb.releaseYear (Tmdb.Details.releaseDate d) with
+    Some y -> Nat.toText y
+    None   -> ""
+  releaseDate = Tmdb.Details.releaseDate d
+  imdbId = Optional.getOrElse "" (Tmdb.Details.imdbId d)
+  tmdbText = Nat.toText (Tmdb.Details.tmdbId d)
+  crc32 = Stage.ProbeResult.crc32 pr
+  sortTitle = Nfo.sortTitle (Tmdb.Details.title d) releaseDate
+  setBlock = match Tmdb.Details.collection d with
+    Some col -> ["  <set>" Text.++ esc col Text.++ "</set>"]
+    None     -> ["  <set />"]
+  premieredBlock =
+    if size releaseDate > 0 then
+      ["  <premiered>" Text.++ esc releaseDate Text.++ "</premiered>"]
+    else []
+  tmdbUniqueId =
+    [ join
+        ""
+        [ "  <uniqueid type=\"tmdb\" default=\"true\">"
+        , tmdbText
+        , "</uniqueid>"
+        ]
+    ]
+  imdbUniqueId =
+    if eq (size imdbId) 0 then []
+    else [join "" ["  <uniqueid type=\"imdb\">", esc imdbId, "</uniqueid>"]]
+  crcUniqueId =
+    if eq (size crc32) 0 then []
+    else [join "" ["  <uniqueid type=\"crc32\">", esc crc32, "</uniqueid>"]]
+  uniqueIdLines = tmdbUniqueId List.++ imdbUniqueId List.++ crcUniqueId
+  genreLines = map Nfo.genreLine (Tmdb.Details.genres d)
+  tagLines = map Nfo.tagLine (Tmdb.Details.tags d)
+  countryLines = map Nfo.countryLine (Tmdb.Details.productionCountries d)
+  studioLines = map Nfo.studioLine (Tmdb.Details.productionStudios d)
+  directorLines = map Nfo.directorLine (Tmdb.Details.directors d)
+  writerLines = map Nfo.writerLine (Tmdb.Details.writers d)
+  actorLines = List.flatMap Nfo.actorBlock (Tmdb.Details.cast d)
+  fileinfoLines = Nfo.fileinfoBlock pr
+  header =
+    [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
+    , "<movie>"
+    , "  <title>" Text.++ esc (Tmdb.Details.title d) Text.++ "</title>"
+    , "  <originaltitle>"
+        Text.++ esc (Tmdb.Details.originalTitle d)
+        Text.++ "</originaltitle>"
+    , "  <sorttitle>" Text.++ esc sortTitle Text.++ "</sorttitle>"
+    ]
+  scoring =
+    [ "  <year>" Text.++ yearText Text.++ "</year>"
+    , "  <rating>"
+        Text.++ Float.toText (Tmdb.Details.voteAverage d)
+        Text.++ "</rating>"
+    , "  <votes>"
+        Text.++ Nat.toText (Tmdb.Details.voteCount d)
+        Text.++ "</votes>"
+    , "  <mpaa>" Text.++ esc (Tmdb.Details.mpaa d) Text.++ "</mpaa>"
+    , "  <id>" Text.++ esc imdbId Text.++ "</id>"
+    ]
+  plotEtc =
+    [ "  <plot>" Text.++ esc (Tmdb.Details.overview d) Text.++ "</plot>"
+    , "  <tagline>" Text.++ esc (Tmdb.Details.tagline d) Text.++ "</tagline>"
+    , "  <runtime>"
+        Text.++ Nat.toText (Tmdb.Details.runtime d)
+        Text.++ "</runtime>"
+    ]
+  imdbElem =
+    if eq (size imdbId) 0 then []
+    else
+      [ join
+          ""
+          [ "  <imdb id='"
+          , imdbId
+          , "'>http://www.imdb.com/title/"
+          , imdbId
+          , "</imdb>"
+          ]
+      ]
+  tmdbElem =
+    [ join
+        ""
+        [ "  <tmdb id='"
+        , tmdbText
+        , "'>http://www.themoviedb.org/movie/"
+        , tmdbText
+        , "</tmdb>"
+        ]
+    ]
+  urlElems = imdbElem List.++ tmdbElem
+  footer = ["</movie>", ""]
+  allLines =
+    header
+      List.++ setBlock
+      List.++ scoring
+      List.++ premieredBlock
+      List.++ uniqueIdLines
+      List.++ plotEtc
+      List.++ genreLines
+      List.++ tagLines
+      List.++ countryLines
+      List.++ studioLines
+      List.++ actorLines
+      List.++ directorLines
+      List.++ writerLines
+      List.++ fileinfoLines
+      List.++ urlElems
+      List.++ footer
+  join "\n" allLines
+
+Nfo.tryReadFolder : FilePath ->{IO, Exception} Optional Movie
+Nfo.tryReadFolder folder =
+  files = directoryContents.texts folder
+  match findFirstNfo files with
+    None         -> None
+    Some nfoName ->
+      nfoPath = pathJoin folder nfoName
+      match catch do readFileUtf8 nfoPath with
+        Left _    -> None
+        Right xml ->
+          match Nfo.parse xml with
+            Left _  -> None
+            Right m -> Some m
+
+Nfo.extractTmdbId : Movie -> Optional Nat
+Nfo.extractTmdbId m = match MovieId.tmdb (Movie.id m) with
+  None   -> None
+  Some s -> Nat.fromText (trim s)
+
+Nfo.extractImdbId : Movie -> Optional Text
+Nfo.extractImdbId m = MovieId.imdb (Movie.id m)
+
+Nfo.extractTitle : Movie -> Optional Text
+Nfo.extractTitle m =
+  t = Title.display (Movie.title m)
+  if Universal.eq (Text.size t) 0 then None else Some t
+
+Nfo.extractYear : Movie -> Optional Nat
+Nfo.extractYear m = Scoring.year (Movie.scoring m)
+
+Nfo.processFolder : FilePath ->{IO, Exception} Either FilePath Movie
+Nfo.processFolder folder =
+  files = directoryContents.texts folder
+  match findFirstNfo files with
+    None -> Left folder
+    Some nfoName ->
+      nfoFp = pathJoin folder nfoName
+      xml = readFileUtf8 nfoFp
+      match Nfo.parse xml with
+        Left _ -> Left folder
+        Right m ->
+          videoPath =
+            Optional.map
+              (vf -> filePathText (pathJoin folder vf)) (findFirstVideo files)
+          folderName = filePathBasename folder
+          folderMeta = Nfo.parseFolderName folderName
+          Right
+            (m
+              |> Movie.videoFilePath.set videoPath
+              |> Movie.checksum.set (FolderMeta.checksum folderMeta)
+              |> Movie.folderPath.set (Some (filePathText folder))
+              |> Movie.nfoPath.set (Some (filePathText nfoFp))
+              |> Movie.folderMeta.set folderMeta)
+
 pathJoin : FilePath -> Text -> FilePath
 pathJoin base name =
   use Text ++
@@ -1115,30 +1363,6 @@ findFirstNfo = List.find isNfo
 
 findFirstVideo : [Text] -> Optional Text
 findFirstVideo = List.find isVideo
-
-Nfo.processFolder : FilePath ->{IO, Exception} Either FilePath Movie
-Nfo.processFolder folder =
-  files = directoryContents.texts folder
-  match findFirstNfo files with
-    None -> Left folder
-    Some nfoName ->
-      nfoFp = pathJoin folder nfoName
-      xml = readFileUtf8 nfoFp
-      match Nfo.parse xml with
-        Left _ -> Left folder
-        Right m ->
-          videoPath =
-            Optional.map
-              (vf -> filePathText (pathJoin folder vf)) (findFirstVideo files)
-          folderName = filePathBasename folder
-          folderMeta = Nfo.parseFolderName folderName
-          Right
-            (m
-              |> Movie.videoFilePath.set videoPath
-              |> Movie.checksum.set (FolderMeta.checksum folderMeta)
-              |> Movie.folderPath.set (Some (filePathText folder))
-              |> Movie.nfoPath.set (Some (filePathText nfoFp))
-              |> Movie.folderMeta.set folderMeta)
 
 parseConfigLine : Text -> Optional FilePath
 parseConfigLine l =
@@ -1691,6 +1915,103 @@ Db.migrate =
         [ "ALTER TABLE movies ADD COLUMN IF NOT EXISTS actual_runtime_sec INTEGER"
         ]
 
+type Tmdb.Details
+  = { tmdbId : Nat,
+      imdbId : Optional Text,
+      runtime : Nat,
+      title : Text,
+      originalTitle : Text,
+      originalLanguage : Text,
+      overview : Text,
+      tagline : Text,
+      releaseDate : Text,
+      voteAverage : Float,
+      voteCount : Nat,
+      genres : [Text],
+      productionCountries : [Text],
+      productionStudios : [Text],
+      collection : Optional Text,
+      mpaa : Text,
+      directors : [Text],
+      writers : [Text],
+      cast : [(Text, Text)],
+      tags : [Text] }
+
+Tmdb.namedObjectFromJson : '{unison_json_1_4_2.Decoder} Text
+Tmdb.namedObjectFromJson = do object.at! "name" Decoder.text
+
+Tmdb.isoCountryFromJson : '{unison_json_1_4_2.Decoder} Text
+Tmdb.isoCountryFromJson = do object.at! "iso_3166_1" Decoder.text
+
+Tmdb.castMemberFromJson : '{unison_json_1_4_2.Decoder} (Text, Text)
+Tmdb.castMemberFromJson =
+  do
+    use Decoder text
+    name = object.at! "name" text
+    character =
+      Optional.getOrElse "" (Decoder.optional! (object.at "character" text))
+    (name, character)
+
+Tmdb.crewMemberFromJson : '{unison_json_1_4_2.Decoder} (Text, Text, Text)
+Tmdb.crewMemberFromJson = do
+  use Decoder optional! text
+  use Optional getOrElse
+  use object at
+  name = object.at! "name" text
+  job = getOrElse "" (optional! (at "job" text))
+  department = getOrElse "" (optional! (at "department" text))
+  (name, job, department)
+
+Tmdb.singleCertFromJson : '{unison_json_1_4_2.Decoder} Text
+Tmdb.singleCertFromJson =
+  do
+    Optional.getOrElse
+      "" (Decoder.optional! (object.at "certification" Decoder.text))
+
+Tmdb.countryReleaseFromJson : '{unison_json_1_4_2.Decoder} (Text, [Text])
+Tmdb.countryReleaseFromJson = do
+  use object at!
+  country = at! "iso_3166_1" Decoder.text
+  releases = at! "release_dates" (Decoder.array Tmdb.singleCertFromJson)
+  (country, releases)
+
+List.distinctText : [Text] -> [Text]
+List.distinctText xs =
+  use List :+
+  step acc x = if List.any (y -> Universal.eq x y) acc then acc else acc :+ x
+  List.foldLeft step [] xs
+
+Tmdb.detailsURI : Nat -> URI
+Tmdb.detailsURI tmdbId =
+  use Path /
+  path = Path.root / "3" / "movie" / Nat.toText tmdbId
+  q = Query.empty & ("append_to_response", "credits,release_dates,keywords")
+  URI Scheme.https (Some Tmdb.apiAuthority) path (fromQuery q) Fragment.empty
+
+Tmdb.detailsFromResult : Tmdb.Result -> Tmdb.Details
+Tmdb.detailsFromResult r =
+  Tmdb.Details.Details
+    (Tmdb.Result.tmdbId r)
+    None
+    0
+    (Tmdb.Result.title r)
+    (Tmdb.Result.originalTitle r)
+    (Tmdb.Result.originalLanguage r)
+    (Tmdb.Result.overview r)
+    ""
+    (Tmdb.Result.releaseDate r)
+    0.0
+    0
+    []
+    []
+    []
+    None
+    ""
+    []
+    []
+    []
+    []
+
 Tmdb.cachedSearchWith pq pc token sourcePath title year =
   match Tmdb.readDbCacheWith pq sourcePath with
     Some cached -> cached
@@ -1699,139 +2020,6 @@ Tmdb.cachedSearchWith pq pc token sourcePath title year =
       _ = Tmdb.writeDbCacheWith pc sourcePath title year result
       result
 
-Rename.insertLogSql =
-  use Codec optional text
-  sql
-    "INSERT INTO rename_log (source_path, outcome, target_path, reason) VALUES ("
-    %% var text
-    %% sql ", "
-    %% var text
-    %% sql ", "
-    %% var (optional text)
-    %% sql ", "
-    %% var (optional text)
-    %% sql ")"
-    |> buildCommand
-
--- ============================================================
--- Cleanup helpers (unchanged from prior turn, included for completeness)
--- ============================================================
-
--- ============================================================
--- Outcome with DuplicateRemoved variant
--- ============================================================
-
-type Rename.Outcome
-  = NoVideo Text
-  | NoProbe Text
-  | Renamed Text Text
-  | NoMatch Text Text
-  | Conflict Text Text
-  | RenameError Text Text
-  | DuplicateRemoved Text Text
-
-Rename.Outcome.parts :
-  Rename.Outcome -> (Text, Text, Optional Text, Optional Text)
-Rename.Outcome.parts = cases
-  Rename.Outcome.Renamed s t          -> (s, "renamed",           Some t, None)
-  Rename.Outcome.NoVideo s            -> (s, "no_video",          None,   None)
-  Rename.Outcome.NoMatch s r          -> (s, "no_match",          None,   Some r)
-  Rename.Outcome.NoProbe s            -> (s, "no_probe",          None,   None)
-  Rename.Outcome.Conflict s t         -> (s, "conflict",          Some t, None)
-  Rename.Outcome.RenameError s m      -> (s, "error",             None,   Some m)
-  Rename.Outcome.DuplicateRemoved s t -> (s, "duplicate_removed", Some t, None)
-
-Rename.Outcome.toJson : Rename.Outcome -> Json
-Rename.Outcome.toJson = cases
-  Rename.Outcome.Renamed src tgt ->
-    Json.object
-      [ ("outcome", Json.text "renamed")
-      , ("source",  Json.text src)
-      , ("target",  Json.text tgt)
-      ]
-  Rename.Outcome.NoVideo src ->
-    Json.object
-      [("outcome", Json.text "no_video"), ("source", Json.text src)]
-  Rename.Outcome.NoMatch src reason ->
-    Json.object
-      [ ("outcome", Json.text "no_match")
-      , ("source",  Json.text src)
-      , ("reason",  Json.text reason)
-      ]
-  Rename.Outcome.NoProbe src ->
-    Json.object
-      [("outcome", Json.text "no_probe"), ("source", Json.text src)]
-  Rename.Outcome.Conflict src existing ->
-    Json.object
-      [ ("outcome",  Json.text "conflict")
-      , ("source",   Json.text src)
-      , ("existing", Json.text existing)
-      ]
-  Rename.Outcome.RenameError src msg ->
-    Json.object
-      [ ("outcome", Json.text "error")
-      , ("source",  Json.text src)
-      , ("message", Json.text msg)
-      ]
-  Rename.Outcome.DuplicateRemoved src existing ->
-    Json.object
-      [ ("outcome",  Json.text "duplicate_removed")
-      , ("source",   Json.text src)
-      , ("existing", Json.text existing)
-      ]
-
--- ============================================================
--- Duplicate detection: ask the database.
---
--- Joins rename_log to stage_probes on source_path. A row comes back iff
--- some source with this crc32 was previously renamed successfully. The
--- returned target_path is just informational for the log/print line.
--- ============================================================
-
-Rename.selectRenamedTargetByCrcSql =
-  sql "SELECT rl.target_path FROM rename_log rl JOIN stage_probes sp ON sp.source_path = rl.source_path WHERE rl.outcome = 'renamed' AND sp.crc32 = "
-    %% var Codec.text
-    %% sql " ORDER BY rl.recorded_at DESC LIMIT 1"
-    |> typedQuery Codec.text
-
-Rename.findPriorTargetForCrcWith pq crc =
-  match
-    catch do
-      portal = bindQuery pq (Db.pt crc)
-      (rows, _) = executeQueryPortal portal 0
-      rows
-  with
-    Left _   -> None
-    Right rs ->
-      match rs with
-        []       -> None
-        tgt +: _ -> Some tgt
-
-Stage.ProbeResult.primaryAudio : Stage.ProbeResult -> Optional Stage.AudioInfo
-Stage.ProbeResult.primaryAudio pr = List.head (Stage.ProbeResult.audios pr)
-
-Rename.writeOutcome : Text -> Rename.Outcome ->{IO, Exception} ()
-Rename.writeOutcome _unused o =
-  use List ++
-  (src, outcome, target, reason) = Rename.Outcome.parts o
-  _ = 
-    catch do
-      singleIO Db.config do
-        pc = prepareCommand Rename.insertLogSql
-        _ =
-          bindAndExecuteCommand
-            pc (Db.pt src ++ Db.pt outcome ++ Db.pot target ++ Db.pot reason)
-        PreparedCommand.close pc
-  ()
-
-Rename.writeOutcomeWith pc o =
-  use List ++
-  (src, outcome, target, reason) = Rename.Outcome.parts o
-  _ = 
-    catch do
-      bindAndExecuteCommand
-        pc (Db.pt src ++ Db.pt outcome ++ Db.pot target ++ Db.pot reason)
-  ()
 
 Tmdb.cachePath : Text -> FilePath
 Tmdb.cachePath folderName =
@@ -2151,70 +2339,6 @@ Tmdb.findYearIndex tokens =
                 Some next -> if Tmdb.isQualityToken next then Some i else None
                 None      -> None) pairs
   List.head qualifying
-
-Stage.selectProbeSql =
-  use Codec text
-  sql "SELECT probe_json FROM stage_probes WHERE source_path = " %% var text
-    |> typedQuery text
-
-Stage.selectLargestInFolderSql =
-  use Codec text
-  sql "SELECT probe_json FROM stage_probes WHERE folder_path = "
-    %% var text
-    %% sql
-         " ORDER BY ((probe_json::json)->>'size_bytes')::bigint DESC NULLS LAST LIMIT 1"
-    |> typedQuery text
-
-Stage.largestInFolderWith pq folderPath = match 
-  catch do
-    portal = bindQuery pq (Db.pt folderPath)
-    (rows, _) = executeQueryPortal portal 0
-    rows
- with
-  Left _   -> None
-  Right rs ->
-    match rs with
-      []       -> None
-      raw +: _ ->
-        match catch do Decoder.run Stage.ProbeResult.fromJson raw with
-          Right r -> Some r
-          Left _  -> None
-
-Stage.readFromDb : Text ->{IO} Optional Stage.ProbeResult
-Stage.readFromDb sourcePath = match 
-  catch do
-    singleIO Db.config do
-      pq = prepareQuery Stage.selectProbeSql
-      portal = bindQuery pq (Db.pt sourcePath)
-      (rows, _) = executeQueryPortal portal 0
-      rows
- with
-  Left _   -> None
-  Right rs ->
-    match rs with
-      []       -> None
-      raw +: _ ->
-        match catch do Decoder.run Stage.ProbeResult.fromJson raw with
-          Right r -> Some r
-          Left _  -> None
-
-Stage.readSidecar : Text ->{IO, Exception} Optional Stage.ProbeResult
-Stage.readSidecar sourcePath = Stage.readFromDb sourcePath
-
-Stage.readWith pq sourcePath = match 
-  catch do
-    portal = bindQuery pq (Db.pt sourcePath)
-    (rows, _) = executeQueryPortal portal 0
-    rows
- with
-  Left _   -> None
-  Right rs ->
-    match rs with
-      []       -> None
-      raw +: _ ->
-        match catch do Decoder.run Stage.ProbeResult.fromJson raw with
-          Right r -> Some r
-          Left _  -> None
 
 Tmdb.parseReleaseName : Text -> Optional Tmdb.ParsedRelease
 Tmdb.parseReleaseName name =
@@ -2589,6 +2713,110 @@ Tmdb.search token title year =
    with
     Right v -> Right v
     Left f  -> Left (Failure.message f)
+
+Tmdb.Result.fromJson : '{unison_json_1_4_2.Decoder} Tmdb.Result
+Tmdb.Result.fromJson =
+  do
+    use Decoder optional! text
+    use Optional getOrElse
+    use object at at!
+    tmdbId = at! "id" Decoder.nat
+    title = at! "title" text
+    originalTitle = at! "original_title" text
+    originalLanguage = getOrElse "" (optional! (at "original_language" text))
+    releaseDate = getOrElse "" (optional! (at "release_date" text))
+    popularity = at! "popularity" Decoder.float
+    overview = getOrElse "" (optional! (at "overview" text))
+    Tmdb.Result.Result
+      tmdbId
+      title
+      originalTitle
+      originalLanguage
+      releaseDate
+      popularity
+      overview
+
+Tmdb.Result.toJson : Tmdb.Result -> Json
+Tmdb.Result.toJson r =
+  use Json text
+  Json.object
+    [ ("id", Json.nat (Tmdb.Result.tmdbId r))
+    , ("title", text (Tmdb.Result.title r))
+    , ("original_title", text (Tmdb.Result.originalTitle r))
+    , ("original_language", text (Tmdb.Result.originalLanguage r))
+    , ("release_date", text (Tmdb.Result.releaseDate r))
+    , ("popularity", Json.float (Tmdb.Result.popularity r))
+    , ("overview", text (Tmdb.Result.overview r))
+    ]
+
+Tmdb.SearchResponse.toJson : Tmdb.SearchResponse -> Json
+Tmdb.SearchResponse.toJson r =
+  Json.object
+    [ ( "results"
+      , Json.array
+          (List.map Tmdb.Result.toJson (Tmdb.SearchResponse.results r))
+      )
+    ]
+
+Tmdb.normalize : Text -> Text
+Tmdb.normalize t =
+  use List foldLeft
+  use Nat >
+  use Text drop
+  lower = Text.toLowercase t
+  dropChars =
+    [ "'"
+    , "\""
+    , "`"
+    , "‘"
+    , "’"
+    , "“"
+    , "”"
+    ]
+  spaceChars =
+    [ "."
+    , ","
+    , ":"
+    , "꞉"
+    , "ː"
+    , ";"
+    , "!"
+    , "?"
+    , "("
+    , ")"
+    , "["
+    , "]"
+    , "{"
+    , "}"
+    , "-"
+    , "–"
+    , "—"
+    , "_"
+    , "&"
+    , "/"
+    ]
+  dropped = foldLeft (acc c -> replaceAll c "" acc) lower dropChars
+  noPunct = foldLeft (acc p -> replaceAll p " " acc) dropped spaceChars
+  parts = Text.split ?\s noPunct
+  nonEmpty = List.filter (p -> Text.size p > 0) parts
+  joined = Text.join " " nonEmpty
+  if startsWith "the " joined then drop 4 joined
+  else
+    if startsWith "an " joined then drop 3 joined
+    else if startsWith "a " joined then drop 2 joined else joined
+
+Tmdb.CachedSearch.toJson : Tmdb.CachedSearch -> Json
+Tmdb.CachedSearch.toJson c =
+  use Json text
+  use List ++
+  base = [("folder", text (Tmdb.CachedSearch.folder c))]
+  resp = match Tmdb.CachedSearch.response c with
+    Some r -> [("response", Tmdb.SearchResponse.toJson r)]
+    None   -> []
+  err = match Tmdb.CachedSearch.error c with
+    Some e -> [("error", text e)]
+    None   -> []
+  Json.object (base ++ resp ++ err)
 
 Tmdb.upsertSearchSql =
   use Codec text
@@ -3291,6 +3519,118 @@ type Stage.ProbeResult
       audios : [Stage.AudioInfo],
       subtitles : [Stage.SubtitleInfo] }
 
+Stage.ProbeResult.primaryAudio : Stage.ProbeResult -> Optional Stage.AudioInfo
+Stage.ProbeResult.primaryAudio pr = List.head (Stage.ProbeResult.audios pr)
+
+Stage.AudioInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.AudioInfo
+Stage.AudioInfo.fromJson =
+  do
+    use Decoder text
+    use object at!
+    codec = at! "codec" text
+    channels = at! "channels" Decoder.nat
+    channelLayout = at! "channel_layout" text
+    language =
+      Optional.getOrElse "" (Decoder.optional! (object.at "language" text))
+    Stage.AudioInfo.AudioInfo codec channels channelLayout language
+
+Stage.SubtitleInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.SubtitleInfo
+Stage.SubtitleInfo.fromJson = do
+  use Decoder optional! text
+  use Optional getOrElse
+  use object at
+  codec = getOrElse "" (optional! (at "codec" text))
+  language = getOrElse "" (optional! (at "language" text))
+  Stage.SubtitleInfo.SubtitleInfo codec language
+
+Stage.ProbeResult.fromJson : '{unison_json_1_4_2.Decoder} Stage.ProbeResult
+Stage.ProbeResult.fromJson =
+  do
+    use Decoder array optional! text
+    use object at at!
+    videoPath = at! "video_path" text
+    crc32 = at! "crc32" text
+    sizeBytes = at! "size_bytes" Decoder.nat
+    durationSec = at! "duration_sec" Decoder.float
+    video = at! "video" Stage.VideoInfo.fromJson
+    audiosNew = optional! (at "audios" (array Stage.AudioInfo.fromJson))
+    audiosLegacy = optional! (at "audio" Stage.AudioInfo.fromJson)
+    audios = match audiosNew with
+      Some a -> a
+      None   ->
+        match audiosLegacy with
+          Some a -> [a]
+          None   -> []
+    subtitles =
+      Optional.getOrElse
+        [] (optional! (at "subtitles" (array Stage.SubtitleInfo.fromJson)))
+    Stage.ProbeResult.ProbeResult
+      videoPath crc32 sizeBytes durationSec video audios subtitles
+
+Stage.selectProbeSql =
+  use Codec text
+  sql "SELECT probe_json FROM stage_probes WHERE source_path = " %% var text
+    |> typedQuery text
+
+Stage.selectLargestInFolderSql =
+  use Codec text
+  sql "SELECT probe_json FROM stage_probes WHERE folder_path = "
+    %% var text
+    %% sql
+         " ORDER BY ((probe_json::json)->>'size_bytes')::bigint DESC NULLS LAST LIMIT 1"
+    |> typedQuery text
+
+Stage.largestInFolderWith pq folderPath = match 
+  catch do
+    portal = bindQuery pq (Db.pt folderPath)
+    (rows, _) = executeQueryPortal portal 0
+    rows
+ with
+  Left _   -> None
+  Right rs ->
+    match rs with
+      []       -> None
+      raw +: _ ->
+        match catch do Decoder.run Stage.ProbeResult.fromJson raw with
+          Right r -> Some r
+          Left _  -> None
+
+Stage.readFromDb : Text ->{IO} Optional Stage.ProbeResult
+Stage.readFromDb sourcePath = match 
+  catch do
+    singleIO Db.config do
+      pq = prepareQuery Stage.selectProbeSql
+      portal = bindQuery pq (Db.pt sourcePath)
+      (rows, _) = executeQueryPortal portal 0
+      rows
+ with
+  Left _   -> None
+  Right rs ->
+    match rs with
+      []       -> None
+      raw +: _ ->
+        match catch do Decoder.run Stage.ProbeResult.fromJson raw with
+          Right r -> Some r
+          Left _  -> None
+
+Stage.readSidecar : Text ->{IO, Exception} Optional Stage.ProbeResult
+Stage.readSidecar sourcePath = Stage.readFromDb sourcePath
+
+Stage.readWith pq sourcePath = match 
+  catch do
+    portal = bindQuery pq (Db.pt sourcePath)
+    (rows, _) = executeQueryPortal portal 0
+    rows
+ with
+  Left _   -> None
+  Right rs ->
+    match rs with
+      []       -> None
+      raw +: _ ->
+        match catch do Decoder.run Stage.ProbeResult.fromJson raw with
+          Right r -> Some r
+          Left _  -> None
+
 Relang.currentDefault : [Probe.AudioTrack] -> Optional Nat
 Relang.currentDefault tracks =
   match List.find Probe.AudioTrack.isDefault tracks with
@@ -3499,6 +3839,138 @@ Relang.selectTrack origLang3 tracks =
       (t -> (if Relang.isCommentaryOrDescriptive t then false else true))
       candidates
   Relang.bestOf surviving
+
+Rename.insertLogSql =
+  use Codec optional text
+  sql
+    "INSERT INTO rename_log (source_path, outcome, target_path, reason) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var (optional text)
+    %% sql ")"
+    |> buildCommand
+
+-- ============================================================
+-- Cleanup helpers (unchanged from prior turn, included for completeness)
+-- ============================================================
+
+-- ============================================================
+-- Outcome with DuplicateRemoved variant
+-- ============================================================
+
+type Rename.Outcome
+  = NoVideo Text
+  | NoProbe Text
+  | Renamed Text Text
+  | NoMatch Text Text
+  | Conflict Text Text
+  | RenameError Text Text
+  | DuplicateRemoved Text Text
+
+Rename.Outcome.parts :
+  Rename.Outcome -> (Text, Text, Optional Text, Optional Text)
+Rename.Outcome.parts = cases
+  Rename.Outcome.Renamed s t          -> (s, "renamed",           Some t, None)
+  Rename.Outcome.NoVideo s            -> (s, "no_video",          None,   None)
+  Rename.Outcome.NoMatch s r          -> (s, "no_match",          None,   Some r)
+  Rename.Outcome.NoProbe s            -> (s, "no_probe",          None,   None)
+  Rename.Outcome.Conflict s t         -> (s, "conflict",          Some t, None)
+  Rename.Outcome.RenameError s m      -> (s, "error",             None,   Some m)
+  Rename.Outcome.DuplicateRemoved s t -> (s, "duplicate_removed", Some t, None)
+
+Rename.Outcome.toJson : Rename.Outcome -> Json
+Rename.Outcome.toJson = cases
+  Rename.Outcome.Renamed src tgt ->
+    Json.object
+      [ ("outcome", Json.text "renamed")
+      , ("source",  Json.text src)
+      , ("target",  Json.text tgt)
+      ]
+  Rename.Outcome.NoVideo src ->
+    Json.object
+      [("outcome", Json.text "no_video"), ("source", Json.text src)]
+  Rename.Outcome.NoMatch src reason ->
+    Json.object
+      [ ("outcome", Json.text "no_match")
+      , ("source",  Json.text src)
+      , ("reason",  Json.text reason)
+      ]
+  Rename.Outcome.NoProbe src ->
+    Json.object
+      [("outcome", Json.text "no_probe"), ("source", Json.text src)]
+  Rename.Outcome.Conflict src existing ->
+    Json.object
+      [ ("outcome",  Json.text "conflict")
+      , ("source",   Json.text src)
+      , ("existing", Json.text existing)
+      ]
+  Rename.Outcome.RenameError src msg ->
+    Json.object
+      [ ("outcome", Json.text "error")
+      , ("source",  Json.text src)
+      , ("message", Json.text msg)
+      ]
+  Rename.Outcome.DuplicateRemoved src existing ->
+    Json.object
+      [ ("outcome",  Json.text "duplicate_removed")
+      , ("source",   Json.text src)
+      , ("existing", Json.text existing)
+      ]
+
+-- ============================================================
+-- Duplicate detection: ask the database.
+--
+-- Joins rename_log to stage_probes on source_path. A row comes back iff
+-- some source with this crc32 was previously renamed successfully. The
+-- returned target_path is just informational for the log/print line.
+-- ============================================================
+
+Rename.selectRenamedTargetByCrcSql =
+  sql "SELECT rl.target_path FROM rename_log rl JOIN stage_probes sp ON sp.source_path = rl.source_path WHERE rl.outcome = 'renamed' AND sp.crc32 = "
+    %% var Codec.text
+    %% sql " ORDER BY rl.recorded_at DESC LIMIT 1"
+    |> typedQuery Codec.text
+
+Rename.findPriorTargetForCrcWith pq crc =
+  match
+    catch do
+      portal = bindQuery pq (Db.pt crc)
+      (rows, _) = executeQueryPortal portal 0
+      rows
+  with
+    Left _   -> None
+    Right rs ->
+      match rs with
+        []       -> None
+        tgt +: _ -> Some tgt
+
+Rename.writeOutcome : Text -> Rename.Outcome ->{IO, Exception} ()
+Rename.writeOutcome _unused o =
+  use List ++
+  (src, outcome, target, reason) = Rename.Outcome.parts o
+  _ = 
+    catch do
+      singleIO Db.config do
+        pc = prepareCommand Rename.insertLogSql
+        _ =
+          bindAndExecuteCommand
+            pc (Db.pt src ++ Db.pt outcome ++ Db.pot target ++ Db.pot reason)
+        PreparedCommand.close pc
+  ()
+
+Rename.writeOutcomeWith pc o =
+  use List ++
+  (src, outcome, target, reason) = Rename.Outcome.parts o
+  _ = 
+    catch do
+      bindAndExecuteCommand
+        pc (Db.pt src ++ Db.pt outcome ++ Db.pot target ++ Db.pot reason)
+  ()
+
 
 Rename.targetRoot : Text
 Rename.targetRoot =
@@ -3994,342 +4466,198 @@ Rename.looseVideos dir =
     if isDirectory fp then acc else acc :+ fp
   List.foldLeft step [] videoNames
 
-uniDork.identify : '{IO, Exception} ()
-uniDork.identify =
-  do
-    use List size
-    use Nat toText
-    use PreparedCommand close
-    use Text ++
-    use Universal eq
-    staging = FilePath Tmdb.stagingDir
-    if isDirectory staging then
-      token = Tmdb.readToken()
-      entries = directoryContents.texts staging
-      folderNames =
-        List.filter
-          (n ->
-            (if eq n "." then false
-            else if eq n ".." then false else isDirectory (pathJoin staging n)))
-          entries
-      folders = List.map (n -> pathJoin staging n) folderNames
-      loose = Rename.looseVideos staging
-      _ =
-        printLine
-          (Text.join
-            ""
-            [ "scanning "
-            , toText (size folders)
-            , " folder(s) and "
-            , toText (size loose)
-            , " loose video(s) under "
-            , Tmdb.stagingDir
-            ])
-      _ = printLine ""
-      singleIO Db.config do
-        pq = prepareQuery Tmdb.selectSearchSql
-        pc = prepareCommand Tmdb.upsertSearchSql
-        pqStage = prepareQuery Stage.selectProbeSql
-        pqDet = prepareQuery Tmdb.selectDetailsSql
-        pcDet = prepareCommand Tmdb.upsertDetailsSql
-        _ =
-          Db.foreach_
-            (Tmdb.reportFolderWith pq pc pqStage pqDet pcDet token) folders
-        _ =
-          Db.foreach_
-            (Tmdb.reportLooseVideoWith pq pc pqStage pqDet pcDet token) loose
-        _ = close pc
-        close pcDet
-    else printLine ("staging not found: " ++ Tmdb.stagingDir)
+Rename.executeMoveWith
+  pqDup folderFmt fileFmt r d sourceVideo pr originalName subsToken =
+  use Text ++
+  sourceText = filePathText sourceVideo
+  sourceCrc = Stage.ProbeResult.crc32 pr
+  match Rename.findPriorTargetForCrcWith pqDup sourceCrc with
+    Some priorTarget ->
+      Rename.Outcome.DuplicateRemoved sourceText priorTarget
+    None ->
+      videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
+      base = Rename.renderWith fileFmt r pr originalName
+      targetFolderText =
+        Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
+      targetFolder = FilePath targetFolderText
+      targetVideo = pathJoin targetFolder (base ++ videoExt)
+      targetNfo = pathJoin targetFolder (Rename.nfoBase base ++ ".nfo")
+      if isDirectory targetFolder then
+        Rename.Outcome.Conflict sourceText targetFolderText
+      else
+        match
+          catch do
+            _ = createDirectory targetFolder
+            _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
+            renameFile sourceVideo targetVideo
+        with
+          Right _ ->
+            _ = catch do Rename.maybeFetchSubs subsToken d targetFolder base
+            Rename.Outcome.Renamed sourceText targetFolderText
+          Left f -> Rename.Outcome.RenameError sourceText (Failure.message f)
 
-uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
-uniDork.collectFolders roots =
-  addIfDir : FilePath -> [FilePath] -> Text ->{IO, Exception} [FilePath]
-  addIfDir root acc name =
-    use List +:
-    fp = pathJoin root name
-    if isDirectory fp then fp +: acc else acc
-  perRoot root =
-    basenames = directoryContents.texts root
-    _ =
-      printLine
-        (Text.join
-          ""
-          [ "scanning: "
-          , filePathText root
-          , " ("
-          , Nat.toText (List.size basenames)
-          , " entries)"
-          ])
-    List.reverse (List.foldLeft (addIfDir root) [] basenames)
-  List.flatMap perRoot roots
-
-uniDork.processOne
-  pcUpsert
-  pcVid
-  pcDVid
-  pcAud
-  pcDAud
-  pcSub
-  pcDSub
-  pcAct
-  pcDAct
-  pcGen
-  pcDGen
-  pcTag
-  pcDTag
-  pcCou
-  pcDCou
-  pcStu
-  pcDStu
-  pcDir
-  pcDDir
-  pcCre
-  pcDCre
+Rename.processFolderWith
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqLargest
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  token
+  subsToken
   folder =
-  match Nfo.processFolder folder with
-    Left _ ->
-      _ = printLine (Text.join "" ["  no nfo: ", filePathText folder])
-      ()
-    Right m ->
-      actualRuntime = match Movie.videoFilePath m with
-        None         -> None
-        Some vidPath ->
-          match Probe.readSidecar vidPath with
-            None   -> None
-            Some r -> Some (Probe.runtimeSec r)
-      Db.upsertWith
-        pcUpsert
-        pcVid
-        pcDVid
-        pcAud
-        pcDAud
-        pcSub
-        pcDSub
-        pcAct
-        pcDAct
-        pcGen
-        pcDGen
-        pcTag
-        pcDTag
-        pcCou
-        pcDCou
-        pcStu
-        pcDStu
-        pcDir
-        pcDDir
-        pcCre
-        pcDCre
-        actualRuntime
-        m
+  folderName = filePathBasename folder
+  folderText = filePathText folder
+  match Stage.largestInFolderWith pqLargest folderText with
+    Some pr ->
+      videoPathText = Stage.ProbeResult.videoPath pr
+      videoPath = FilePath videoPathText
+      maybeNfo = Nfo.tryReadFolder folder
+      _ = Rename.checkAgreement maybeNfo folderName
+      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
+      match Rename.matchTmdbWith
+        pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin with
+        Left err -> Rename.Outcome.NoMatch folderText err
+        Right r  ->
+          details =
+            match Tmdb.cachedDetailsWith
+              pqDet pcDet token (Tmdb.Result.tmdbId r) with
+              Right dd -> dd
+              Left _   -> Tmdb.detailsFromResult r
+          Rename.executeMoveWith
+            pqDup folderFmt fileFmt r details videoPath pr folderName subsToken
+    None ->
+      files = directoryContents.texts folder
+      match findFirstVideo files with
+        None -> Rename.Outcome.NoVideo folderText
+        Some videoName ->
+          Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
 
-uniDork.processBatch : [FilePath] ->{IO, Exception} ()
-uniDork.processBatch folders = 
-  singleIO Db.config do
-    use PreparedCommand close
-    pcUpsert = prepareCommand Db.upsertMovieSql
-    pcVid = prepareCommand Db.insertVideoSql
-    pcDVid = prepareCommand (Db.deleteChildSql "movie_video_streams")
-    pcAud = prepareCommand Db.insertAudioSql
-    pcDAud = prepareCommand (Db.deleteChildSql "movie_audio_tracks")
-    pcSub = prepareCommand Db.insertSubSql
-    pcDSub = prepareCommand (Db.deleteChildSql "movie_subtitles")
-    pcAct = prepareCommand Db.insertActorSql
-    pcDAct = prepareCommand (Db.deleteChildSql "movie_actors")
-    pcGen = prepareCommand Db.insertGenreSql
-    pcDGen = prepareCommand (Db.deleteChildSql "movie_genres")
-    pcTag = prepareCommand Db.insertTagSql
-    pcDTag = prepareCommand (Db.deleteChildSql "movie_tags")
-    pcCou = prepareCommand Db.insertCountrySql
-    pcDCou = prepareCommand (Db.deleteChildSql "movie_countries")
-    pcStu = prepareCommand Db.insertStudioSql
-    pcDStu = prepareCommand (Db.deleteChildSql "movie_studios")
-    pcDir = prepareCommand Db.insertDirectorSql
-    pcDDir = prepareCommand (Db.deleteChildSql "movie_directors")
-    pcCre = prepareCommand Db.insertCreditSql
-    pcDCre = prepareCommand (Db.deleteChildSql "movie_credits")
-    _ =
-      Db.foreach_
-        (uniDork.processOne
-          pcUpsert
-          pcVid
-          pcDVid
-          pcAud
-          pcDAud
-          pcSub
-          pcDSub
-          pcAct
-          pcDAct
-          pcGen
-          pcDGen
-          pcTag
-          pcDTag
-          pcCou
-          pcDCou
-          pcStu
-          pcDStu
-          pcDir
-          pcDDir
-          pcCre
-          pcDCre)
-        folders
-    _ = close pcUpsert
-    _ = close pcVid
-    _ = close pcDVid
-    _ = close pcAud
-    _ = close pcDAud
-    _ = close pcSub
-    _ = close pcDSub
-    _ = close pcAct
-    _ = close pcDAct
-    _ = close pcGen
-    _ = close pcDGen
-    _ = close pcTag
-    _ = close pcDTag
-    _ = close pcCou
-    _ = close pcDCou
-    _ = close pcStu
-    _ = close pcDStu
-    _ = close pcDir
-    _ = close pcDDir
-    _ = close pcCre
-    close pcDCre
+Rename.processLooseVideoWith
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  token
+  subsToken
+  videoFile =
+  filename = filePathBasename videoFile
+  name = Rename.basenameNoExt filename
+  sourceText = filePathText videoFile
+  match Stage.readWith pqStage sourceText with
+    None    -> Rename.Outcome.NoProbe sourceText
+    Some pr ->
+      probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
+      match Rename.matchTmdbWith
+        pqSearch pcSearch pqDet pcDet token name None probeMin with
+        Left err -> Rename.Outcome.NoMatch sourceText err
+        Right r  ->
+          details =
+            match Tmdb.cachedDetailsWith
+              pqDet pcDet token (Tmdb.Result.tmdbId r) with
+              Right dd -> dd
+              Left _   -> Tmdb.detailsFromResult r
+          Rename.executeMoveWith
+            pqDup folderFmt fileFmt r details videoFile pr name subsToken
 
-uniDork.runBatchSafe : Nat -> Nat -> [FilePath] ->{IO, Exception} ()
-uniDork.runBatchSafe i n batch =
-  use Nat toText
-  use Text join
+Rename.runOneLooseWith
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  pcLog
+  token
+  subsToken
+  videoFile =
+  use Text ++
+  filename = filePathBasename videoFile
+  _ = printLine ("processing (loose): " ++ filename)
+  outcome =
+    processLooseVideoWith
+      pqDup
+      folderFmt
+      fileFmt
+      pqStage
+      pqSearch
+      pcSearch
+      pqDet
+      pcDet
+      token
+      subsToken
+      videoFile
   _ =
-    printLine
-      (join
-        ""
-        [ "batch "
-        , toText i
-        , "/"
-        , toText n
-        , " ("
-        , toText (List.size batch)
-        , " folders)"
-        ])
-  match catch do uniDork.processBatch batch with
-    Right _ -> ()
-    Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
+    match outcome with
+      Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
+      DuplicateRemoved _ tgt ->
+        printLine
+          ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
+      NoVideo _ -> printLine "  skip: no video"
+      NoMatch _ reason -> printLine ("  skip: " ++ reason)
+      NoProbe src ->
+        printLine
+          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
+      Conflict _ t ->
+        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
+      RenameError _ msg -> printLine ("  ERROR: " ++ msg)
+  writeOutcomeWith pcLog outcome
 
-uniDork.batchedMain : Text ->{IO, Exception} ()
-uniDork.batchedMain configPath =
-  use List size
-  use Nat toText
-  use Text join
-  configText = readFileUtf8 (FilePath configPath)
-  dirs = List.filterMap parseConfigLine (lines configText)
-  _ = Db.createSchema()
-  _ = printLine "collecting folders..."
-  folders = uniDork.collectFolders dirs
-  total = size folders
-  _ = printLine (join "" ["found ", toText total, " folders to process"])
-  batches = List.chunk uniDork.batchSize folders
-  nBatches = size batches
+Rename.runOneWith
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqLargest
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  pcLog
+  token
+  subsToken
+  folder =
+  use Text ++
+  folderName = filePathBasename folder
+  _ = printLine ("processing: " ++ folderName)
+  outcome =
+    processFolderWith
+      pqDup
+      folderFmt
+      fileFmt
+      pqStage
+      pqLargest
+      pqSearch
+      pcSearch
+      pqDet
+      pcDet
+      token
+      subsToken
+      folder
   _ =
-    printLine
-      (join
-        ""
-        [ "processing in "
-        , toText nBatches
-        , " batches of (up to) "
-        , toText uniDork.batchSize
-        ])
-  step i batch =
-    use Nat +
-    _ = uniDork.runBatchSafe i nBatches batch
-    i + 1
-  _ = List.foldLeft step 1 batches
-  printLine "done"
-
-uniDork.batchedRun : '{IO, Exception} ()
-uniDork.batchedRun = do
-  args = getArgs()
-  configPath = match args with
-    _ +: rest ->
-      match rest with
-        p +: _ -> p
-        []     -> "./uniDork.conf"
-    []        -> "./uniDork.conf"
-  uniDork.batchedMain configPath
-
-Nfo.tryReadFolder : FilePath ->{IO, Exception} Optional Movie
-Nfo.tryReadFolder folder =
-  files = directoryContents.texts folder
-  match findFirstNfo files with
-    None         -> None
-    Some nfoName ->
-      nfoPath = pathJoin folder nfoName
-      match catch do readFileUtf8 nfoPath with
-        Left _    -> None
-        Right xml ->
-          match Nfo.parse xml with
-            Left _  -> None
-            Right m -> Some m
-
-Nfo.extractTmdbId : Movie -> Optional Nat
-Nfo.extractTmdbId m = match MovieId.tmdb (Movie.id m) with
-  None   -> None
-  Some s -> Nat.fromText (trim s)
-
-Nfo.extractImdbId : Movie -> Optional Text
-Nfo.extractImdbId m = MovieId.imdb (Movie.id m)
-
-Nfo.extractTitle : Movie -> Optional Text
-Nfo.extractTitle m =
-  t = Title.display (Movie.title m)
-  if Universal.eq (Text.size t) 0 then None else Some t
-
-Nfo.extractYear : Movie -> Optional Nat
-Nfo.extractYear m = Scoring.year (Movie.scoring m)
-
-Stage.AudioInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.AudioInfo
-Stage.AudioInfo.fromJson =
-  do
-    use Decoder text
-    use object at!
-    codec = at! "codec" text
-    channels = at! "channels" Decoder.nat
-    channelLayout = at! "channel_layout" text
-    language =
-      Optional.getOrElse "" (Decoder.optional! (object.at "language" text))
-    Stage.AudioInfo.AudioInfo codec channels channelLayout language
-
-Stage.SubtitleInfo.fromJson : '{unison_json_1_4_2.Decoder} Stage.SubtitleInfo
-Stage.SubtitleInfo.fromJson = do
-  use Decoder optional! text
-  use Optional getOrElse
-  use object at
-  codec = getOrElse "" (optional! (at "codec" text))
-  language = getOrElse "" (optional! (at "language" text))
-  Stage.SubtitleInfo.SubtitleInfo codec language
-
-Stage.ProbeResult.fromJson : '{unison_json_1_4_2.Decoder} Stage.ProbeResult
-Stage.ProbeResult.fromJson =
-  do
-    use Decoder array optional! text
-    use object at at!
-    videoPath = at! "video_path" text
-    crc32 = at! "crc32" text
-    sizeBytes = at! "size_bytes" Decoder.nat
-    durationSec = at! "duration_sec" Decoder.float
-    video = at! "video" Stage.VideoInfo.fromJson
-    audiosNew = optional! (at "audios" (array Stage.AudioInfo.fromJson))
-    audiosLegacy = optional! (at "audio" Stage.AudioInfo.fromJson)
-    audios = match audiosNew with
-      Some a -> a
-      None   ->
-        match audiosLegacy with
-          Some a -> [a]
-          None   -> []
-    subtitles =
-      Optional.getOrElse
-        [] (optional! (at "subtitles" (array Stage.SubtitleInfo.fromJson)))
-    Stage.ProbeResult.ProbeResult
-      videoPath crc32 sizeBytes durationSec video audios subtitles
+    match outcome with
+      Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
+      DuplicateRemoved _ tgt ->
+        printLine
+          ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
+      NoVideo _ -> printLine "  skip: no video"
+      NoMatch _ reason -> printLine ("  skip: " ++ reason)
+      NoProbe src ->
+        printLine
+          ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
+      Conflict _ t ->
+        printLine ("  skip: target exists; no prior rename for this crc " ++ t)
+      RenameError _ msg -> printLine ("  ERROR: " ++ msg)
+  writeOutcomeWith pcLog outcome
 
 Rename.audioPart : Stage.ProbeResult -> Text
 Rename.audioPart pr =
@@ -4380,341 +4708,6 @@ Rename.resolveToken ctx tok =
     "group" -> Optional.getOrElse "" (Rename.Context.group ctx)
     "tags" -> Text.join " " (Rename.Context.tags ctx)
     _ -> ""
-
-type Tmdb.Details
-  = { tmdbId : Nat,
-      imdbId : Optional Text,
-      runtime : Nat,
-      title : Text,
-      originalTitle : Text,
-      originalLanguage : Text,
-      overview : Text,
-      tagline : Text,
-      releaseDate : Text,
-      voteAverage : Float,
-      voteCount : Nat,
-      genres : [Text],
-      productionCountries : [Text],
-      productionStudios : [Text],
-      collection : Optional Text,
-      mpaa : Text,
-      directors : [Text],
-      writers : [Text],
-      cast : [(Text, Text)],
-      tags : [Text] }
-
-Tmdb.namedObjectFromJson : '{unison_json_1_4_2.Decoder} Text
-Tmdb.namedObjectFromJson = do object.at! "name" Decoder.text
-
-Tmdb.isoCountryFromJson : '{unison_json_1_4_2.Decoder} Text
-Tmdb.isoCountryFromJson = do object.at! "iso_3166_1" Decoder.text
-
-Tmdb.castMemberFromJson : '{unison_json_1_4_2.Decoder} (Text, Text)
-Tmdb.castMemberFromJson =
-  do
-    use Decoder text
-    name = object.at! "name" text
-    character =
-      Optional.getOrElse "" (Decoder.optional! (object.at "character" text))
-    (name, character)
-
-Tmdb.crewMemberFromJson : '{unison_json_1_4_2.Decoder} (Text, Text, Text)
-Tmdb.crewMemberFromJson = do
-  use Decoder optional! text
-  use Optional getOrElse
-  use object at
-  name = object.at! "name" text
-  job = getOrElse "" (optional! (at "job" text))
-  department = getOrElse "" (optional! (at "department" text))
-  (name, job, department)
-
-Tmdb.singleCertFromJson : '{unison_json_1_4_2.Decoder} Text
-Tmdb.singleCertFromJson =
-  do
-    Optional.getOrElse
-      "" (Decoder.optional! (object.at "certification" Decoder.text))
-
-Tmdb.countryReleaseFromJson : '{unison_json_1_4_2.Decoder} (Text, [Text])
-Tmdb.countryReleaseFromJson = do
-  use object at!
-  country = at! "iso_3166_1" Decoder.text
-  releases = at! "release_dates" (Decoder.array Tmdb.singleCertFromJson)
-  (country, releases)
-
-List.distinctText : [Text] -> [Text]
-List.distinctText xs =
-  use List :+
-  step acc x = if List.any (y -> Universal.eq x y) acc then acc else acc :+ x
-  List.foldLeft step [] xs
-
-Tmdb.detailsURI : Nat -> URI
-Tmdb.detailsURI tmdbId =
-  use Path /
-  path = Path.root / "3" / "movie" / Nat.toText tmdbId
-  q = Query.empty & ("append_to_response", "credits,release_dates,keywords")
-  URI Scheme.https (Some Tmdb.apiAuthority) path (fromQuery q) Fragment.empty
-
-Tmdb.detailsFromResult : Tmdb.Result -> Tmdb.Details
-Tmdb.detailsFromResult r =
-  Tmdb.Details.Details
-    (Tmdb.Result.tmdbId r)
-    None
-    0
-    (Tmdb.Result.title r)
-    (Tmdb.Result.originalTitle r)
-    (Tmdb.Result.originalLanguage r)
-    (Tmdb.Result.overview r)
-    ""
-    (Tmdb.Result.releaseDate r)
-    0.0
-    0
-    []
-    []
-    []
-    None
-    ""
-    []
-    []
-    []
-    []
-
-Nfo.padLeft : Nat -> Text -> Text -> Text
-Nfo.padLeft target pad t =
-  use Nat <
-  use Text ++
-  if Text.size t < target then Nfo.padLeft target pad (pad ++ t) else t
-
-Nfo.aspectRatio : Nat -> Nat -> Text
-Nfo.aspectRatio w h =
-  use Nat % * + / toText
-  use Text ++
-  if Universal.eq h 0 then "0.000"
-  else
-    rounded = (w * 1000 + h / 2) / h
-    whole = rounded / 1000
-    frac = rounded % 1000
-    fracStr = Nfo.padLeft 3 "0" (toText frac)
-    toText whole ++ "." ++ fracStr
-
-Nfo.sortTitle : Text -> Text -> Text
-Nfo.sortTitle title releaseDate =
-  use Nat >
-  use Text ++ drop
-  lower = Text.toLowercase title
-  stripped =
-    if startsWith "the " lower then drop 4 title
-    else
-      if startsWith "an " lower then drop 3 title
-      else if startsWith "a " lower then drop 2 title else title
-  if Text.size releaseDate > 0 then stripped ++ " :: " ++ releaseDate
-  else stripped
-
-Nfo.audioBlock : Stage.AudioInfo -> [Text]
-Nfo.audioBlock a =
-  use Text ++
-  esc = Rename.escapeXml
-  [ "      <audio>"
-  , "        <codec>" ++ esc (Stage.AudioInfo.codec a) ++ "</codec>"
-  , "        <language>" ++ esc (Stage.AudioInfo.language a) ++ "</language>"
-  , "        <channels>"
-      ++ Nat.toText (Stage.AudioInfo.channels a)
-      ++ "</channels>"
-  , "      </audio>"
-  ]
-
-Nfo.subtitleBlock : Stage.SubtitleInfo -> [Text]
-Nfo.subtitleBlock s =
-  use Text ++
-  esc = Rename.escapeXml
-  [ "      <subtitle>"
-  , "        <language>"
-      ++ esc (Stage.SubtitleInfo.language s)
-      ++ "</language>"
-  , "      </subtitle>"
-  ]
-
-Nfo.fileinfoBlock : Stage.ProbeResult -> [Text]
-Nfo.fileinfoBlock pr =
-  use List flatMap
-  use Nat toText
-  esc = Rename.escapeXml
-  vid = Stage.ProbeResult.video pr
-  vc = Stage.VideoInfo.codec vid
-  vw = Stage.VideoInfo.width vid
-  vh = Stage.VideoInfo.height vid
-  videoLines =
-    [ "      <video>"
-    , "        <codec>" Text.++ esc vc Text.++ "</codec>"
-    , "        <aspect>" Text.++ Nfo.aspectRatio vw vh Text.++ "</aspect>"
-    , "        <width>" Text.++ toText vw Text.++ "</width>"
-    , "        <height>" Text.++ toText vh Text.++ "</height>"
-    , "      </video>"
-    ]
-  audioLines = flatMap Nfo.audioBlock (Stage.ProbeResult.audios pr)
-  subtitleLines = flatMap Nfo.subtitleBlock (Stage.ProbeResult.subtitles pr)
-  result =
-    ["  <fileinfo>", "    <streamdetails>"]
-      List.++ videoLines
-      List.++ audioLines
-      List.++ subtitleLines
-      List.++ ["    </streamdetails>", "  </fileinfo>"]
-  result
-
-Nfo.genreLine : Text -> Text
-Nfo.genreLine g =
-  use Text ++
-  "  <genre>" ++ Rename.escapeXml g ++ "</genre>"
-
-Nfo.countryLine : Text -> Text
-Nfo.countryLine c =
-  use Text ++
-  "  <country>" ++ Rename.escapeXml c ++ "</country>"
-
-Nfo.studioLine : Text -> Text
-Nfo.studioLine s =
-  use Text ++
-  "  <studio>" ++ Rename.escapeXml s ++ "</studio>"
-
-Nfo.directorLine : Text -> Text
-Nfo.directorLine d =
-  use Text ++
-  "  <director>" ++ Rename.escapeXml d ++ "</director>"
-
-Nfo.writerLine : Text -> Text
-Nfo.writerLine w =
-  use Text ++
-  "  <credits>" ++ Rename.escapeXml w ++ "</credits>"
-
-Nfo.actorBlock : (Text, Text) -> [Text]
-Nfo.actorBlock = cases
-  (name, role) ->
-    use Text ++
-    esc = Rename.escapeXml
-    [ "  <actor>"
-    , "    <name>" ++ esc name ++ "</name>"
-    , "    <role>" ++ esc role ++ "</role>"
-    , "  </actor>"
-    ]
-
-Nfo.tagLine : Text -> Text
-Nfo.tagLine t =
-  use Text ++
-  "  <tag>" ++ Rename.escapeXml t ++ "</tag>"
-
-Nfo.generate : Tmdb.Result -> Tmdb.Details -> Stage.ProbeResult -> Text
-Nfo.generate _r d pr =
-  use List map
-  use Nat >
-  use Text join size
-  use Universal eq
-  esc = Rename.escapeXml
-  yearText = match Tmdb.releaseYear (Tmdb.Details.releaseDate d) with
-    Some y -> Nat.toText y
-    None   -> ""
-  releaseDate = Tmdb.Details.releaseDate d
-  imdbId = Optional.getOrElse "" (Tmdb.Details.imdbId d)
-  tmdbText = Nat.toText (Tmdb.Details.tmdbId d)
-  crc32 = Stage.ProbeResult.crc32 pr
-  sortTitle = Nfo.sortTitle (Tmdb.Details.title d) releaseDate
-  setBlock = match Tmdb.Details.collection d with
-    Some col -> ["  <set>" Text.++ esc col Text.++ "</set>"]
-    None     -> ["  <set />"]
-  premieredBlock =
-    if size releaseDate > 0 then
-      ["  <premiered>" Text.++ esc releaseDate Text.++ "</premiered>"]
-    else []
-  tmdbUniqueId =
-    [ join
-        ""
-        [ "  <uniqueid type=\"tmdb\" default=\"true\">"
-        , tmdbText
-        , "</uniqueid>"
-        ]
-    ]
-  imdbUniqueId =
-    if eq (size imdbId) 0 then []
-    else [join "" ["  <uniqueid type=\"imdb\">", esc imdbId, "</uniqueid>"]]
-  crcUniqueId =
-    if eq (size crc32) 0 then []
-    else [join "" ["  <uniqueid type=\"crc32\">", esc crc32, "</uniqueid>"]]
-  uniqueIdLines = tmdbUniqueId List.++ imdbUniqueId List.++ crcUniqueId
-  genreLines = map Nfo.genreLine (Tmdb.Details.genres d)
-  tagLines = map Nfo.tagLine (Tmdb.Details.tags d)
-  countryLines = map Nfo.countryLine (Tmdb.Details.productionCountries d)
-  studioLines = map Nfo.studioLine (Tmdb.Details.productionStudios d)
-  directorLines = map Nfo.directorLine (Tmdb.Details.directors d)
-  writerLines = map Nfo.writerLine (Tmdb.Details.writers d)
-  actorLines = List.flatMap Nfo.actorBlock (Tmdb.Details.cast d)
-  fileinfoLines = Nfo.fileinfoBlock pr
-  header =
-    [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
-    , "<movie>"
-    , "  <title>" Text.++ esc (Tmdb.Details.title d) Text.++ "</title>"
-    , "  <originaltitle>"
-        Text.++ esc (Tmdb.Details.originalTitle d)
-        Text.++ "</originaltitle>"
-    , "  <sorttitle>" Text.++ esc sortTitle Text.++ "</sorttitle>"
-    ]
-  scoring =
-    [ "  <year>" Text.++ yearText Text.++ "</year>"
-    , "  <rating>"
-        Text.++ Float.toText (Tmdb.Details.voteAverage d)
-        Text.++ "</rating>"
-    , "  <votes>"
-        Text.++ Nat.toText (Tmdb.Details.voteCount d)
-        Text.++ "</votes>"
-    , "  <mpaa>" Text.++ esc (Tmdb.Details.mpaa d) Text.++ "</mpaa>"
-    , "  <id>" Text.++ esc imdbId Text.++ "</id>"
-    ]
-  plotEtc =
-    [ "  <plot>" Text.++ esc (Tmdb.Details.overview d) Text.++ "</plot>"
-    , "  <tagline>" Text.++ esc (Tmdb.Details.tagline d) Text.++ "</tagline>"
-    , "  <runtime>"
-        Text.++ Nat.toText (Tmdb.Details.runtime d)
-        Text.++ "</runtime>"
-    ]
-  imdbElem =
-    if eq (size imdbId) 0 then []
-    else
-      [ join
-          ""
-          [ "  <imdb id='"
-          , imdbId
-          , "'>http://www.imdb.com/title/"
-          , imdbId
-          , "</imdb>"
-          ]
-      ]
-  tmdbElem =
-    [ join
-        ""
-        [ "  <tmdb id='"
-        , tmdbText
-        , "'>http://www.themoviedb.org/movie/"
-        , tmdbText
-        , "</tmdb>"
-        ]
-    ]
-  urlElems = imdbElem List.++ tmdbElem
-  footer = ["</movie>", ""]
-  allLines =
-    header
-      List.++ setBlock
-      List.++ scoring
-      List.++ premieredBlock
-      List.++ uniqueIdLines
-      List.++ plotEtc
-      List.++ genreLines
-      List.++ tagLines
-      List.++ countryLines
-      List.++ studioLines
-      List.++ actorLines
-      List.++ directorLines
-      List.++ writerLines
-      List.++ fileinfoLines
-      List.++ urlElems
-      List.++ footer
-  join "\n" allLines
 
 Rename.nfoBase : Text -> Text
 Rename.nfoBase _videoBase = "movie"
@@ -4984,6 +4977,12 @@ test> Subs.pickBestDropsFullSeason.test =
   match Subs.pickBestForMovie "EN" [pack] with
     Some _ -> [Fail "should have dropped the full-season pack"]
     None   -> check true
+
+test> Movie.roundtrip.test =
+  encoded = Movie.toNdjsonLine exampleMovie
+  match Movie.fromNdjsonLine encoded with
+    Left failure -> [Fail (Failure.message failure)]
+    Right m      -> check (Universal.eq m exampleMovie)
 
 test> Subs.pickBestEmpty.test =
   match Subs.pickBestForMovie "EN" [] with
