@@ -2,14 +2,17 @@ uniDork.cli : '{IO, Exception} ()
 uniDork.cli = do
   args = getArgs()
   match args with
-    "import" +: _    -> batchedRun()
-    "identify" +: _  -> identify()
+    "import" +: _      -> batchedRun()
+    "identify" +: _    -> identify()
+    "probe-stage" +: _ -> Stage.runProbeStage()
     "rename" +: rest ->
       match rest with
         format +: _ -> renameWithCombinedFormat format ()
         []          -> rename()
     _                ->
-      _ = printLine "usage: unidork-import <import|identify|rename> [format]"
+      _ =
+        printLine
+          "usage: unidork-import <import|identify|probe-stage|rename> [format]"
       ()
 
 uniDork.rename : '{IO, Exception} ()
@@ -3631,6 +3634,554 @@ Stage.readWith pq sourcePath = match
           Right r -> Some r
           Left _  -> None
 
+Stage.ffprobeArgs : Text -> [Text]
+Stage.ffprobeArgs path =
+  [ "-v", "quiet"
+  , "-print_format", "json"
+  , "-show_format"
+  , "-show_streams"
+  , path
+  ]
+
+-- Read a handle to EOF. getLine is confirmed by the docs you pasted.
+-- The ONE identifier I won't guess is the EOF predicate. If `Handle.isEOF`
+-- doesn't resolve, run `find isEOF` / `find isFileEOF` and swap the name;
+-- the predicate exists in base, I'm just not certain of its exact path.
+Stage.drainHandle : Handle ->{IO, Exception} Text
+Stage.drainHandle h =
+  use Text ++
+  go acc =
+    if Handle.isEOF h then acc
+    else go (acc ++ getLine h ++ "\n")
+  go ""
+
+Stage.runFfprobe : Text ->{IO, Exception} Either Text Text
+Stage.runFfprobe path =
+  match
+    catch do
+      (stdin, stdout, _stderr, p) = start "ffprobe" (Stage.ffprobeArgs path)
+      _ = Handle.close stdin
+      out = Stage.drainHandle stdout
+      code = Process.wait p
+      (code, out)
+  with
+    Left f -> Left (Failure.message f)
+    Right (code, out) ->
+      use Nat ==
+      use Text ++
+      if code == 0 then Right out
+      else Left ("ffprobe exit " ++ Nat.toText code)
+
+Stage.runRhashCrc32 : Text ->{IO, Exception} Either Text Text
+Stage.runRhashCrc32 path =
+  match
+    catch do
+      (stdin, stdout, _stderr, p) = start "rhash" ["--crc32", "-p", "%C", path]
+      _ = Handle.close stdin
+      out = Stage.drainHandle stdout
+      code = Process.wait p
+      (code, out)
+  with
+    Left f -> Left (Failure.message f)
+    Right (code, out) ->
+      use Nat ==
+      use Text ++
+      if code == 0 then Right (Text.toUppercase (trim out))
+      else Left ("rhash exit " ++ Nat.toText code)
+
+type Stage.RawStream
+  = { codecType : Text,
+      codecName : Text,
+      width : Nat,
+      height : Nat,
+      pixFmt : Text,
+      bitsPerRawSample : Optional Nat,
+      bitRate : Optional Nat,
+      channels : Nat,
+      channelLayout : Text,
+      language : Text }
+
+type Stage.RawFormat
+  = { sizeBytes : Nat, durationSec : Float }
+
+type Stage.RawProbe
+  = { streams : [Stage.RawStream], format : Stage.RawFormat }
+
+Stage.parseNatString : Optional Text -> Optional Nat
+Stage.parseNatString = cases
+  None   -> None
+  Some s -> Nat.fromText (trim s)
+
+Stage.emptyRawFormat : Stage.RawFormat
+Stage.emptyRawFormat = Stage.RawFormat.RawFormat 0 0.0
+
+Stage.tagLanguage : '{unison_json_1_4_2.Decoder} Text
+Stage.tagLanguage =
+  do
+    use Decoder optional! text
+    use Optional getOrElse
+    use object at
+    match optional! (at "language" text) with
+      Some l -> l
+      None   -> getOrElse "" (optional! (at "LANGUAGE" text))
+
+Stage.RawStream.fromJson : '{unison_json_1_4_2.Decoder} Stage.RawStream
+Stage.RawStream.fromJson =
+  do
+    use Decoder nat optional! text
+    use Optional getOrElse
+    use Universal eq
+    use object at
+    codecType = getOrElse "" (optional! (at "codec_type" text))
+    codecName = getOrElse "" (optional! (at "codec_name" text))
+    width = getOrElse 0 (optional! (at "width" nat))
+    height = getOrElse 0 (optional! (at "height" nat))
+    pixFmt = getOrElse "" (optional! (at "pix_fmt" text))
+    bitsPerRawSample = match optional! (at "bits_per_raw_sample" text) with
+      None   -> None
+      Some s -> Some (getOrElse 8 (Nat.fromText (trim s)))
+    bitRate = match optional! (at "bit_rate" text) with
+      None   -> None
+      Some s -> if eq (trim s) "" then None else Nat.fromText (trim s)
+    channels = getOrElse 0 (optional! (at "channels" nat))
+    channelLayout = getOrElse "" (optional! (at "channel_layout" text))
+    language = getOrElse "" (optional! (at "tags" Stage.tagLanguage))
+    Stage.RawStream.RawStream
+      codecType
+      codecName
+      width
+      height
+      pixFmt
+      bitsPerRawSample
+      bitRate
+      channels
+      channelLayout
+      language
+
+Stage.RawFormat.fromJson : '{unison_json_1_4_2.Decoder} Stage.RawFormat
+Stage.RawFormat.fromJson =
+  do
+    use Decoder optional! text
+    use Optional getOrElse
+    use object at
+    sizeText = optional! (at "size" text)
+    sizeBytes = getOrElse 0 (Stage.parseNatString sizeText)
+    durationText = getOrElse "0" (optional! (at "duration" text))
+    durationSec = getOrElse 0.0 (Float.fromText (trim durationText))
+    Stage.RawFormat.RawFormat sizeBytes durationSec
+
+Stage.RawProbe.fromJson : '{unison_json_1_4_2.Decoder} Stage.RawProbe
+Stage.RawProbe.fromJson =
+  do
+    use Decoder array optional!
+    use Optional getOrElse
+    use object at
+    streams =
+      getOrElse
+        [] (optional! (at "streams" (array Stage.RawStream.fromJson)))
+    format =
+      getOrElse
+        Stage.emptyRawFormat
+        (optional! (at "format" Stage.RawFormat.fromJson))
+    Stage.RawProbe.RawProbe streams format
+
+Stage.bitDepthFrom : Optional Nat -> Text -> Nat
+Stage.bitDepthFrom bprs pixFmt =
+  match bprs with
+    Some n -> n
+    None   ->
+      contains needles =
+        List.any
+          (x -> (match Text.indexOf x pixFmt with
+            Some _ -> true
+            None   -> false)) needles
+      if contains ["p10", "10le", "10be"] then 10
+      else if contains ["p12", "12le", "12be"] then 12 else 8
+
+Stage.fromRaw : Text -> Text -> Stage.RawProbe -> Stage.ProbeResult
+Stage.fromRaw videoPath crc raw =
+  use Universal eq
+  streams = Stage.RawProbe.streams raw
+  fmt = Stage.RawProbe.format raw
+  isType ty s = eq (Stage.RawStream.codecType s) ty
+  videoStreams = List.filter (isType "video") streams
+  audioStreams = List.filter (isType "audio") streams
+  subStreams = List.filter (isType "subtitle") streams
+  videoInfo = match List.head videoStreams with
+    None   -> Stage.VideoInfo.VideoInfo "" 0 0 8 "" None
+    Some v ->
+      bd =
+        Stage.bitDepthFrom
+          (Stage.RawStream.bitsPerRawSample v) (Stage.RawStream.pixFmt v)
+      Stage.VideoInfo.VideoInfo
+        (Stage.RawStream.codecName v)
+        (Stage.RawStream.width v)
+        (Stage.RawStream.height v)
+        bd
+        (Stage.RawStream.pixFmt v)
+        (Stage.RawStream.bitRate v)
+  audios =
+    List.map
+      (s ->
+        Stage.AudioInfo.AudioInfo
+          (Stage.RawStream.codecName s)
+          (Stage.RawStream.channels s)
+          (Stage.RawStream.channelLayout s)
+          (Stage.RawStream.language s))
+      audioStreams
+  subtitles =
+    List.map
+      (s ->
+        Stage.SubtitleInfo.SubtitleInfo
+          (Stage.RawStream.codecName s) (Stage.RawStream.language s))
+      subStreams
+  Stage.ProbeResult.ProbeResult
+    videoPath
+    crc
+    (Stage.RawFormat.sizeBytes fmt)
+    (Stage.RawFormat.durationSec fmt)
+    videoInfo
+    audios
+    subtitles
+
+Stage.probeViaFfprobe :
+  Text -> Text ->{IO, Exception} Either Text Stage.ProbeResult
+Stage.probeViaFfprobe videoPath crc =
+  match Stage.runFfprobe videoPath with
+    Left err  -> Left err
+    Right raw ->
+      match catch do Decoder.run Stage.RawProbe.fromJson raw with
+        Left f   -> Left (Failure.message f)
+        Right rp -> Right (Stage.fromRaw videoPath crc rp)
+
+Stage.probeWithCrc :
+  Text ->{IO, Exception} Either Text Stage.ProbeResult
+Stage.probeWithCrc videoPath =
+  match Stage.runRhashCrc32 videoPath with
+    Left err  -> Left err
+    Right crc -> Stage.probeViaFfprobe videoPath crc
+
+Stage.exampleFfprobeJson : Text
+Stage.exampleFfprobeJson =
+  Text.join
+    "\n"
+    [ "{"
+    , "  \"streams\": ["
+    , "    {"
+    , "      \"codec_type\": \"video\","
+    , "      \"codec_name\": \"hevc\","
+    , "      \"width\": 1920,"
+    , "      \"height\": 1080,"
+    , "      \"pix_fmt\": \"yuv420p10le\","
+    , "      \"bit_rate\": \"5000000\""
+    , "    },"
+    , "    {"
+    , "      \"codec_type\": \"audio\","
+    , "      \"codec_name\": \"eac3\","
+    , "      \"channels\": 6,"
+    , "      \"channel_layout\": \"5.1\","
+    , "      \"tags\": { \"language\": \"eng\" }"
+    , "    },"
+    , "    {"
+    , "      \"codec_type\": \"subtitle\","
+    , "      \"codec_name\": \"subrip\","
+    , "      \"tags\": { \"language\": \"eng\" }"
+    , "    }"
+    , "  ],"
+    , "  \"format\": {"
+    , "    \"size\": \"2600000000\","
+    , "    \"duration\": \"5025.024000\""
+    , "  }"
+    , "}"
+    ]
+
+Stage.VideoInfo.toJson : Stage.VideoInfo -> Json
+Stage.VideoInfo.toJson v =
+  use Json nat text
+  Json.object
+    [ ("codec", text (Stage.VideoInfo.codec v))
+    , ("width", nat (Stage.VideoInfo.width v))
+    , ("height", nat (Stage.VideoInfo.height v))
+    , ("bit_depth", nat (Stage.VideoInfo.bitDepth v))
+    , ("pix_fmt", text (Stage.VideoInfo.pixFmt v))
+    , ("bit_rate", toJsonOpt Json.nat (Stage.VideoInfo.bitRate v))
+    ]
+
+Stage.AudioInfo.toJson : Stage.AudioInfo -> Json
+Stage.AudioInfo.toJson a =
+  use Json nat text
+  Json.object
+    [ ("codec", text (Stage.AudioInfo.codec a))
+    , ("channels", nat (Stage.AudioInfo.channels a))
+    , ("channel_layout", text (Stage.AudioInfo.channelLayout a))
+    , ("language", text (Stage.AudioInfo.language a))
+    ]
+
+Stage.SubtitleInfo.toJson : Stage.SubtitleInfo -> Json
+Stage.SubtitleInfo.toJson s =
+  use Json text
+  Json.object
+    [ ("codec", text (Stage.SubtitleInfo.codec s))
+    , ("language", text (Stage.SubtitleInfo.language s))
+    ]
+
+Stage.ProbeResult.toJson : Stage.ProbeResult -> Json
+Stage.ProbeResult.toJson pr =
+  use Json array nat text
+  use List map
+  Json.object
+    [ ("video_path", text (Stage.ProbeResult.videoPath pr))
+    , ("crc32", text (Stage.ProbeResult.crc32 pr))
+    , ("size_bytes", nat (Stage.ProbeResult.sizeBytes pr))
+    , ("duration_sec", Json.float (Stage.ProbeResult.durationSec pr))
+    , ("video", Stage.VideoInfo.toJson (Stage.ProbeResult.video pr))
+    , ("audios", array (map Stage.AudioInfo.toJson (Stage.ProbeResult.audios pr)))
+    , ( "subtitles"
+      , array (map Stage.SubtitleInfo.toJson (Stage.ProbeResult.subtitles pr))
+      )
+    ]
+
+Stage.fileMtime : Text ->{IO, Exception} Optional Int
+Stage.fileMtime path =
+  match
+    catch do
+      (stdin, stdout, _stderr, p) = start "stat" ["-c", "%Y", path]
+      _ = Handle.close stdin
+      out = Stage.drainHandle stdout
+      code = Process.wait p
+      (code, out)
+  with
+    Left _ -> None
+    Right (code, out) ->
+      use Nat ==
+      if code == 0 then
+        match Nat.fromText (trim out) with
+          Some n -> Some (Nat.toInt n)
+          None   -> None
+      else None
+
+Stage.cachedCountSql =
+  use Codec text
+  sql "SELECT COUNT(*) FROM stage_probes WHERE source_path = "
+    %% var text
+    %% sql " AND probed_at >= to_timestamp("
+    %% var integer
+    %% sql ")"
+    |> typedQuery bigint
+
+Stage.isCachedWith pq sourcePath mtime =
+  match
+    catch do
+      portal = bindQuery pq (Db.pt sourcePath ++ Db.pi mtime)
+      (rows, _) = executeQueryPortal portal 0
+      rows
+  with
+    Left _   -> false
+    Right rs ->
+      match rs with
+        n +: _ -> not (Universal.eq n +0)
+        []     -> false
+
+Stage.upsertProbeSql =
+  use Codec optional text
+  sql
+    "INSERT INTO stage_probes (source_path, folder_path, video_basename, crc32, probe_json) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var (optional text)
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql
+         ") ON CONFLICT (source_path) DO UPDATE SET folder_path = EXCLUDED.folder_path, video_basename = EXCLUDED.video_basename, crc32 = EXCLUDED.crc32, probe_json = EXCLUDED.probe_json, probed_at = NOW()"
+    |> buildCommand
+
+Stage.upsertProbeWith pc folderOpt source basename crc probeJson =
+  use List ++
+  _ =
+    catch do
+      bindAndExecuteCommand
+        pc
+        (Db.pt source
+          ++ Db.pot folderOpt
+          ++ Db.pt basename
+          ++ Db.pt crc
+          ++ Db.pt probeJson)
+  ()
+
+Stage.collectWork : FilePath ->{IO, Exception} [(Optional Text, Text)]
+Stage.collectWork staging =
+  use List ++
+  use Universal eq
+  entries = directoryContents.texts staging
+  folderNames =
+    List.filter
+      (n ->
+        if eq n "." then false
+        else if eq n ".." then false else isDirectory (pathJoin staging n))
+      entries
+  folders = List.map (n -> pathJoin staging n) folderNames
+  folderWork =
+    List.flatMap
+      (folder ->
+        List.map
+          (v -> (Some (filePathText folder), filePathText v))
+          (Rename.looseVideos folder))
+      folders
+  looseWork =
+    List.map (v -> (None, filePathText v)) (Rename.looseVideos staging)
+  folderWork ++ looseWork
+
+-- Phase 3: sequential, writes DB on the single connection.
+Stage.upsertBatch pcUpsert results =
+  Db.foreach_
+    (cases
+      (folderOpt, videoPath, pr) ->
+        crc = Stage.ProbeResult.crc32 pr
+        probeJson = Json.toText (Stage.ProbeResult.toJson pr)
+        Stage.upsertProbeWith
+          pcUpsert
+          folderOpt
+          videoPath
+          (filePathBasename (FilePath videoPath))
+          crc
+          probeJson)
+    results
+
+Stage.runProbeStage : '{IO, Exception} ()
+Stage.runProbeStage = do
+  use Text ++
+  use Nat toText
+  staging = FilePath Tmdb.stagingDir
+  if isDirectory staging then
+    work = Stage.collectWork staging
+    _ =
+      printLine
+        ("[stage-probe] " ++ toText (List.size work) ++ " video(s) found")
+    singleIO Db.config do
+      pqCached = prepareQuery Stage.cachedCountSql
+      pcUpsert = prepareCommand Stage.upsertProbeSql
+      toProbe = Stage.partitionWork pqCached work
+      _ =
+        printLine
+          (Text.join
+            ""
+            [ "[stage-probe] to probe: "
+            , toText (List.size toProbe)
+            , ", cached: "
+            , toText (List.size work - List.size toProbe)
+            ])
+      probed = Stage.probeBatch toProbe
+      _ = Stage.upsertBatch pcUpsert probed
+      _ = PreparedCommand.close pcUpsert
+      printLine
+        (Text.join
+          "" ["[stage-probe] upserted ", toText (List.size probed), " row(s)"])
+  else printLine ("staging not found: " ++ Tmdb.stagingDir)
+
+Stage.probeJobs : Nat
+Stage.probeJobs = 4
+
+Stage.forkProbe item =
+  (folderOpt, videoPath) = item
+  p = Promise.new()
+  _ = concurrent.fork do
+    outcome = match catch do Stage.probeWithCrc videoPath with
+      Left f           -> Left (Failure.message f)
+      Right (Left e)   -> Left e
+      Right (Right pr) -> Right pr
+    Promise.write_ p (folderOpt, videoPath, outcome)
+  p
+
+Stage.forkChunk chunk =
+  use Text ++
+  forkStep acc item =
+    use List +:
+    (_, videoPath) = item
+    _ = printLine ("  start: " ++ filePathBasename (FilePath videoPath))
+    Stage.forkProbe item +: acc
+  readStep acc pr =
+    use List +:
+    r = Promise.read pr
+    (_, videoPath, outcome) = r
+    base = filePathBasename (FilePath videoPath)
+    _ = match outcome with
+      Left err -> printLine ("   FAIL: " ++ base ++ "  " ++ err)
+      Right _  -> printLine ("   done: " ++ base)
+    r +: acc
+  promises = List.reverse (List.foldLeft forkStep [] chunk)
+  List.reverse (List.foldLeft readStep [] promises)
+
+Stage.collectResult acc r =
+  use List +:
+  (folderOpt, videoPath, outcome) = r
+  match outcome with
+    Left _   -> acc
+    Right pr -> (folderOpt, videoPath, pr) +: acc
+
+Stage.probeBatch toProbe =
+  use List ++
+  chunkStep acc chunk =
+    results = Stage.forkChunk chunk
+    kept = List.reverse (List.foldLeft Stage.collectResult [] results)
+    acc ++ kept
+  List.foldLeft chunkStep [] (List.chunk Stage.probeJobs toProbe)
+
+Stage.sortBySize : [(Nat, a)] -> [(Nat, a)]
+Stage.sortBySize xs =
+  step acc x = Stage.insertBySize x acc
+  List.foldLeft step [] xs
+
+Stage.insertBySize : (Nat, a) -> [(Nat, a)] -> [(Nat, a)]
+Stage.insertBySize x sorted =
+  use Nat <=
+  use List +:
+  (xk, _) = x
+  match sorted with
+    []        -> [x]
+    y +: rest ->
+      (yk, _) = y
+      if xk <= yk then x +: sorted
+      else y +: Stage.insertBySize x rest
+
+Stage.statField fmt path =
+  match
+    catch do
+      (stdin, stdout, _stderr, p) = start "stat" ["-c", fmt, path]
+      _ = Handle.close stdin
+      out = Stage.drainHandle stdout
+      code = Process.wait p
+      (code, out)
+  with
+    Left _ -> None
+    Right (code, out) ->
+      use Nat ==
+      if code == 0 then Some (trim out) else None
+
+Stage.fileStat path =
+  match (Stage.statField "%Y" path, Stage.statField "%s" path) with
+    (Some mtT, Some szT) ->
+      match (Nat.fromText mtT, Nat.fromText szT) with
+        (Some m, Some s) -> Some (Nat.toInt m, s)
+        _                -> None
+    _ -> None
+
+Stage.partitionWork pqCached work =
+  use List +:
+  step acc item =
+    (_, videoPath) = item
+    match Stage.fileStat videoPath with
+      None          -> (0, item) +: acc
+      Some (mt, sz) ->
+        if Stage.isCachedWith pqCached videoPath mt then acc
+        else (sz, item) +: acc
+  withSizes = List.foldLeft step [] work
+  sorted = Stage.sortBySize withSizes
+  List.map (cases (_, item) -> item) sorted
+
 Relang.currentDefault : [Probe.AudioTrack] -> Optional Nat
 Relang.currentDefault tracks =
   match List.find Probe.AudioTrack.isDefault tracks with
@@ -5112,3 +5663,97 @@ test> Tmdb.tokenOverlapPercent.test =
     , eq (Tmdb.tokenOverlapPercent "" "anything") 0
     , eq (Tmdb.tokenOverlapPercent "single" "single word") 100
     ]
+
+test> Stage.fromRaw.test =
+  match
+    catch do Decoder.run Stage.RawProbe.fromJson Stage.exampleFfprobeJson
+  with
+    Left f   -> [Fail (Failure.message f)]
+    Right rp ->
+      pr = Stage.fromRaw "/movies/x.mkv" "ABCD1234" rp
+      v = Stage.ProbeResult.video pr
+      use Universal eq
+      List.flatMap
+        check
+        [ eq (Stage.ProbeResult.videoPath pr) "/movies/x.mkv"
+        , eq (Stage.ProbeResult.crc32 pr) "ABCD1234"
+        , eq (Stage.ProbeResult.sizeBytes pr) 2600000000
+        , eq (Rename.truncSec (Stage.ProbeResult.durationSec pr)) 5025
+        , eq (Stage.VideoInfo.codec v) "hevc"
+        , eq (Stage.VideoInfo.width v) 1920
+        , eq (Stage.VideoInfo.height v) 1080
+        , eq (Stage.VideoInfo.bitDepth v) 10
+        , eq (Stage.VideoInfo.bitRate v) (Some 5000000)
+        , eq (List.size (Stage.ProbeResult.audios pr)) 1
+        , eq (List.size (Stage.ProbeResult.subtitles pr)) 1
+        ]
+
+test> Stage.fromRawTracks.test =
+  match
+    catch do Decoder.run Stage.RawProbe.fromJson Stage.exampleFfprobeJson
+  with
+    Left f   -> [Fail (Failure.message f)]
+    Right rp ->
+      pr = Stage.fromRaw "/movies/x.mkv" "ABCD1234" rp
+      use Universal eq
+      audioOk = match List.head (Stage.ProbeResult.audios pr) with
+        None   -> false
+        Some a ->
+          eq (Stage.AudioInfo.codec a) "eac3"
+            && eq (Stage.AudioInfo.channels a) 6
+            && eq (Stage.AudioInfo.channelLayout a) "5.1"
+            && eq (Stage.AudioInfo.language a) "eng"
+      subOk = match List.head (Stage.ProbeResult.subtitles pr) with
+        None   -> false
+        Some s ->
+          eq (Stage.SubtitleInfo.codec s) "subrip"
+            && eq (Stage.SubtitleInfo.language s) "eng"
+      List.flatMap check [audioOk, subOk]
+
+test> Stage.bitDepthFrom.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Stage.bitDepthFrom (Some 10) "yuv420p") 10
+    , eq (Stage.bitDepthFrom (Some 8) "yuv420p10le") 8
+    , eq (Stage.bitDepthFrom None "yuv420p10le") 10
+    , eq (Stage.bitDepthFrom None "yuv420p12le") 12
+    , eq (Stage.bitDepthFrom None "yuv420p") 8
+    , eq (Stage.bitDepthFrom None "") 8
+    ]
+
+test> Stage.probeJsonRoundtrip.test =
+  match
+    catch do
+      rp = Decoder.run Stage.RawProbe.fromJson Stage.exampleFfprobeJson
+      Stage.fromRaw "/movies/x.mkv" "ABCD1234" rp
+  with
+    Left f  -> [Fail (Failure.message f)]
+    Right pr ->
+      encoded = Json.toText (Stage.ProbeResult.toJson pr)
+      match catch do Decoder.run Stage.ProbeResult.fromJson encoded with
+        Left f2   -> [Fail (Failure.message f2)]
+        Right pr2 ->
+          use Universal eq
+          v1 = Stage.ProbeResult.video pr
+          v2 = Stage.ProbeResult.video pr2
+          List.flatMap
+            check
+            [ eq
+                (Stage.ProbeResult.crc32 pr2) (Stage.ProbeResult.crc32 pr)
+            , eq
+                (Stage.ProbeResult.sizeBytes pr2)
+                (Stage.ProbeResult.sizeBytes pr)
+            , eq
+                (Rename.truncSec (Stage.ProbeResult.durationSec pr2))
+                (Rename.truncSec (Stage.ProbeResult.durationSec pr))
+            , eq (Stage.VideoInfo.bitDepth v2) (Stage.VideoInfo.bitDepth v1)
+            , eq (Stage.VideoInfo.codec v2) (Stage.VideoInfo.codec v1)
+            , eq (Stage.VideoInfo.bitRate v2) (Stage.VideoInfo.bitRate v1)
+            , eq
+                (List.size (Stage.ProbeResult.audios pr2))
+                (List.size (Stage.ProbeResult.audios pr))
+            , eq
+                (List.size (Stage.ProbeResult.subtitles pr2))
+                (List.size (Stage.ProbeResult.subtitles pr))
+            ]

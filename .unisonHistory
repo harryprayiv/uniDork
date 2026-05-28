@@ -1,3 +1,30 @@
+compile uniDork.cli bin/unidork-import
+run Stage.runProbeStage
+compile uniDork.cli bin/unidork-import
+update
+view Text.split
+update
+run Stage.runProbeStage
+compile uniDork.cli bin/unidork-import
+update
+compile uniDork.cli bin/unidork-import
+update
+compile uniDork.cli bin/unidork-import
+run Stage.runProbeStage
+compile uniDork.cli ./bin/unidork-import
+update
+debug.find.global Semaphore
+find Semaphore
+find MVar
+find Promise
+find fork
+compile uniDork.cli ./bin/unidork-import
+update
+quit
+find fork
+update
+compile uniDork.cli ./bin/unidork-import
+update
 compile uniDork.cli ./bin/unidork-import
 update
 compile uniDork.cli ./bin/unidork-import
