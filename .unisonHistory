@@ -2,6 +2,20 @@ compile uniDork.cli ./bin/unidork-import
 update
 compile uniDork.cli ./bin/unidork-import
 update
+compile uniDork.cli ./bin/unidork-import
+update
+compile uniDork.cli ./bin/unidork-import
+update
+run demo
+update
+compile uniDork.cli ./bin/unidork-import
+update
+compile uniDork.cli ./bin/unidork-import
+update
+compile uniDork.cli ./bin/unidork-import
+update
+compile uniDork.cli ./bin/unidork-import
+update
 pdate
 delete.term Rename.safeRmRf
 update

@@ -60,12 +60,29 @@ in
     '';
   };
 
+  # =========================================================================
+  # unidork-stage-probe
+  #
+  # Probes every top-level video file under the staging root into
+  # stage_probes (one row per source video). Pure read of disk, write of DB.
+  # No destructive operations against the staging tree. The previous
+  # cleanup_renamed_sources function has been removed because it caused
+  # data loss: it deleted any staging directory whose path matched a
+  # historical entry in rename_log, ignoring the actual current contents.
+  # Do not re-add such logic without a hard invariant that the target is
+  # verified present AND the source contents are verified to match what
+  # was renamed. Best is to keep this script strictly read-of-FS.
+  #
+  # delete_empty now defaults to OFF. Export UNIDORK_DELETE_EMPTY=1 to opt
+  # in to deleting source folders that contain no video files at all.
+  # =========================================================================
+
   unidork-stage-probe = pkgs.writeShellApplication {
     name = "unidork-stage-probe";
     runtimeInputs = with pkgs; [ ffmpeg rhash jq coreutils findutils postgresql ];
     text = ''
       stage_root="''${UNIDORK_STAGING:-${staging.movies}}"
-      delete_empty="''${UNIDORK_DELETE_EMPTY:-1}"
+      delete_empty="''${UNIDORK_DELETE_EMPTY:-0}"
 
       [ -d "$stage_root" ] || { echo "staging not found: $stage_root" >&2; exit 1; }
 
@@ -83,47 +100,6 @@ in
       fi
 
       echo "[stage-probe] staging=$stage_root delete_empty=$delete_empty"
-
-      cleanup_renamed_sources() {
-        local removed_folders=0
-        local removed_files=0
-        local source_path source_dir
-
-        while IFS= read -r source_path; do
-          [ -n "$source_path" ] || continue
-          source_dir="$(dirname "$source_path")"
-
-          if [ "$source_dir" = "$stage_root" ]; then
-            if [ -f "$source_path" ]; then
-              echo "stale loose:  $(basename "$source_path")"
-              rm -f "$source_path"
-              psql ${psqlArgs} -v src="$source_path" >/dev/null <<'SQL'
-DELETE FROM stage_probes WHERE source_path = :'src';
-SQL
-              removed_files=$((removed_files + 1))
-            fi
-            continue
-          fi
-
-          if [[ "$source_dir" == "$stage_root"/* ]] && [ -d "$source_dir" ]; then
-            echo "stale folder: $(basename "$source_dir")"
-            rm -rf "$source_dir"
-            psql ${psqlArgs} -v folder="$source_dir" >/dev/null <<'SQL'
-DELETE FROM stage_probes WHERE folder_path = :'folder';
-SQL
-            removed_folders=$((removed_folders + 1))
-          fi
-        done < <(psql ${psqlArgs} -At \
-          -c "SELECT DISTINCT source_path FROM rename_log WHERE outcome IN ('renamed', 'duplicate_removed')")
-
-        if [ "$removed_folders" -gt 0 ] || [ "$removed_files" -gt 0 ]; then
-          echo "[stage-probe] cleanup: folders=$removed_folders loose=$removed_files"
-        fi
-      }
-
-      if [ "$(psql ${psqlArgs} -At -c "SELECT to_regclass('public.rename_log')")" = "rename_log" ]; then
-        cleanup_renamed_sources
-      fi
 
       declare -A cache_map=()
       while IFS=$'\t' read -r cpath cprobed_at; do
@@ -179,13 +155,6 @@ ON CONFLICT (source_path) DO UPDATE SET
   crc32          = EXCLUDED.crc32,
   probe_json     = EXCLUDED.probe_json,
   probed_at      = NOW();
-SQL
-      }
-
-      delete_folder_rows() {
-        local folder_path="$1"
-        psql ${psqlArgs} -v folder="$folder_path" >/dev/null <<'SQL'
-DELETE FROM stage_probes WHERE folder_path = :'folder';
 SQL
       }
 
@@ -292,10 +261,9 @@ SQL
           if [ -z "$subdir_video" ]; then
             if [ "$delete_empty" = "1" ]; then
               echo "DELETING:  $name"; rm -rf "$folder"
-              delete_folder_rows "''${folder%/}"
               deleted=$((deleted + 1))
             else
-              echo "no video:  $name (would delete; DELETE_EMPTY=0)"
+              echo "no video:  $name (skip; export UNIDORK_DELETE_EMPTY=1 to delete)"
             fi
           else
             echo "subdir vid: $name (left alone)"

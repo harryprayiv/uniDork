@@ -1,7 +1,8 @@
 -- The definitions below depend on the deleted definitions.
 -- Please fix the errors and run `update`.
 
-Rename.executeMoveWith pqDup folderFmt fileFmt r d sourceVideo pr originalName =
+Rename.executeMoveWith
+  pqDup folderFmt fileFmt r d sourceVideo pr originalName subsToken =
   use Text ++
   sourceText = filePathText sourceVideo
   sourceCrc = Stage.ProbeResult.crc32 pr
@@ -25,7 +26,9 @@ Rename.executeMoveWith pqDup folderFmt fileFmt r d sourceVideo pr originalName =
             _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
             renameFile sourceVideo targetVideo
         with
-          Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
+          Right _ ->
+            _ = catch do Rename.maybeFetchSubs subsToken d targetFolder base
+            Rename.Outcome.Renamed sourceText targetFolderText
           Left f -> Rename.Outcome.RenameError sourceText (Failure.message f)
 
 Rename.processFolderWith
@@ -39,6 +42,7 @@ Rename.processFolderWith
   pqDet
   pcDet
   token
+  subsToken
   folder =
   folderName = filePathBasename folder
   folderText = filePathText folder
@@ -59,7 +63,7 @@ Rename.processFolderWith
               Right dd -> dd
               Left _   -> Tmdb.detailsFromResult r
           Rename.executeMoveWith
-            pqDup folderFmt fileFmt r details videoPath pr folderName
+            pqDup folderFmt fileFmt r details videoPath pr folderName subsToken
     None ->
       files = directoryContents.texts folder
       match findFirstVideo files with
@@ -68,7 +72,17 @@ Rename.processFolderWith
           Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
 
 Rename.processLooseVideoWith
-  pqDup folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet token videoFile =
+  pqDup
+  folderFmt
+  fileFmt
+  pqStage
+  pqSearch
+  pcSearch
+  pqDet
+  pcDet
+  token
+  subsToken
+  videoFile =
   filename = filePathBasename videoFile
   name = Rename.basenameNoExt filename
   sourceText = filePathText videoFile
@@ -85,21 +99,9 @@ Rename.processLooseVideoWith
               pqDet pcDet token (Tmdb.Result.tmdbId r) with
               Right dd -> dd
               Left _   -> Tmdb.detailsFromResult r
-          Rename.executeMoveWith pqDup folderFmt fileFmt r details videoFile pr name
+          Rename.executeMoveWith
+            pqDup folderFmt fileFmt r details videoFile pr name subsToken
 
-Rename.runOneLooseWith :
-  PreparedQuery r6 a6 Text
-  -> [FormatPart]
-  -> [FormatPart]
-  -> PreparedQuery r5 a5 Text
-  -> PreparedQuery r4 a4 Text
-  -> PreparedCommand r3 a3
-  -> PreparedQuery r2 a2 Text
-  -> PreparedCommand r1 a1
-  -> PreparedCommand r a
-  -> Text
-  -> FilePath
-  ->{IO, Exception, Postgres} ()
 Rename.runOneLooseWith
   pqDup
   folderFmt
@@ -111,6 +113,7 @@ Rename.runOneLooseWith
   pcDet
   pcLog
   token
+  subsToken
   videoFile =
   use Text ++
   filename = filePathBasename videoFile
@@ -126,6 +129,7 @@ Rename.runOneLooseWith
       pqDet
       pcDet
       token
+      subsToken
       videoFile
   _ =
     match outcome with
@@ -143,20 +147,6 @@ Rename.runOneLooseWith
       RenameError _ msg -> printLine ("  ERROR: " ++ msg)
   writeOutcomeWith pcLog outcome
 
-Rename.runOneWith :
-  PreparedQuery r6 a6 Text
-  -> [FormatPart]
-  -> [FormatPart]
-  -> pqStage
-  -> PreparedQuery r5 a5 Text
-  -> PreparedQuery r4 a4 Text
-  -> PreparedCommand r3 a3
-  -> PreparedQuery r2 a2 Text
-  -> PreparedCommand r1 a1
-  -> PreparedCommand r a
-  -> Text
-  -> FilePath
-  ->{IO, Exception, Postgres} ()
 Rename.runOneWith
   pqDup
   folderFmt
@@ -169,6 +159,7 @@ Rename.runOneWith
   pcDet
   pcLog
   token
+  subsToken
   folder =
   use Text ++
   folderName = filePathBasename folder
@@ -185,6 +176,7 @@ Rename.runOneWith
       pqDet
       pcDet
       token
+      subsToken
       folder
   _ =
     match outcome with
@@ -237,7 +229,18 @@ uniDork.renameWith folderFmtText fileFmtText =
         else
           _ = createDirectory (FilePath targetRoot)
           ()
-      token = readToken()
+      token = Tmdb.readToken()
+      subsToken = match catch do Subs.readToken() with
+        Right t -> Some t
+        Left _  -> None
+      _ = match subsToken with
+        Some _ ->
+          printLine
+            ("subs token loaded; will try "
+              ++ Text.join "," Rename.subLanguages
+              ++ " per movie")
+        None ->
+          printLine "subs token not found; skipping subtitle fetch"
       entries = directoryContents.texts staging
       folderNames =
         List.filter
@@ -281,7 +284,8 @@ uniDork.renameWith folderFmtText fileFmtText =
               pqDet
               pcDet
               pcLog
-              token)
+              token
+              subsToken)
             folders
         _ =
           foreach_
@@ -295,7 +299,8 @@ uniDork.renameWith folderFmtText fileFmtText =
               pqDet
               pcDet
               pcLog
-              token)
+              token
+              subsToken)
             loose
         _ = close pcSearch
         _ = close pcDet
@@ -742,11 +747,21 @@ Tmdb.normalize t =
   use Nat >
   use Text drop
   lower = Text.toLowercase t
-  dropChars = ["'", "\"", "`"]
+  dropChars =
+    [ "'"
+    , "\""
+    , "`"
+    , "‘"
+    , "’"
+    , "“"
+    , "”"
+    ]
   spaceChars =
     [ "."
     , ","
     , ":"
+    , "꞉"
+    , "ː"
     , ";"
     , "!"
     , "?"
@@ -757,6 +772,8 @@ Tmdb.normalize t =
     , "{"
     , "}"
     , "-"
+    , "–"
+    , "—"
     , "_"
     , "&"
     , "/"
@@ -1790,514 +1807,8 @@ Rename.findPriorTargetForCrcWith pq crc =
         []       -> None
         tgt +: _ -> Some tgt
 
--- ============================================================
--- executeMoveWith: duplicate check is a DB lookup, not name parsing.
---
--- Flow:
---   1. Ask the DB whether this crc has ever been renamed.
---      Yes -> rm source, return DuplicateRemoved with the prior target.
---      No  -> compute target, attempt rename, return Renamed / Conflict /
---             RenameError as before. Conflict now strictly means "target
---             name collides with something we did NOT rename here."
--- ============================================================
-
--- Rename.buildNfo : MovieDetails -> ProbeResult -> Text
--- Rename.buildNfo d pr =
---   use List flatMap map
---   use MovieDetails releaseDate
---   use Text ++ size
---   use Universal eq
---   esc = escapeXml
---   yearText = match releaseYear (releaseDate d) with
---     Some y -> Nat.toText y
---     None   -> ""
---   vid = ProbeResult.video pr
---   audio = Stage.ProbeResult.primaryAudio pr
---   optTagLine tag value =
---     if eq (size value) 0 then []
---     else ["  <" ++ tag ++ ">" ++ esc value ++ "</" ++ tag ++ ">"]
---   genreLines =
---     map
---       (g -> "  <genre>" ++ esc (Genre.name g) ++ "</genre>")
---       (MovieDetails.genres d)
---   countryLines =
---     map
---       (c -> "  <country>" ++ esc (Country.name c) ++ "</country>")
---       (MovieDetails.productionCountries d)
---   studioLines =
---     map
---       (s -> "  <studio>" ++ esc (Studio.name s) ++ "</studio>")
---       (productionCompanies d)
---   directorLines =
---     map
---       (m -> "  <director>" ++ esc (CrewMember.name m) ++ "</director>")
---       (MovieDetails.directors d)
---   writerLines =
---     map
---       (m -> "  <credits>" ++ esc (CrewMember.name m) ++ "</credits>")
---       (MovieDetails.writers d)
---   cast = List.take maxCast (castList d)
---   actorLines =
---     flatMap
---       (a ->
---         [ "  <actor>"
---         , "    <name>" ++ esc (CastMember.name a) ++ "</name>"
---         , "    <role>" ++ esc (character a) ++ "</role>"
---         , "    <order>" ++ Nat.toText (order a) ++ "</order>"
---         , "  </actor>"
---         ])
---       cast
---   setLines =
---     match MovieDetails.collection d with
---       None -> []
---       Some c ->
---         [ "  <set>"
---         , "    <name>" ++ esc (Collection.name c) ++ "</name>"
---         , "  </set>"
---         ]
---   posterLines = match posterPath d with
---     None   -> []
---     Some p -> ["  <thumb>" ++ imageBaseUrl ++ p ++ "</thumb>"]
---   fanartLines =
---     match backdropPath d with
---       None -> []
---       Some p ->
---         [ "  <fanart>"
---         , "    <thumb>" ++ imageBaseUrl ++ p ++ "</thumb>"
---         , "  </fanart>"
---         ]
---   audioLines =
---     match audio with
---       None -> []
---       Some a ->
---         [ "      <audio>"
---         , "        <codec>" ++ esc (AudioInfo.codec a) ++ "</codec>"
---         , "        <channels>"
---             ++ Nat.toText (AudioInfo.channels a)
---             ++ "</channels>"
---         , "      </audio>"
---         ]
---   mpaaLines = optTagLine "mpaa" (MovieDetails.mpaa d)
---   taglineLines = optTagLine "tagline" (MovieDetails.tagline d)
---   premieredLines = optTagLine "premiered" (releaseDate d)
---   yearLines =
---     if eq (size yearText) 0 then [] else ["  <year>" ++ yearText ++ "</year>"]
---   runtimeLines = match MovieDetails.runtime d with
---     None   -> []
---     Some r -> ["  <runtime>" ++ Nat.toText r ++ "</runtime>"]
---   imdbLines =
---     match MovieDetails.imdb d with
---       None -> []
---       Some i ->
---         [ "  <id>" ++ esc i ++ "</id>"
---         , "  <uniqueid type=\"imdb\">" ++ esc i ++ "</uniqueid>"
---         ]
---   uidTmdb =
---     [ "  <uniqueid type=\"tmdb\" default=\"true\">"
---         ++ Nat.toText (MovieDetails.id d)
---         ++ "</uniqueid>"
---     ]
---   rating = MovieDetails.voteAverage d
---   votes = MovieDetails.voteCount d
---   ratingLines =
---     [ "  <ratings>"
---     , "    <rating name=\"tmdb\" max=\"10\" default=\"true\">"
---     , "      <value>" ++ Float.toText rating ++ "</value>"
---     , "      <votes>" ++ Nat.toText votes ++ "</votes>"
---     , "    </rating>"
---     , "  </ratings>"
---     ]
---   crcLines = ["  <crc32>" ++ crc32 pr ++ "</crc32>"]
---   durSec = truncSec (durationSec pr)
---   fileInfoOpen =
---     [ "  <fileinfo>"
---     , "    <streamdetails>"
---     , "      <video>"
---     , "        <codec>" ++ esc (VideoInfo.codec vid) ++ "</codec>"
---     , "        <width>" ++ Nat.toText (VideoInfo.width vid) ++ "</width>"
---     , "        <height>" ++ Nat.toText (VideoInfo.height vid) ++ "</height>"
---     , "        <durationinseconds>"
---         ++ Nat.toText durSec
---         ++ "</durationinseconds>"
---     , "      </video>"
---     ]
---   fileInfoClose = ["    </streamdetails>", "  </fileinfo>"]
---   header =
---     [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
---     , "<movie>"
---     , "  <title>" ++ esc (MovieDetails.title d) ++ "</title>"
---     , "  <originaltitle>"
---         ++ esc (MovieDetails.originalTitle d)
---         ++ "</originaltitle>"
---     , "  <plot>" ++ esc (MovieDetails.overview d) ++ "</plot>"
---     ]
---   footer = ["</movie>", ""]
---   userRatingLines = ["  <userrating>0</userrating>", "  <top250>0</top250>"]
---   allLines =
---     flatMap
---       (x -> x)
---       [ header
---       , taglineLines
---       , ratingLines
---       , userRatingLines
---       , runtimeLines
---       , mpaaLines
---       , premieredLines
---       , yearLines
---       , setLines
---       , genreLines
---       , countryLines
---       , studioLines
---       , directorLines
---       , writerLines
---       , imdbLines
---       , uidTmdb
---       , posterLines
---       , fanartLines
---       , actorLines
---       , crcLines
---       , fileInfoOpen
---       , audioLines
---       , fileInfoClose
---       , footer
---       ]
---   Text.join "\n" allLines
-
--- Rename.renderFileBaseName : Tmdb.Result -> ProbeResult -> Text -> Text
--- Rename.renderFileBaseName r pr originalName =
---   ctx = buildContext r pr originalName
---   parsed = parseFormat fileFormat
---   tighten (applyFormat parsed ctx)
-
--- Rename.renderFolderName : Tmdb.Result -> ProbeResult -> Text -> Text
--- Rename.renderFolderName r pr originalName =
---   ctx = buildContext r pr originalName
---   parsed = parseFormat folderFormat
---   tighten (applyFormat parsed ctx)
-
 Stage.ProbeResult.primaryAudio : Stage.ProbeResult -> Optional Stage.AudioInfo
 Stage.ProbeResult.primaryAudio pr = List.head (Stage.ProbeResult.audios pr)
-
--- Tmdb.cachedDetails : Text -> Nat ->{IO} Either Text MovieDetails
--- Tmdb.cachedDetails token tmdbId = match cachedDetailsRaw token tmdbId with
---   Right raw ->
---     match catch do Decoder.run MovieDetails.fromJson raw with
---       Right v -> Right v
---       Left f  -> Left (Failure.message f)
---   Left e    -> Left e
-
--- Tmdb.cachedDetailsRaw : Text -> Nat ->{IO} Either Text Text
--- Tmdb.cachedDetailsRaw token tmdbId =
---   fromCache = catch do readFileUtf8 (detailsCachePath tmdbId)
---   match fromCache with
---     Right raw -> Right raw
---     Left _    ->
---       match detailsRaw token tmdbId with
---         Right raw ->
---           _ = catch do writeFileUtf8 (detailsCachePath tmdbId) raw
---           Right raw
---         Left e    -> Left e
-
--- Tmdb.detailsRaw : Text -> Nat ->{IO} Either Text Text
--- Tmdb.detailsRaw token tmdbId =
---   req = detailsRequest token tmdbId
---   match 
---     catch do
---       Threads.run do
---         Http.run do
---           resp = request req
---           ok = ensureSuccess resp
---           bodyText ok
---    with
---     Right v -> Right v
---     Left f  -> Left (Failure.message f)
-
--- Rename.executeMoveWith pqDup folderFmt fileFmt r d sourceVideo pr originalName =
---   use Text ++
---   sourceText = filePathText sourceVideo
---   sourceCrc = Stage.ProbeResult.crc32 pr
---   match Rename.findPriorTargetForCrcWith pqDup sourceCrc with
---     Some priorTarget ->
---       Rename.Outcome.DuplicateRemoved sourceText priorTarget
---     None ->
---       videoExt = Rename.fileExt (Stage.ProbeResult.videoPath pr)
---       base = Rename.renderWith fileFmt r pr originalName
---       targetFolderText =
---         Rename.targetRoot ++ "/" ++ Rename.renderWith folderFmt r pr originalName
---       targetFolder = FilePath targetFolderText
---       targetVideo = pathJoin targetFolder (base ++ videoExt)
---       targetNfo = pathJoin targetFolder (Rename.nfoBase base ++ ".nfo")
---       if isDirectory targetFolder then
---         Rename.Outcome.Conflict sourceText targetFolderText
---       else
---         match
---           catch do
---             _ = createDirectory targetFolder
---             _ = writeFileUtf8 targetNfo (Nfo.generate r d pr)
---             renameFile sourceVideo targetVideo
---         with
---           Right _ -> Rename.Outcome.Renamed sourceText targetFolderText
---           Left f -> Rename.Outcome.RenameError sourceText (Failure.message f)
-
--- ============================================================
--- processFolderWith / processLooseVideoWith: thread pqDup through
--- ============================================================
-
--- Rename.processFolderWith
---   pqDup
---   folderFmt
---   fileFmt
---   pqStage
---   pqLargest
---   pqSearch
---   pcSearch
---   pqDet
---   pcDet
---   token
---   folder =
---   folderName = filePathBasename folder
---   folderText = filePathText folder
---   match Stage.largestInFolderWith pqLargest folderText with
---     Some pr ->
---       videoPathText = Stage.ProbeResult.videoPath pr
---       videoPath = FilePath videoPathText
---       maybeNfo = Nfo.tryReadFolder folder
---       _ = Rename.checkAgreement maybeNfo folderName
---       probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
---       match Rename.matchTmdbWith
---         pqSearch pcSearch pqDet pcDet token folderName maybeNfo probeMin with
---         Left err -> Rename.Outcome.NoMatch folderText err
---         Right r  ->
---           details =
---             match Tmdb.cachedDetailsWith
---               pqDet pcDet token (Tmdb.Result.tmdbId r) with
---               Right dd -> dd
---               Left _   -> Tmdb.detailsFromResult r
---           Rename.executeMoveWith
---             pqDup folderFmt fileFmt r details videoPath pr folderName
---     None ->
---       files = directoryContents.texts folder
---       match findFirstVideo files with
---         None -> Rename.Outcome.NoVideo folderText
---         Some videoName ->
---           Rename.Outcome.NoProbe (filePathText (pathJoin folder videoName))
-
--- Rename.processLooseVideoWith
---   pqDup folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet token videoFile =
---   filename = filePathBasename videoFile
---   name = Rename.basenameNoExt filename
---   sourceText = filePathText videoFile
---   match Stage.readWith pqStage sourceText with
---     None    -> Rename.Outcome.NoProbe sourceText
---     Some pr ->
---       probeMin = Some (Rename.minutes (Stage.ProbeResult.durationSec pr))
---       match Rename.matchTmdbWith
---         pqSearch pcSearch pqDet pcDet token name None probeMin with
---         Left err -> Rename.Outcome.NoMatch sourceText err
---         Right r  ->
---           details =
---             match Tmdb.cachedDetailsWith
---               pqDet pcDet token (Tmdb.Result.tmdbId r) with
---               Right dd -> dd
---               Left _   -> Tmdb.detailsFromResult r
---           Rename.executeMoveWith pqDup folderFmt fileFmt r details videoFile pr name
-
--- -- ============================================================
--- -- runOneWith / runOneLooseWith: thread pqDup, print the new outcome
--- -- ============================================================
-
--- Rename.runOneWith
---   pqDup
---   folderFmt
---   fileFmt
---   pqStage
---   pqLargest
---   pqSearch
---   pcSearch
---   pqDet
---   pcDet
---   pcLog
---   token
---   folder =
---   use Text ++
---   folderName = filePathBasename folder
---   _ = printLine ("processing: " ++ folderName)
---   outcome =
---     Rename.processFolderWith
---       pqDup
---       folderFmt
---       fileFmt
---       pqStage
---       pqLargest
---       pqSearch
---       pcSearch
---       pqDet
---       pcDet
---       token
---       folder
---   _ =
---     match outcome with
---       Rename.Outcome.Renamed _ tgt ->
---         printLine ("  RENAMED -> " ++ tgt)
---       Rename.Outcome.DuplicateRemoved _ tgt ->
---         printLine ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
---       Rename.Outcome.NoVideo _ ->
---         printLine "  skip: no video"
---       Rename.Outcome.NoMatch _ reason ->
---         printLine ("  skip: " ++ reason)
---       Rename.Outcome.NoProbe src ->
---         printLine
---           ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
---       Rename.Outcome.Conflict _ t ->
---         printLine ("  skip: target exists; no prior rename for this crc " ++ t)
---       Rename.Outcome.RenameError _ msg ->
---         printLine ("  ERROR: " ++ msg)
---   Rename.writeOutcomeWith pcLog outcome
-
--- Rename.runOneLooseWith
---   pqDup
---   folderFmt
---   fileFmt
---   pqStage
---   pqSearch
---   pcSearch
---   pqDet
---   pcDet
---   pcLog
---   token
---   videoFile =
---   use Text ++
---   filename = filePathBasename videoFile
---   _ = printLine ("processing (loose): " ++ filename)
---   outcome =
---     Rename.processLooseVideoWith
---       pqDup
---       folderFmt
---       fileFmt
---       pqStage
---       pqSearch
---       pcSearch
---       pqDet
---       pcDet
---       token
---       videoFile
---   _ =
---     match outcome with
---       Rename.Outcome.Renamed _ tgt ->
---         printLine ("  RENAMED -> " ++ tgt)
---       Rename.Outcome.DuplicateRemoved _ tgt ->
---         printLine ("  DUPLICATE -> source removed (prior rename at " ++ tgt ++ ")")
---       Rename.Outcome.NoVideo _ ->
---         printLine "  skip: no video"
---       Rename.Outcome.NoMatch _ reason ->
---         printLine ("  skip: " ++ reason)
---       Rename.Outcome.NoProbe src ->
---         printLine
---           ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
---       Rename.Outcome.Conflict _ t ->
---         printLine ("  skip: target exists; no prior rename for this crc " ++ t)
---       Rename.Outcome.RenameError _ msg ->
---         printLine ("  ERROR: " ++ msg)
---   Rename.writeOutcomeWith pcLog outcome
-
--- -- ============================================================
--- -- renameWith: prepare and close pqDup alongside the other statements
--- -- ============================================================
-
--- uniDork.renameWith : Text -> Text -> '{IO, Exception} ()
--- uniDork.renameWith folderFmtText fileFmtText =
---   do
---     use List size
---     use Nat toText
---     use PreparedCommand close
---     use PreparedQuery closeQuery
---     use Text ++
---     use Universal eq
---     folderFmt = Rename.parseFormat folderFmtText
---     fileFmt = Rename.parseFormat fileFmtText
---     staging = FilePath Tmdb.stagingDir
---     if isDirectory staging then
---       _ = catch do
---         if isDirectory (FilePath Rename.targetRoot) then ()
---         else
---           _ = createDirectory (FilePath Rename.targetRoot)
---           ()
---       token = Tmdb.readToken()
---       entries = directoryContents.texts staging
---       folderNames =
---         List.filter
---           (n ->
---             (if eq n "." then false
---             else if eq n ".." then false
---             else isDirectory (pathJoin staging n)))
---           entries
---       folders = List.map (n -> pathJoin staging n) folderNames
---       loose = Rename.looseVideos staging
---       _ =
---         printLine
---           (Text.join
---             ""
---             [ "rename: "
---             , toText (size folders)
---             , " folder(s), "
---             , toText (size loose)
---             , " loose video(s) under "
---             , Tmdb.stagingDir
---             ])
---       _ = printLine ""
---       singleIO Db.config do
---         pqStage   = prepareQuery   Stage.selectProbeSql
---         pqLargest = prepareQuery   Stage.selectLargestInFolderSql
---         pqSearch  = prepareQuery   Tmdb.selectSearchSql
---         pcSearch  = prepareCommand Tmdb.upsertSearchSql
---         pqDet     = prepareQuery   Tmdb.selectDetailsSql
---         pcDet     = prepareCommand Tmdb.upsertDetailsSql
---         pcLog     = prepareCommand Rename.insertLogSql
---         pqDup     = prepareQuery   Rename.selectRenamedTargetByCrcSql
---         _ =
---           Db.foreach_
---             (Rename.runOneWith
---               pqDup
---               folderFmt
---               fileFmt
---               pqStage
---               pqLargest
---               pqSearch
---               pcSearch
---               pqDet
---               pcDet
---               pcLog
---               token)
---             folders
---         _ =
---           Db.foreach_
---             (Rename.runOneLooseWith
---               pqDup
---               folderFmt
---               fileFmt
---               pqStage
---               pqSearch
---               pcSearch
---               pqDet
---               pcDet
---               pcLog
---               token)
---             loose
---         _ = close pcSearch
---         _ = close pcDet
---         _ = close pcLog
---         ()
---     else printLine ("staging not found: " ++ Tmdb.stagingDir)
-
--- Rename.Outcome.parts :
---   Rename.Outcome -> (Text, Text, Optional Text, Optional Text)
--- Rename.Outcome.parts = cases
---   Rename.Outcome.Renamed s t     -> (s, "renamed", Some t, None)
---   Rename.Outcome.NoVideo s       -> (s, "no_video", None, None)
---   Rename.Outcome.NoMatch s r     -> (s, "no_match", None, Some r)
---   Rename.Outcome.NoProbe s       -> (s, "no_probe", None, None)
---   Rename.Outcome.Conflict s t    -> (s, "conflict", Some t, None)
---   Rename.Outcome.RenameError s m -> (s, "error", None, Some m)
 
 Rename.writeOutcome : Text -> Rename.Outcome ->{IO, Exception} ()
 Rename.writeOutcome _unused o =
@@ -2462,6 +1973,24 @@ Tmdb.pickBestWithRuntime pqDet pcDet token maybeProbeMin scored =
                     if popularityClearWinner rWinner second then Some winner
                     else None
                   None -> None
+
+Tmdb.tokenOverlapPercent : Text -> Text -> Nat
+Tmdb.tokenOverlapPercent a b =
+  use Nat * / < >
+  use Universal eq
+  toks t = List.filter (p -> Text.size p > 0) (Text.split ?\s t)
+  ta = toks a
+  tb = toks b
+  if eq (List.size ta) 0 then 0
+  else
+    if eq (List.size tb) 0 then 0
+    else
+      smaller = if List.size ta < List.size tb then ta else tb
+      larger = if List.size ta < List.size tb then tb else ta
+      matching =
+        List.filter
+          (tok -> List.any (s -> eq s tok) larger) smaller
+      List.size matching * 100 / List.size smaller
 
 Tmdb.pickBest : [(Tmdb.Result, Nat)] -> Optional (Tmdb.Result, Nat)
 Tmdb.pickBest scored =
@@ -2737,12 +2266,20 @@ Tmdb.releaseYear dateStr =
 
 Tmdb.scoreCandidate : Tmdb.ParsedRelease -> Tmdb.Result -> Nat
 Tmdb.scoreCandidate p r =
-  use Nat + - >
+  use Nat + - >= >
   use Universal eq
   q = Tmdb.normalize (Tmdb.ParsedRelease.title p)
   t = Tmdb.normalize (Tmdb.Result.title r)
   o = Tmdb.normalize (Tmdb.Result.originalTitle r)
-  titleOk = eq q t || eq q o
+  exactMatch = eq q t || eq q o
+  ovT = Tmdb.tokenOverlapPercent q t
+  ovO = Tmdb.tokenOverlapPercent q o
+  bestOv = if ovT > ovO then ovT else ovO
+  titleScore =
+    if exactMatch then 30
+    else
+      if bestOv >= 75 then 20
+      else if bestOv >= 50 then 10 else 0
   py = Tmdb.ParsedRelease.year p
   yearScore = match Tmdb.releaseYear (Tmdb.Result.releaseDate r) with
     None    -> 0
@@ -2755,7 +2292,6 @@ Tmdb.scoreCandidate p r =
     Some n -> eq n (Tmdb.Result.tmdbId r)
     None   -> false
   idScore = if idOk then 50 else 0
-  titleScore = if titleOk then 30 else 0
   idScore + titleScore + yearScore
 
 Tmdb.maxScore : [(Tmdb.Result, Nat)] -> Optional Nat
@@ -3198,6 +2734,520 @@ Tmdb.Details.fromJson =
       cast
       tags
 
+-- Subs.u
+-- subdl.com subtitle search + raw download client.
+--
+-- Scope: search by IMDb/TMDB id with unpack=1, parse JSON, pick raw
+-- unpack files per language, download them, write them to disk as
+-- "<base>.<lang>.<ext>".
+-- Out of scope: result caching, retries, integration with the rename
+-- pipeline. Those are layered above this module.
+
+Subs.tokenPath : Text
+Subs.tokenPath = "/home/bismuth/.config/uniDork/sub-token"
+
+Subs.readToken : '{IO, Exception} Text
+Subs.readToken = do trim (readFileUtf8 (FilePath Subs.tokenPath))
+
+Subs.apiAuthority : Authority
+Subs.apiAuthority = Authority None (HostName "api.subdl.com") None
+
+Subs.downloadAuthority : Authority
+Subs.downloadAuthority = Authority None (HostName "dl.subdl.com") None
+
+-- ============================================================
+-- Types
+-- ============================================================
+
+type Subs.MovieResult
+  = { imdbId : Optional Text,
+      tmdbId : Optional Nat,
+      sdId : Optional Nat,
+      kind : Text,
+      name : Text,
+      year : Optional Nat }
+
+type Subs.UnpackFile
+  = { fileNId : Text,
+      name : Text,
+      releaseName : Text,
+      language : Text,
+      format : Text,
+      hearingImpaired : Boolean,
+      size : Nat,
+      urlPath : Text }
+
+type Subs.SubtitleItem
+  = { releaseName : Text,
+      fileName : Text,
+      urlPath : Text,
+      language : Optional Text,
+      hearingImpaired : Optional Boolean,
+      fullSeason : Optional Boolean,
+      season : Optional Nat,
+      episode : Optional Nat,
+      unpackFiles : [Subs.UnpackFile] }
+
+type Subs.SearchResponse
+  = { ok : Boolean,
+      error : Optional Text,
+      results : [Subs.MovieResult],
+      subtitles : [Subs.SubtitleItem] }
+
+type Subs.SaveOutcome
+  = Saved Text Text
+  | NotFound Text
+  | Errored Text Text
+
+-- ============================================================
+-- Decoders
+-- ============================================================
+
+Subs.MovieResult.fromJson : '{unison_json_1_4_2.Decoder} Subs.MovieResult
+Subs.MovieResult.fromJson = do
+  use Decoder nat optional! text
+  use object at at!
+  imdbId = optional! (at "imdb_id" text)
+  tmdbId = optional! (at "tmdb_id" nat)
+  sdId = optional! (at "sd_id" nat)
+  kind = at! "type" text
+  name = at! "name" text
+  year = optional! (at "year" nat)
+  Subs.MovieResult.MovieResult imdbId tmdbId sdId kind name year
+
+Subs.UnpackFile.fromJson : '{unison_json_1_4_2.Decoder} Subs.UnpackFile
+Subs.UnpackFile.fromJson =
+  do
+    use Decoder boolean nat optional! text
+    use Optional getOrElse
+    use object at at!
+    fileNId = at! "file_n_id" text
+    name = at! "name" text
+    releaseName = getOrElse "" (optional! (at "release_name" text))
+    language = at! "language" text
+    format = at! "format" text
+    hi = getOrElse false (optional! (at "hi" boolean))
+    size = getOrElse 0 (optional! (at "size" nat))
+    urlPath = at! "url" text
+    Subs.UnpackFile.UnpackFile
+      fileNId name releaseName language format hi size urlPath
+
+Subs.SubtitleItem.fromJson : '{unison_json_1_4_2.Decoder} Subs.SubtitleItem
+Subs.SubtitleItem.fromJson =
+  do
+    use Decoder array boolean nat optional! text
+    use Optional getOrElse
+    use object at at!
+    releaseName = getOrElse "" (optional! (at "release_name" text))
+    fileName = getOrElse "" (optional! (at "name" text))
+    urlPath = at! "url" text
+    language = optional! (at "language" text)
+    hi = optional! (at "hi" boolean)
+    fullSeason = optional! (at "full_season" boolean)
+    season = optional! (at "season" nat)
+    episode = optional! (at "episode" nat)
+    unpackFiles =
+      getOrElse
+        []
+        (optional! (at "unpack_files" (array Subs.UnpackFile.fromJson)))
+    Subs.SubtitleItem.SubtitleItem
+      releaseName
+      fileName
+      urlPath
+      language
+      hi
+      fullSeason
+      season
+      episode
+      unpackFiles
+
+Subs.SearchResponse.fromJson :
+  '{unison_json_1_4_2.Decoder} Subs.SearchResponse
+Subs.SearchResponse.fromJson =
+  do
+    use Decoder array boolean optional! text
+    use Optional getOrElse
+    use object at at!
+    ok = at! "status" boolean
+    error = optional! (at "error" text)
+    results =
+      getOrElse
+        [] (optional! (at "results" (array Subs.MovieResult.fromJson)))
+    subtitles =
+      getOrElse
+        [] (optional! (at "subtitles" (array Subs.SubtitleItem.fromJson)))
+    Subs.SearchResponse.SearchResponse ok error results subtitles
+
+-- ============================================================
+-- URI building
+-- ============================================================
+
+Subs.imdbSearchURI : Text -> Text -> Text -> URI
+Subs.imdbSearchURI apiKey imdbId languages =
+  use Path /
+  path = Path.root / "api" / "v1" / "subtitles"
+  q =
+    Query.empty
+      & ("api_key", apiKey)
+      & ("type", "movie")
+      & ("subs_per_page", "30")
+      & ("unpack", "1")
+      & ("imdb_id", imdbId)
+      & ("languages", languages)
+  URI Scheme.https (Some Subs.apiAuthority) path (fromQuery q) Fragment.empty
+
+Subs.tmdbSearchURI : Text -> Nat -> Text -> URI
+Subs.tmdbSearchURI apiKey tmdbId languages =
+  use Path /
+  path = Path.root / "api" / "v1" / "subtitles"
+  q =
+    Query.empty
+      & ("api_key", apiKey)
+      & ("type", "movie")
+      & ("subs_per_page", "30")
+      & ("unpack", "1")
+      & ("tmdb_id", Nat.toText tmdbId)
+      & ("languages", languages)
+  URI Scheme.https (Some Subs.apiAuthority) path (fromQuery q) Fragment.empty
+
+Subs.downloadURI : Text -> URI
+Subs.downloadURI urlPath =
+  use Nat >
+  use Path /
+  parts = List.filter (p -> Text.size p > 0) (Text.split ?/ urlPath)
+  path = List.foldLeft (acc p -> acc / p) Path.root parts
+  URI
+    Scheme.https
+    (Some Subs.downloadAuthority)
+    path
+    (fromQuery Query.empty)
+    Fragment.empty
+
+Subs.SubtitleItem.downloadURI : Subs.SubtitleItem -> URI
+Subs.SubtitleItem.downloadURI s =
+  Subs.downloadURI (Subs.SubtitleItem.urlPath s)
+
+Subs.UnpackFile.downloadURI : Subs.UnpackFile -> URI
+Subs.UnpackFile.downloadURI uf =
+  Subs.downloadURI (Subs.UnpackFile.urlPath uf)
+
+-- ============================================================
+-- Language helpers
+-- ============================================================
+
+Subs.languagesParam : [Text] -> Text
+Subs.languagesParam langs =
+  Text.join "," (List.map Text.toUppercase langs)
+
+Subs.normLang : Text -> Text
+Subs.normLang t = Text.toLowercase (trim t)
+
+-- ============================================================
+-- HTTP
+-- ============================================================
+
+Subs.searchRequestImdb : Text -> Text -> Text -> HttpRequest
+Subs.searchRequestImdb apiKey imdbId languages =
+  use HttpRequest addHeader
+  HttpRequest.get (Subs.imdbSearchURI apiKey imdbId languages)
+    |> addHeader "Accept" "application/json"
+
+Subs.searchRequestTmdb : Text -> Nat -> Text -> HttpRequest
+Subs.searchRequestTmdb apiKey tmdbId languages =
+  use HttpRequest addHeader
+  HttpRequest.get (Subs.tmdbSearchURI apiKey tmdbId languages)
+    |> addHeader "Accept" "application/json"
+
+Subs.searchByImdb :
+  Text -> Text -> Text ->{IO} Either Text Subs.SearchResponse
+Subs.searchByImdb apiKey imdbId languages =
+  req = Subs.searchRequestImdb apiKey imdbId languages
+  match 
+    catch do
+      Threads.run do
+        Http.run do
+          resp = request req
+          ok = ensureSuccess resp
+          body = bodyText ok
+          Decoder.run Subs.SearchResponse.fromJson body
+   with
+    Right v -> Right v
+    Left f  -> Left (Failure.message f)
+
+Subs.searchByTmdb :
+  Text -> Nat -> Text ->{IO} Either Text Subs.SearchResponse
+Subs.searchByTmdb apiKey tmdbId languages =
+  req = Subs.searchRequestTmdb apiKey tmdbId languages
+  match 
+    catch do
+      Threads.run do
+        Http.run do
+          resp = request req
+          ok = ensureSuccess resp
+          body = bodyText ok
+          Decoder.run Subs.SearchResponse.fromJson body
+   with
+    Right v -> Right v
+    Left f  -> Left (Failure.message f)
+
+Subs.downloadUnpackRaw : Subs.UnpackFile ->{IO} Either Text Text
+Subs.downloadUnpackRaw uf =
+  use HttpRequest addHeader
+  uri = Subs.UnpackFile.downloadURI uf
+  req = HttpRequest.get uri |> addHeader "Accept" "*/*"
+  match 
+    catch do
+      Threads.run do
+        Http.run do
+          resp = request req
+          ok = ensureSuccess resp
+          bodyText ok
+   with
+    Right v -> Right v
+    Left f  -> Left (Failure.message f)
+
+-- ============================================================
+-- Picking candidates
+-- ============================================================
+
+Subs.languageMatches : Text -> Subs.SubtitleItem -> Boolean
+Subs.languageMatches target item =
+  match Subs.SubtitleItem.language item with
+    None    -> false
+    Some la -> Universal.eq (Subs.normLang la) (Subs.normLang target)
+
+Subs.isFullSeason : Subs.SubtitleItem -> Boolean
+Subs.isFullSeason item =
+  match Subs.SubtitleItem.fullSeason item with
+    Some true -> true
+    _         -> false
+
+Subs.isHi : Subs.SubtitleItem -> Boolean
+Subs.isHi item =
+  match Subs.SubtitleItem.hearingImpaired item with
+    Some true -> true
+    _         -> false
+
+Subs.pickBestForMovie :
+  Text -> [Subs.SubtitleItem] -> Optional Subs.SubtitleItem
+Subs.pickBestForMovie lang items =
+  notSeason =
+    List.filter
+      (i -> (if Subs.isFullSeason i then false else true)) items
+  withLang = List.filter (Subs.languageMatches lang) notSeason
+  pool =
+    if Universal.eq (List.size withLang) 0 then notSeason else withLang
+  nonHi = List.filter (i -> (if Subs.isHi i then false else true)) pool
+  match List.head nonHi with
+    Some s -> Some s
+    None   -> List.head pool
+
+Subs.unpackLanguageMatches : Text -> Subs.UnpackFile -> Boolean
+Subs.unpackLanguageMatches target uf =
+  Universal.eq
+    (Subs.normLang (Subs.UnpackFile.language uf)) (Subs.normLang target)
+
+Subs.unpackIsSrt : Subs.UnpackFile -> Boolean
+Subs.unpackIsSrt uf =
+  Universal.eq (Subs.normLang (Subs.UnpackFile.format uf)) "srt"
+
+Subs.unpackIsHi : Subs.UnpackFile -> Boolean
+Subs.unpackIsHi uf = Subs.UnpackFile.hearingImpaired uf
+
+Subs.allUnpackFiles : Subs.SearchResponse -> [Subs.UnpackFile]
+Subs.allUnpackFiles r =
+  List.flatMap
+    Subs.SubtitleItem.unpackFiles (Subs.SearchResponse.subtitles r)
+
+Subs.pickUnpackForLanguage :
+  Text -> [Subs.UnpackFile] -> Optional Subs.UnpackFile
+Subs.pickUnpackForLanguage lang files =
+  langMatches = List.filter (Subs.unpackLanguageMatches lang) files
+  srtMatches = List.filter Subs.unpackIsSrt langMatches
+  pool =
+    if Universal.eq (List.size srtMatches) 0 then langMatches else srtMatches
+  nonHi =
+    List.filter
+      (uf -> (if Subs.unpackIsHi uf then false else true)) pool
+  match List.head nonHi with
+    Some s -> Some s
+    None   -> List.head pool
+
+-- ============================================================
+-- Save: one search call, then one download per requested language.
+-- File naming: "<baseName>.<lower-lang>.<format>"  (e.g. movie.en.srt)
+-- ============================================================
+
+Subs.saveOneLanguage :
+  FilePath
+  -> Text
+  -> [Subs.UnpackFile]
+  -> Text
+  ->{IO} Subs.SaveOutcome
+Subs.saveOneLanguage targetDir baseName allFiles lang =
+  use Text ++
+  langCode = Subs.normLang lang
+  match Subs.pickUnpackForLanguage lang allFiles with
+    None -> Subs.SaveOutcome.NotFound langCode
+    Some uf ->
+      match Subs.downloadUnpackRaw uf with
+        Left err   -> Subs.SaveOutcome.Errored langCode err
+        Right body ->
+          ext = Subs.normLang (Subs.UnpackFile.format uf)
+          filename = baseName ++ "." ++ langCode ++ "." ++ ext
+          path = pathJoin targetDir filename
+          match catch do writeFileUtf8 path body with
+            Left f  -> Subs.SaveOutcome.Errored langCode (Failure.message f)
+            Right _ -> Subs.SaveOutcome.Saved langCode (filePathText path)
+
+Subs.fetchAndSaveByImdb :
+  Text
+  -> Text
+  -> FilePath
+  -> Text
+  -> [Text]
+  ->{IO} [Subs.SaveOutcome]
+Subs.fetchAndSaveByImdb apiKey imdbId targetDir baseName langs =
+  langsParam = Subs.languagesParam langs
+  match Subs.searchByImdb apiKey imdbId langsParam with
+    Left err  ->
+      List.map (l -> Subs.SaveOutcome.Errored (Subs.normLang l) err) langs
+    Right resp ->
+      allFiles = Subs.allUnpackFiles resp
+      List.map (Subs.saveOneLanguage targetDir baseName allFiles) langs
+
+Subs.fetchAndSaveByTmdb :
+  Text
+  -> Nat
+  -> FilePath
+  -> Text
+  -> [Text]
+  ->{IO} [Subs.SaveOutcome]
+Subs.fetchAndSaveByTmdb apiKey tmdbId targetDir baseName langs =
+  langsParam = Subs.languagesParam langs
+  match Subs.searchByTmdb apiKey tmdbId langsParam with
+    Left err  ->
+      List.map (l -> Subs.SaveOutcome.Errored (Subs.normLang l) err) langs
+    Right resp ->
+      allFiles = Subs.allUnpackFiles resp
+      List.map (Subs.saveOneLanguage targetDir baseName allFiles) langs
+
+-- ============================================================
+-- Tests (pure, no network)
+-- ============================================================
+
+Subs.exampleSearchJson : Text
+Subs.exampleSearchJson =
+  Text.join
+    "\n"
+    [ "{"
+    , "  \"status\": true,"
+    , "  \"results\": ["
+    , "    {"
+    , "      \"imdb_id\": \"tt1375666\","
+    , "      \"tmdb_id\": 27205,"
+    , "      \"type\": \"movie\","
+    , "      \"name\": \"Inception\","
+    , "      \"sd_id\": 123456,"
+    , "      \"year\": 2010"
+    , "    }"
+    , "  ],"
+    , "  \"subtitles\": ["
+    , "    {"
+    , "      \"release_name\": \"Inception.2010.1080p.BluRay.x264-RG\","
+    , "      \"name\": \"Inception.2010.1080p.srt\","
+    , "      \"url\": \"/subtitle/1111-2222.zip\","
+    , "      \"language\": \"EN\","
+    , "      \"hi\": false,"
+    , "      \"full_season\": false"
+    , "    },"
+    , "    {"
+    , "      \"release_name\": \"Inception.2010.HI\","
+    , "      \"name\": \"Inception.HI.srt\","
+    , "      \"url\": \"/subtitle/3333-4444.zip\","
+    , "      \"language\": \"EN\","
+    , "      \"hi\": true,"
+    , "      \"full_season\": false"
+    , "    },"
+    , "    {"
+    , "      \"release_name\": \"Inception.FR\","
+    , "      \"name\": \"Inception.FR.srt\","
+    , "      \"url\": \"/subtitle/5555-6666.zip\","
+    , "      \"language\": \"FR\","
+    , "      \"hi\": false,"
+    , "      \"full_season\": false"
+    , "    }"
+    , "  ]"
+    , "}"
+    ]
+
+Subs.exampleUnpackedJson : Text
+Subs.exampleUnpackedJson =
+  Text.join
+    "\n"
+    [ "{"
+    , "  \"status\": true,"
+    , "  \"results\": ["
+    , "    {"
+    , "      \"imdb_id\": \"tt1375666\","
+    , "      \"tmdb_id\": 27205,"
+    , "      \"type\": \"movie\","
+    , "      \"name\": \"Inception\","
+    , "      \"sd_id\": 123456,"
+    , "      \"year\": 2010"
+    , "    }"
+    , "  ],"
+    , "  \"subtitles\": ["
+    , "    {"
+    , "      \"release_name\": \"Inception.2010.1080p.EN\","
+    , "      \"name\": \"Inception.EN.srt\","
+    , "      \"url\": \"/subtitle/1111-2222.zip\","
+    , "      \"language\": \"EN\","
+    , "      \"unpack_files\": ["
+    , "        {"
+    , "          \"file_n_id\": \"fileEN1\","
+    , "          \"name\": \"Inception.EN.srt\","
+    , "          \"release_name\": \"Inception EN\","
+    , "          \"language\": \"EN\","
+    , "          \"hi\": false,"
+    , "          \"format\": \"srt\","
+    , "          \"size\": 12345,"
+    , "          \"url\": \"/subtitle/1111-2222/fileEN1\""
+    , "        },"
+    , "        {"
+    , "          \"file_n_id\": \"fileEN2HI\","
+    , "          \"name\": \"Inception.EN.HI.srt\","
+    , "          \"release_name\": \"Inception EN HI\","
+    , "          \"language\": \"EN\","
+    , "          \"hi\": true,"
+    , "          \"format\": \"srt\","
+    , "          \"size\": 23456,"
+    , "          \"url\": \"/subtitle/1111-2222/fileEN2HI\""
+    , "        }"
+    , "      ]"
+    , "    },"
+    , "    {"
+    , "      \"release_name\": \"Inception.2010.ES\","
+    , "      \"name\": \"Inception.ES.srt\","
+    , "      \"url\": \"/subtitle/3333-4444.zip\","
+    , "      \"language\": \"ES\","
+    , "      \"unpack_files\": ["
+    , "        {"
+    , "          \"file_n_id\": \"fileES1\","
+    , "          \"name\": \"Inception.ES.srt\","
+    , "          \"release_name\": \"Inception ES\","
+    , "          \"language\": \"ES\","
+    , "          \"hi\": false,"
+    , "          \"format\": \"srt\","
+    , "          \"size\": 34567,"
+    , "          \"url\": \"/subtitle/3333-4444/fileES1\""
+    , "        }"
+    , "      ]"
+    , "    }"
+    , "  ]"
+    , "}"
+    ]
+
 type Stage.VideoInfo
   = { codec : Text,
       width : Nat,
@@ -3495,65 +3545,6 @@ Rename.effectiveBitRate br sizeBytes durationSec = match br with
     secs = Rename.truncSec durationSec
     if Universal.eq secs 0 then 0 else sizeBytes * 8 / secs
 
--- Rename.runOneWith
---   folderFmt
---   fileFmt
---   pqStage
---   pqLargest
---   pqSearch
---   pcSearch
---   pqDet
---   pcDet
---   pcLog
---   token
---   folder =
---   use Text ++
---   folderName = filePathBasename folder
---   _ = printLine ("processing: " ++ folderName)
---   outcome =
---     Rename.processFolderWith
---       folderFmt
---       fileFmt
---       pqStage
---       pqLargest
---       pqSearch
---       pcSearch
---       pqDet
---       pcDet
---       token
---       folder
---   _ =
---     match outcome with
---       Rename.Outcome.Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
---       Rename.Outcome.NoVideo _ -> printLine "  skip: no video"
---       Rename.Outcome.NoMatch _ reason -> printLine ("  skip: " ++ reason)
---       Rename.Outcome.NoProbe src ->
---         printLine
---           ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
---       Rename.Outcome.Conflict _ t -> printLine ("  skip: target exists " ++ t)
---       Rename.Outcome.RenameError _ msg -> printLine ("  ERROR: " ++ msg)
---   Rename.writeOutcomeWith pcLog outcome
-
--- Rename.runOneLooseWith
---   folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet pcLog token videoFile =
---   use Text ++
---   filename = filePathBasename videoFile
---   _ = printLine ("processing (loose): " ++ filename)
---   outcome =
---     Rename.processLooseVideoWith
---       folderFmt fileFmt pqStage pqSearch pcSearch pqDet pcDet token videoFile
---   _ =
---     match outcome with
---       Rename.Outcome.Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
---       Rename.Outcome.NoVideo _ -> printLine "  skip: no video"
---       Rename.Outcome.NoMatch _ reason -> printLine ("  skip: " ++ reason)
---       Rename.Outcome.NoProbe src ->
---         printLine
---           ("  skip: no probe row for " ++ src ++ " (run unidork probe-stage)")
---       Rename.Outcome.Conflict _ t -> printLine ("  skip: target exists " ++ t)
---       Rename.Outcome.RenameError _ msg -> printLine ("  ERROR: " ++ msg)
---   Rename.writeOutcomeWith pcLog outcome
-
 Rename.mbps : Nat -> Text
 Rename.mbps bps =
   use Nat % * + / >= toText
@@ -3778,37 +3769,6 @@ Rename.matchTmdbWith
           match Tmdb.pickBestWithRuntime pqDet pcDet token maybeProbeMin scored with
             Some (r, _) -> Right r
             None        -> Left "no single high-scoring match"
-
--- Rename.Outcome.toJson : Rename.Outcome -> Json
--- Rename.Outcome.toJson = cases
---   Rename.Outcome.Renamed src tgt ->
---     Json.object
---       [ ("outcome", Json.text "renamed")
---       , ("source", Json.text src)
---       , ("target", Json.text tgt)
---       ]
---   Rename.Outcome.NoVideo src ->
---     Json.object [("outcome", Json.text "no_video"), ("source", Json.text src)]
---   Rename.Outcome.NoMatch src reason ->
---     Json.object
---       [ ("outcome", Json.text "no_match")
---       , ("source", Json.text src)
---       , ("reason", Json.text reason)
---       ]
---   Rename.Outcome.NoProbe src ->
---     Json.object [("outcome", Json.text "no_probe"), ("source", Json.text src)]
---   Rename.Outcome.Conflict src existing ->
---     Json.object
---       [ ("outcome", Json.text "conflict")
---       , ("source", Json.text src)
---       , ("existing", Json.text existing)
---       ]
---   Rename.Outcome.RenameError src msg ->
---     Json.object
---       [ ("outcome", Json.text "error")
---       , ("source", Json.text src)
---       , ("message", Json.text msg)
---       ]
 
 type Rename.FormatPart
   = Literal Text
@@ -4759,6 +4719,60 @@ Nfo.generate _r d pr =
 Rename.nfoBase : Text -> Text
 Rename.nfoBase _videoBase = "movie"
 
+Rename.subLanguages : [Text]
+Rename.subLanguages = ["en", "es", "th"]
+
+Rename.logSubOutcomes : [Subs.SaveOutcome] ->{IO, Exception} ()
+Rename.logSubOutcomes outcomes =
+  use Text ++
+  Db.foreach_
+    (cases
+      Subs.SaveOutcome.Saved lang p ->
+        printLine ("    SUB " ++ lang ++ " -> " ++ p)
+      Subs.SaveOutcome.NotFound lang ->
+        printLine ("    SUB " ++ lang ++ " not found")
+      Subs.SaveOutcome.Errored lang e ->
+        printLine ("    SUB " ++ lang ++ " error: " ++ e))
+    outcomes
+
+Rename.maybeFetchSubs :
+  Optional Text -> Tmdb.Details -> FilePath -> Text ->{IO, Exception} ()
+Rename.maybeFetchSubs maybeToken d targetFolder base =
+  match maybeToken with
+    None -> ()
+    Some token ->
+      if Universal.eq (List.size Rename.subLanguages) 0 then ()
+      else
+        outcomes = match Tmdb.Details.imdbId d with
+          Some imdb ->
+            Subs.fetchAndSaveByImdb
+              token imdb targetFolder base Rename.subLanguages
+          None ->
+            Subs.fetchAndSaveByTmdb
+              token
+              (Tmdb.Details.tmdbId d)
+              targetFolder
+              base
+              Rename.subLanguages
+        Rename.logSubOutcomes outcomes
+
+subDemo : '{IO, Exception} ()
+subDemo = do
+  token = Subs.readToken()
+  outcomes =
+    Subs.fetchAndSaveByImdb
+      token
+      "tt1375666"
+      (FilePath "/tmp/subs-test")
+      "inception"
+      ["en", "es", "th"]
+  Db.foreach_
+    (cases
+      Subs.SaveOutcome.Saved lang p   -> printLine ("saved " ++ lang ++ " -> " ++ p)
+      Subs.SaveOutcome.NotFound lang  -> printLine ("none for " ++ lang)
+      Subs.SaveOutcome.Errored lang e -> printLine ("error " ++ lang ++ ": " ++ e))
+    outcomes
+
 test> Rename.gigabytes.test =
   use Universal eq
   List.flatMap
@@ -4878,4 +4892,224 @@ test> Nfo.sortTitle.test =
         "American Tail :: 1986-11-21"
     , eq (Nfo.sortTitle "Inception" "2010-07-15") "Inception :: 2010-07-15"
     , eq (Nfo.sortTitle "Inception" "") "Inception"
+    ]
+
+test> Subs.parseShape.test =
+  match
+    catch do
+      Decoder.run Subs.SearchResponse.fromJson Subs.exampleSearchJson
+  with
+    Left f  -> [Fail (Failure.message f)]
+    Right r ->
+      use Subs.SearchResponse ok results subtitles
+      use Universal eq
+      List.flatMap
+        check
+        [ ok r
+        , eq (List.size (results r)) 1
+        , eq (List.size (subtitles r)) 3
+        ]
+
+test> Subs.parseMovieFields.test =
+  match
+    catch do
+      Decoder.run Subs.SearchResponse.fromJson Subs.exampleSearchJson
+  with
+    Left f  -> [Fail (Failure.message f)]
+    Right r ->
+      use Universal eq
+      match List.head (Subs.SearchResponse.results r) with
+        None   -> [Fail "no movie result"]
+        Some m ->
+          List.flatMap
+            check
+            [ eq (Subs.MovieResult.imdbId m) (Some "tt1375666")
+            , eq (Subs.MovieResult.tmdbId m) (Some 27205)
+            , eq (Subs.MovieResult.sdId m) (Some 123456)
+            , eq (Subs.MovieResult.name m) "Inception"
+            , eq (Subs.MovieResult.kind m) "movie"
+            , eq (Subs.MovieResult.year m) (Some 2010)
+            ]
+
+test> Subs.pickBestPrefersNonHi.test =
+  match
+    catch do
+      Decoder.run Subs.SearchResponse.fromJson Subs.exampleSearchJson
+  with
+    Left f  -> [Fail (Failure.message f)]
+    Right r ->
+      subs = Subs.SearchResponse.subtitles r
+      match Subs.pickBestForMovie "EN" subs with
+        None         -> [Fail "expected a pick"]
+        Some chosen ->
+          use Universal eq
+          List.flatMap
+            check
+            [ eq (Subs.SubtitleItem.urlPath chosen) "/subtitle/1111-2222.zip"
+            , eq (Subs.isHi chosen) false
+            , eq (Subs.SubtitleItem.language chosen) (Some "EN")
+            ]
+
+test> Subs.pickBestFallsBackToHi.test =
+  hi : Subs.SubtitleItem
+  hi =
+    Subs.SubtitleItem.SubtitleItem
+      "HI release"
+      "hi.srt"
+      "/subtitle/x.zip"
+      (Some "EN")
+      (Some true)
+      (Some false)
+      None
+      None
+      []
+  match Subs.pickBestForMovie "EN" [hi] with
+    None        -> [Fail "should have picked the HI track as fallback"]
+    Some chosen ->
+      check (Universal.eq (Subs.SubtitleItem.urlPath chosen) "/subtitle/x.zip")
+
+test> Subs.pickBestDropsFullSeason.test =
+  pack : Subs.SubtitleItem
+  pack =
+    Subs.SubtitleItem.SubtitleItem
+      "Season Pack"
+      "s1.zip"
+      "/subtitle/pack.zip"
+      (Some "EN")
+      (Some false)
+      (Some true)
+      (Some 1)
+      (Some 1)
+      []
+  match Subs.pickBestForMovie "EN" [pack] with
+    Some _ -> [Fail "should have dropped the full-season pack"]
+    None   -> check true
+
+test> Subs.pickBestEmpty.test =
+  match Subs.pickBestForMovie "EN" [] with
+    Some _ -> [Fail "empty input should yield None"]
+    None   -> check true
+
+test> Subs.pickBestLanguageFallback.test =
+  fr : Subs.SubtitleItem
+  fr =
+    Subs.SubtitleItem.SubtitleItem
+      "Only French"
+      "fr.srt"
+      "/subtitle/fr.zip"
+      (Some "FR")
+      (Some false)
+      (Some false)
+      None
+      None
+      []
+  match Subs.pickBestForMovie "EN" [fr] with
+    None        -> [Fail "should fall back to the full pool"]
+    Some chosen ->
+      check (Universal.eq (Subs.SubtitleItem.urlPath chosen) "/subtitle/fr.zip")
+
+test> Subs.parseUnpacked.test =
+  match
+    catch do
+      Decoder.run Subs.SearchResponse.fromJson Subs.exampleUnpackedJson
+  with
+    Left f  -> [Fail (Failure.message f)]
+    Right r ->
+      flat = Subs.allUnpackFiles r
+      use Universal eq
+      List.flatMap check [eq (List.size flat) 3]
+
+test> Subs.pickUnpackPrefersNonHi.test =
+  match
+    catch do
+      Decoder.run Subs.SearchResponse.fromJson Subs.exampleUnpackedJson
+  with
+    Left f  -> [Fail (Failure.message f)]
+    Right r ->
+      flat = Subs.allUnpackFiles r
+      match Subs.pickUnpackForLanguage "EN" flat with
+        None        -> [Fail "expected an EN pick"]
+        Some chosen ->
+          use Universal eq
+          List.flatMap
+            check
+            [ eq (Subs.UnpackFile.fileNId chosen) "fileEN1"
+            , eq (Subs.UnpackFile.hearingImpaired chosen) false
+            , eq (Subs.UnpackFile.format chosen) "srt"
+            ]
+
+test> Subs.pickUnpackPicksEachLanguage.test =
+  match
+    catch do
+      Decoder.run Subs.SearchResponse.fromJson Subs.exampleUnpackedJson
+  with
+    Left f  -> [Fail (Failure.message f)]
+    Right r ->
+      flat = Subs.allUnpackFiles r
+      en = Subs.pickUnpackForLanguage "EN" flat
+      es = Subs.pickUnpackForLanguage "ES" flat
+      th = Subs.pickUnpackForLanguage "TH" flat
+      use Universal eq
+      enId = Optional.map Subs.UnpackFile.fileNId en
+      esId = Optional.map Subs.UnpackFile.fileNId es
+      List.flatMap
+        check
+        [ eq enId (Some "fileEN1")
+        , eq esId (Some "fileES1")
+        , eq th None
+        ]
+
+test> Subs.pickUnpackFallsBackToHi.test =
+  hi : Subs.UnpackFile
+  hi =
+    Subs.UnpackFile.UnpackFile
+      "fHI"
+      "x.srt"
+      "rel"
+      "EN"
+      "srt"
+      true
+      100
+      "/subtitle/n/fHI"
+  match Subs.pickUnpackForLanguage "EN" [hi] with
+    None        -> [Fail "should have picked the HI unpack as fallback"]
+    Some chosen ->
+      check (Universal.eq (Subs.UnpackFile.fileNId chosen) "fHI")
+
+test> Subs.languagesParam.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Subs.languagesParam ["en", "es", "th"]) "EN,ES,TH"
+    , eq (Subs.languagesParam ["EN"]) "EN"
+    , eq (Subs.languagesParam []) ""
+    ]
+
+test> Tmdb.normalize.unicode.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (Tmdb.normalize "Avatar꞉ Fire and Ash") "avatar fire and ash"
+    , eq (Tmdb.normalize "Avatar: Fire and Ash") "avatar fire and ash"
+    , eq (Tmdb.normalize "Movie—Title") "movie title"
+    , eq (Tmdb.normalize "Don’t Look Up") "dont look up"
+    , eq (Tmdb.normalize "The Matrix") "matrix"
+    ]
+
+test> Tmdb.tokenOverlapPercent.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq
+        (Tmdb.tokenOverlapPercent
+          "hot tube time machine" "hot tub time machine")
+        75
+    , eq
+        (Tmdb.tokenOverlapPercent
+          "avatar fire and ash" "avatar fire and ash")
+        100
+    , eq (Tmdb.tokenOverlapPercent "foo bar" "foo baz") 50
+    , eq (Tmdb.tokenOverlapPercent "completely different" "totally other") 0
+    , eq (Tmdb.tokenOverlapPercent "" "anything") 0
+    , eq (Tmdb.tokenOverlapPercent "single" "single word") 100
     ]
