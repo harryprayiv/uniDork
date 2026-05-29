@@ -1,90 +1,100 @@
-compile uniDork.cli bin/unidork-import
+edit.namespace .
+run renameGo
+run Resolve.run
 run Stage.runProbeStage
-compile uniDork.cli bin/unidork-import
+run renameGo
+run Stage.runProbeStage
+quit
+clear
+debug.doctor
+help
+find renameNewCombined
+view uniDork
+view unidork
+view uniDork
+view uniDork.
 update
-view Text.split
+compile Stage.runProbeStage ./bin/stageFiles
+compile Resolve.identify ./bin/resolveID
+compile renameGo ./bin/renameGo
+edit Tmdb.scoreCandidate
+find scoreCandidate
+edit scoreCandidate
+run renameGo
+update
+run renameNewCombined "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}/{ny} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}"
+run Resolve.run
+run Resolve.identify
+run Stage.runProbeStage
+run Db.resetSchema
+run Stage.runProbeStage
+update
+run Resolve.run
+run Resolve.identify
+update
+run Resolve.identify
+run Stage.runProbeStage
+run Db.resetSchema
 update
 run Stage.runProbeStage
-compile uniDork.cli bin/unidork-import
+run Db.resetSchema
+run Resolve.run
+run Resolve.identify
+run Stage.runProbeStage
+run Db.resetSchema
+run probe-stage
+run unidork-import probe-stage
+unidork-import probe-stage
 update
-compile uniDork.cli bin/unidork-import
+find cli
 update
-compile uniDork.cli bin/unidork-import
+debug.find.global renameNewCombined
+find.global renameNewCombined
+find renameNewCombined
+update
+find Resolve.resolveOne
+find cli
+delete.term cli
+delete.term uniDork.rename
+delete.term uniDork.cli
+update
+delete.term uniDork.cli
+delete.term Rename.extractGroup
+update
+find unidork
+view unidork
+update
+compile uniDork.cli ./bin/unidork-import
+update
+find.global ~
+find Codec.~
+find Int.toNat
+find Codec.map
+find Codec.both
+find tuple
+find.verbose Codec.decode
+view lib.runarorama_postgres_2_5_1.examples.simpleMultiColumnQuery
+find.verbose Codec
+find Codec.decode
+find Portal
+find.verbose Query
+find untypedQuery
+find bindQuery
+find executeQueryPortal
+view lib.runarorama_postgres_2_5_1.postgres.untypedQuery
+view lib.runarorama_postgres_2_5_1.postgres.bindQuery
+view lib.runarorama_postgres_2_5_1.postgres.executeQueryPortal
+find typedQuery
+update
+compile uniDork.cli ./bin/unidork-import
+update
 run Stage.runProbeStage
 compile uniDork.cli ./bin/unidork-import
 update
-debug.find.global Semaphore
-find Semaphore
-find MVar
-find Promise
-find fork
+run Stage.runProbeStage
 compile uniDork.cli ./bin/unidork-import
+run Stage.runProbeStage
 update
-quit
-find fork
-update
+run Stage.runProbeStage
 compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-run demo
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-pdate
-delete.term Rename.safeRmRf
-update
-delete.term Rename.safeRmRf
-delete.term Rename.rmRf
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-quit
-compile uniDork.cli ./bin/unidork-import
-update
-delete.term Stage.ProbeResult.audio
-update
-quit
-compile uniDork.cli ./bin/unidork-import
-update
-update uniDork.batchedRun
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-view Tmdb.reportFolderWith Tmdb.reportLooseVideoWith uniDork.identify
-view Tmdb.reportFolderWith Tmdb.reportLooseVideoWith
-compile uniDork.cli ./bin/unidork-import
-update
-dupdate
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-compile uniDork.cli ./bin/unidork-import
-update
-delete.term Rename.executeMove
 update
