@@ -1,3 +1,6 @@
+update
+edit.namespace .
+update
 edit.namespace .
 run renameGo
 run Resolve.run
@@ -94,7 +97,4 @@ update
 run Stage.runProbeStage
 compile uniDork.cli ./bin/unidork-import
 run Stage.runProbeStage
-update
-run Stage.runProbeStage
-compile uniDork.cli ./bin/unidork-import
 update
