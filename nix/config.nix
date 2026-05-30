@@ -3,6 +3,7 @@
   name = "uniDork";
 
   database = {
+    host    = "localhost";
     name    = "dork";
     user    = "postgres";
     port    = 5434;
@@ -11,6 +12,7 @@
 
   cache = {
     ffprobeDir = "$HOME/.cache/uniDork/ffprobe";
+    stageDir   = "$HOME/.cache/uniDork/stage";
   };
 
   library = {
@@ -18,15 +20,15 @@
       "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Movies"
     ];
   };
+
   staging = {
     movies = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies";
   };
 
   rename = {
     targetDir = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/testMovies";
-    movieFormat = "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}/{ny} {tags} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}_{group}] ~{crc32}";
+    movieFormat = "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}/{ny} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}";
     tvFormat = "{ny}/{'Season '+s}/{n} {s00e00} {t} ~{crc32}";
-    # subLanguages = [en es th];
   };
 
   tmdb = {
@@ -35,6 +37,10 @@
 
   subs = {
     tokenFile = "$HOME/.config/uniDork/sub-token";
+    languages = [ "en" "es" "th" ];
   };
-  
+
+  tuning = {
+    probeJobs = 8;
+  };
 }

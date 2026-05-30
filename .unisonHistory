@@ -1,4 +1,60 @@
 update
+run debugFailureText
+update
+find debugFailureText
+debug.find.global debugFailureText
+find debugFailureText
+view lib.runarorama_postgres_2_5_1.postgres.debugFailureText
+view lib.runarorama_postgres_2_5_1.postgres.StatementBuilder.%%
+view debugFailureText
+run debugFailureText
+compile cli ./bin/unidork-import
+update
+compile cli ./bin/unidork-import
+update
+run debugNfo
+update
+run uniDork.migrate
+update
+run uniDork.migrate
+update
+run do Db.migrate (Config.fromEnv())
+run Db.migrate
+update
+delete dependents Probe.Format.fromJson
+delete Probe.Result.fromJson
+dependents Probe.Result.fromJson
+dependents Probe.runtimeSec
+delete Probe.runtimeSec
+delete Probe.cacheRoot
+dependents Probe.parseFloat
+dependents Probe.optNatStringAt
+dependents Probe.Format.fromJson
+dependents Probe.Result.fromJson
+dependents Probe.runtimeSec
+dependents Probe.cacheRoot
+update
+dependents Probe.parseFloat
+delete Probe.runtimeSec
+dependents Probe.runtimeSec
+delete Probe.Result.fromJson
+dependents Probe.Result.fromJson
+delete Probe.readSidecar
+dependents Probe.readSidecar
+dependents Probe.Result.fromJson
+dependents term Probe.readSidecar
+dependents Probe.readSidecar
+help dependents
+dependents term Probe.readSidecar
+update
+view Stage.upsertFileWith
+view Stage.probeWithCrc
+update
+edit.namespace .
+edit namespace
+edit Db.migrate
+delete Db.config
+update
 edit.namespace .
 update
 edit.namespace .
@@ -42,59 +98,3 @@ update
 run Stage.runProbeStage
 run Db.resetSchema
 run Resolve.run
-run Resolve.identify
-run Stage.runProbeStage
-run Db.resetSchema
-run probe-stage
-run unidork-import probe-stage
-unidork-import probe-stage
-update
-find cli
-update
-debug.find.global renameNewCombined
-find.global renameNewCombined
-find renameNewCombined
-update
-find Resolve.resolveOne
-find cli
-delete.term cli
-delete.term uniDork.rename
-delete.term uniDork.cli
-update
-delete.term uniDork.cli
-delete.term Rename.extractGroup
-update
-find unidork
-view unidork
-update
-compile uniDork.cli ./bin/unidork-import
-update
-find.global ~
-find Codec.~
-find Int.toNat
-find Codec.map
-find Codec.both
-find tuple
-find.verbose Codec.decode
-view lib.runarorama_postgres_2_5_1.examples.simpleMultiColumnQuery
-find.verbose Codec
-find Codec.decode
-find Portal
-find.verbose Query
-find untypedQuery
-find bindQuery
-find executeQueryPortal
-view lib.runarorama_postgres_2_5_1.postgres.untypedQuery
-view lib.runarorama_postgres_2_5_1.postgres.bindQuery
-view lib.runarorama_postgres_2_5_1.postgres.executeQueryPortal
-find typedQuery
-update
-compile uniDork.cli ./bin/unidork-import
-update
-run Stage.runProbeStage
-compile uniDork.cli ./bin/unidork-import
-update
-run Stage.runProbeStage
-compile uniDork.cli ./bin/unidork-import
-run Stage.runProbeStage
-update
