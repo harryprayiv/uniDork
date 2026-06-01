@@ -11,6 +11,8 @@ pkgs.mkShell {
     rhash
     rsync
     jq
+    fzf
+    bat
 
     postgres.pg-start
     postgres.pg-stop

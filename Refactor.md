@@ -108,3 +108,73 @@ A: yes obviously.  They need to both follow the naming formula we declared.
 - Unison gotchas seen this project: dotted-record constructors double the name; sub-record accessors use full path; functions taking args and returning `()` have no leading `do` (only `'{...} ()` thunks do); `compile` the binary after namespace `update` or `unidork` runs stale code; keep the scratch file small and `update` aggressively (large scratch causes minutes-long recheck).
 - `getEnv`, `Failure.message`, `Stage.probeWithCrc`, `Stage.upsertFileWith`, `Process.start`, `renameFile`/`Process` for shelling are all confirmed present in this codebase's API surface.
 - The implementer cannot compile against the user's `@runarorama/postgres`/`@unison/http` libraries remotely; deliver internally-consistent code and flag every unverifiable identifier.
+
+
+Two deliverables: a complete state-of-the-refactor document, then a rewritten README. Let me give you the status first, including an honest accounting of the decisions and which ones may have snowballed.
+
+# uniDork Refactor — State & Decision Log
+
+## Where we are: Phases 1–4 are code-complete and in the namespace. Phase 4 (`move`) is untested against real data.
+
+### Phase 1 — Config path threading ✅ done, verified
+- `Config.Paths` record migrated. Final fields: `libraryConfig`, `intake`, `buffer`, `movieFormat`, `tmdbToken`, `subToken`, `library`.
+- Three real paths in `config.nix` under a flat `paths` block: `intake` (fresh downloads, read-only), `buffer` (`AMC/TEST`, rename writes / move reads+deletes), `library` (`AMC/Movies` for testing, move writes / import-library reads).
+- Env vars: `UNIDORK_PATH_INTAKE`, `UNIDORK_PATH_BUFFER`, `UNIDORK_PATH_LIBRARY`, `UNIDORK_PATH_CONFIG`.
+- Verified: env echoes correct, `_Movies` appears nowhere in code or config.
+
+### Phase 2 — `files.stage` + split import ✅ done, verified
+- `files` gained `stage TEXT NOT NULL DEFAULT 'library'`. Migration ran; existing 445 rows backfilled `library`.
+- Three stage values: `staging` (intake), `buffer` (rename buffer, not resolved), `library` (promoted/catalogued).
+- `resolve` filters `WHERE stage <> 'buffer'` — buffer files stay out of the resolve sweep.
+- `runProbeStage` extracted into `runProbeAt cfg root stage`. `probe-stage` passes `staging`; `import-buffer` passes `buffer`.
+- Bare `import` dropped. New verbs: `import-buffer`, `import-library`, `import-all`.
+- Verified: stage column writes correctly, resolve excludes buffer, import-library regressed clean (432 folders skipped as already-imported).
+
+### Phase 3 — move primitives ✅ done, queries verified
+- `Move.selectFileByPathSql` — loads `(file_id, crc32, size_bytes, original_name)` by `original_path`, any stage. Verified with a real path (HIT file_id=2).
+- `Move.FileIdentity` record + `rowToIdentity` decoder.
+- `Move.updateFilePathSql` — `UPDATE files SET original_path, original_name, stage='library' WHERE crc32 AND size_bytes`. Typechecks; not yet exercised (it mutates).
+
+### Phase 4 — `move` ✅ code-complete, ❌ untested against real data
+All compiled and in the namespace:
+- `Move.rsyncFolder` — shells `rsync -a --remove-source-files src/ dst/`, no `--delete`. Verified transfer, source-delete only on success, siblings untouchable.
+- `Move.rmdirFolder` — removes emptied source folder, best-effort.
+- `Move.enforceUnderRoot` — destination guard.
+- `Move.ensureDir`, `Move.loadIdentity`.
+- `Move.moveOne` — per-folder driver. Order: parse NFO → extract tmdb id (abort if none) → trust-gate file row (size-verify, re-probe on miss) → ensure movies row (network, **outside** transaction) → enforce dest under library → **rsync (point of no return)** → rmdir source → DB writes (path+stage update, association `nfo_promote`, library_movies via `upsertWith`).
+- `Move.moveBatch` — opens ~26 prepared commands once, folds `moveOne` (each wrapped in `catch` for per-folder isolation), closes all.
+- `Move.run` — `move <name>` promotes one buffer folder; `move` promotes all.
+- `cli` dispatches `move`; orchestrator has `cmd_move` + `rsync` in `runtimeInputs`/`buildInputs`.
+
+**What's left: actually run `move` on one real buffer folder and verify the five-point outcome (folder in library, folder gone from buffer, files.stage=library + path updated, association written, library_movies row written). Nothing else is built. This is the only remaining step.**
+
+## Decisions you made, in order — and which ones may have snowballed
+
+**Sound decisions, no concern:**
+- Three import verbs, bare `import` dropped — clean, explicit.
+- `import-buffer` reuses `runProbeAt` (Option A) — no duplicated probe engine.
+- Three-value `stage` (`staging`/`buffer`/`library`), resolve filters `<> buffer` — honest about lifecycle position.
+- rsync invocation (`-a --remove-source-files`, no `--checksum`, no `--delete`) — correct, minimal blast radius.
+- Single `library` field (collapsing the `dest`/`roots`/`catalogScan` mess) — you were right to force this; my split was speculative generality.
+
+**Decisions worth re-examining before you go further:**
+
+1. **`import-buffer` is the buffer-stage writer, rename doesn't flip stage (Option 2).** Consequence you're living with: after `rename --apply`, a renamed file sits in the buffer with `stage='staging'` until you run `import-buffer` to flip it to `buffer`. Two-step. You accepted this as the "deliberate approval recording" step, but it means the buffer's stage values are only correct after an extra command. If that two-step annoys you in practice, the alternative (rename flips stage on write) is a small future change.
+
+2. **`move` trusts the NFO's tmdb id, doesn't re-resolve (Reading 2).** This is the biggest "lulled into it" risk and you should know it cold: `move` reads the tmdb id straight from the buffer NFO that `rename` wrote. It does **not** re-verify the match. If `rename` wrote a wrong id, or you hand-edited a folder, `move` promotes the wrong identity without complaint. The guard is only "NFO has *a* tmdb id," not "the id is correct." You approve the buffer manually, so this is consistent with your workflow — but it means **the correctness of the library depends on rename's match being right, with no second check at promotion.** If you ever want a verification gate, that's the place it'd go.
+
+3. **`move` re-probes on trust-gate miss and writes the row as `stage='buffer'`.** The re-probe path in `moveOne` calls `upsertFileWith ... "buffer"`. That's correct (the file is still in the buffer at that moment), but note the file then immediately gets flipped to `library` by `updateFilePathSql` after rsync. So a missed trust-gate causes a transient `buffer` write then a `library` update. Harmless, but it's two writes where the happy path has one.
+
+4. **The known cache-skip stage staleness.** Your 445 `library` rows include 2 files physically in `intake` (the Fuze staging files) marked `library`, because `probe_cache` skipped re-probing them so the stage backfill defaulted them to `library`. Not corrupting; the stage column is only retroactively accurate for newly-probed files. If you want them correct: `clean-stage` then `probe-stage`.
+
+5. **Crash window between rsync and DB writes (steps 7→9 in moveOne).** Unavoidable with shelled rsync — if the process dies after rsync but before the DB writes, the file is in the library but the DB still points at the buffer. Self-healing: re-running `import-library` re-catalogues it. Acceptable, but it exists.
+
+**One thing that did snowball and you caught it:** the `dest`/`roots`/`promoteTo`/`catalogScan` naming churn. That was me over-engineering config field names across three iterations. You correctly forced it down to three honest fields. No lasting damage — the final config is clean — but it cost a full extra Unison record migration.
+
+## The single most important safety fact to carry into the next session
+
+`move` writes only to `library` (`AMC/Movies`) and deletes only from `buffer` (`AMC/TEST`). rsync has no `--delete`, so within `AMC/Movies` it can only *add* the one promoted folder — it cannot touch the ~400 already there. `_Movies` is in no config, no code, no default. Before any `move`, confirm `echo "$UNIDORK_PATH_LIBRARY"` shows `AMC/Movies`. When you eventually go to production, the *only* change is `paths.library` → `_Movies` in `config.nix`, and you should re-verify that echo before the first production `move`.
+
+## Immediate next step (the one unfinished thing)
+
+Test `move` on one buffer folder. `ls AMC/TEST`, back it up to `/tmp`, confirm you've compiled the binary post-last-update, then `unidork move "<one folder name>"`, then the five verification queries. That closes Phase 4.
