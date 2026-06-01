@@ -15,18 +15,19 @@
     stageDir   = "$HOME/.cache/uniDork/stage";
   };
 
-  library = {
-    roots = [
-      "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Movies"
-    ];
-  };
+  paths = {
+    # fresh downloads land here. probe-stage READS. read-only.
+    intake  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies";
 
-  staging = {
-    movies = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies";
+    # the buffer. rename WRITES renamed folders here; move READS + DELETES on promote.
+    buffer  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TEST";
+
+    # the library. move WRITES promoted movies here; import-library READS here.
+    # TESTING: AMC/Movies (fake library). PRODUCTION (later): /home/bismuth/NAS/video/_Movies
+    library = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Movies";
   };
 
   rename = {
-    targetDir = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/testMovies";
     movieFormat = "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}/{ny} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}";
     tvFormat = "{ny}/{'Season '+s}/{n} {s00e00} {t} ~{crc32}";
   };

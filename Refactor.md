@@ -83,13 +83,23 @@ Key existing facts the implementer must know:
 
 These were not fully settled and the implementer should ask rather than guess:
 
-1. **What does `import-buffer` actually write?** Decision 6 says `move` is the sole writer of `library_movies` for buffer files, to keep prototype out of production. But then what is `import-buffer`'s job — does it write `files` rows only (staging-probe the buffer so move's trust gate finds them), or is it redundant with what `probe-stage`/`resolve` already did to produce the buffer contents? Possibly `import-buffer` is unnecessary if rename-output already has `files` rows from staging. Clarify the buffer's DB state at rest and what, if anything, `import-buffer` adds.
+1. **What does `import-buffer` actually write?** Decision 6 says `move` is the sole writer of `library_movies` for buffer files, to keep prototype out of production. But then what is `import-buffer`'s job — does it write `files` rows only (staging-probe the buffer so move's trust gate finds them), or is it redundant with what `probe-stage`/`resolve` already did to produce the buffer contents? Possibly `import-buffer` is unnecessary if rename-output already has `files` rows from staging. Clarify the buffer's DB state at rest and what, if anything, `import-buffer` adds.  
+
+A: import buffer is for properly recording files in the buffer without actually moving them into the main library.  I want to approve files first manually then perhaps I can decide to use the move action to transfer those files into the library and take all necessary database update actions to make them behave as if they were always in the library.
 
 2. **Is the promotion-destination library root the same as `library.roots` (the scan list), or a separate single field?** `library.roots` is a list scanned by import; the move destination is one root. Resolve whether they share a value or are distinct config.
 
+A: I am not sure what you mean. The two sides of the move operation (buffer and library) are two distinct folders that we interact with.  THe buffer is the last step before I add something to the library.  Maybe this can clear it up.  The library resides in:
+``/home/bismuth/NAS/video/_Movies/`` and the buffer before the library we use in the move operation and populate with import-buffer are in the ``/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TEST/`` directory.
+
+
 3. **Exact rsync flags** — per Phase 0 caveat, confirm the invocation that gives verified transfer for a fresh-destination folder move with `--remove-source-files`, without an unnecessary `--checksum` full-reread. Verify against actual rsync semantics.
 
-4. **Folder-name source for the destination** — the buffer folder already has its rename-assigned name (`Movie (Year) [...] ~CRC`). Confirm the destination keeps that exact folder name under the library root (almost certainly yes), so move is a pure relocation, not a re-render.
+A: we need to make sure whatever we do with Rsync only affects that one folder we are interacting with not the whole directory.  Usually when I do an rsync, it is to make sure two folders match completely.  But I want to make sure we weild this poweerful (and destructuve tool) properly so we don't end up overwriting the rest of the folder that the movie folder was in.  
+
+4. **Folder-name source for the destination** — the buffer folder already has its rename-assigned name (`Movie (Year) [...] ~CRC`). Confirm the destination keeps that exact folder name under the library root (almost certainly yes), so move is a pure relocation, not a re-render. 
+
+A: yes obviously.  They need to both follow the naming formula we declared.
 
 ## Constraints / style (from user preferences)
 

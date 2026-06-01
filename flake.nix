@@ -21,11 +21,10 @@
         baseConfig = import ./nix/config.nix { };
 
         libraryConfigFile =
-          pkgs.writeText "uniDork.conf"
-            (pkgs.lib.concatStringsSep "\n" baseConfig.library.roots + "\n");
+          pkgs.writeText "uniDork.conf" (baseConfig.paths.library + "\n");
 
         config = baseConfig // {
-          library = baseConfig.library // {
+          paths = baseConfig.paths // {
             configFile = libraryConfigFile;
           };
         };

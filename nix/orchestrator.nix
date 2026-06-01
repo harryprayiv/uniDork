@@ -6,6 +6,7 @@ pkgs.writeShellApplication {
     pkgs.coreutils
     pkgs.postgresql
     pkgs.unison-ucm
+    pkgs.rsync
     uniDork
     postgres.pg-start
     postgres.pg-stop
@@ -28,10 +29,11 @@ pkgs.writeShellApplication {
     : "''${UNIDORK_CACHE_STAGE:=${config.cache.stageDir}}"
     export UNIDORK_CACHE_FFPROBE UNIDORK_CACHE_STAGE
 
-    : "''${UNIDORK_PATH_CONFIG:=${config.library.configFile}}"
-    : "''${UNIDORK_PATH_STAGING:=${config.staging.movies}}"
-    : "''${UNIDORK_PATH_RENAME_TARGET:=${config.rename.targetDir}}"
-    export UNIDORK_PATH_CONFIG UNIDORK_PATH_STAGING UNIDORK_PATH_RENAME_TARGET
+    : "''${UNIDORK_PATH_CONFIG:=${config.paths.configFile}}"
+    : "''${UNIDORK_PATH_INTAKE:=${config.paths.intake}}"
+    : "''${UNIDORK_PATH_BUFFER:=${config.paths.buffer}}"
+    : "''${UNIDORK_PATH_LIBRARY:=${config.paths.library}}"
+    export UNIDORK_PATH_CONFIG UNIDORK_PATH_INTAKE UNIDORK_PATH_BUFFER UNIDORK_PATH_LIBRARY
 
     : "''${UNIDORK_FORMAT_MOVIE:=${config.rename.movieFormat}}"
     export UNIDORK_FORMAT_MOVIE
@@ -64,10 +66,15 @@ pkgs.writeShellApplication {
     cmd_start()  { pg-start; }
     cmd_stop()   { pg-stop; }
 
-    cmd_probe()   { ensure_pg; unidork-import probe-stage; }
-    cmd_import()  { ensure_pg; unidork-import import "$UNIDORK_PATH_CONFIG"; }
-    cmd_resolve() { ensure_pg; unidork-import resolve; }
-    cmd_identify(){ ensure_pg; unidork-import identify; }
+    cmd_probe()    { ensure_pg; unidork-import probe-stage; }
+    cmd_resolve()  { ensure_pg; unidork-import resolve; }
+    cmd_identify() { ensure_pg; unidork-import identify; }
+
+    cmd_import_buffer()  { ensure_pg; unidork-import import-buffer; }
+    cmd_import_library() { ensure_pg; unidork-import import-library "$UNIDORK_PATH_CONFIG"; }
+    cmd_import_all()     { ensure_pg; unidork-import import-all "$UNIDORK_PATH_CONFIG"; }
+
+    cmd_move() { ensure_pg; unidork-import move "$@"; }
 
     cmd_probe_resolve() {
       cmd_probe
@@ -97,6 +104,8 @@ pkgs.writeShellApplication {
       ensure_pg
       psql -At <<'SQL'
 SELECT '  files:            ' || COUNT(*)::text FROM files;
+SELECT '  buffer files:     ' || COUNT(*)::text FROM files WHERE stage = 'buffer';
+SELECT '  library files:    ' || COUNT(*)::text FROM files WHERE stage = 'library';
 SELECT '  library movies:   ' || COUNT(*)::text FROM library_movies;
 SELECT '  crc mismatches:   ' || COUNT(*)::text FROM library_movies WHERE crc32 IS NOT NULL AND crc32 <> folder_checksum;
 SELECT '  movies:           ' || COUNT(*)::text FROM movies;
@@ -107,10 +116,10 @@ SQL
     }
 
     cmd_run() {
-      echo "[orchestrator] start -> probe-stage -> import -> resolve"
+      echo "[orchestrator] start -> probe-stage -> import-library -> resolve"
       cmd_start
       cmd_probe
-      cmd_import
+      cmd_import_library
       cmd_resolve
       echo "[orchestrator] done. review, then: unidork rename --apply"
     }
@@ -122,7 +131,10 @@ SQL
       probe)          cmd_probe ;;
       probe-stage)    cmd_probe ;;
       probe-resolve)  cmd_probe_resolve ;;
-      import)         cmd_import ;;
+      import-buffer)  cmd_import_buffer ;;
+      import-library) cmd_import_library ;;
+      import-all)     cmd_import_all ;;
+      move)           cmd_move "$@" ;;
       resolve)        cmd_resolve ;;
       identify)       cmd_identify ;;
       rename)         cmd_rename "$@" ;;
@@ -136,19 +148,22 @@ unidork - pipeline orchestrator
 
 Usage: unidork <command>
 
-  run             start + probe-stage + import + resolve
+  run             start + probe-stage + import-library + resolve
   start | stop    postgres lifecycle
-  status          row counts; includes library crc-mismatch count
-  probe           staging probes -> files (Unison)
-  probe-stage     alias for probe
-  probe-resolve   probe then resolve (two discrete steps)
-  import          unidork-import import (library -> files + library_movies, self-probing)
-  resolve         unidork-import resolve (associate files -> movies)
-  identify        unidork-import identify (read-only TMDB report)
-  rename --apply  unidork-import rename (DESTRUCTIVE: moves files)
-  logs            list stderr log files for past runs
+  status          row counts (files split by stage)
+  probe-stage     intake probes -> files (stage=staging)
+  probe-resolve   probe then resolve
+  import-buffer   probe buffer -> files (stage=buffer, not resolved)
+  import-library  library -> files + library_movies (stage=library)
+  import-all      import-buffer then import-library
+  move [folder]   promote buffer folder(s) into the library
+                  (DESTRUCTIVE: rsync to library + delete from buffer)
+  resolve         associate files -> movies (skips stage=buffer)
+  identify        read-only TMDB report
+  rename --apply  DESTRUCTIVE: moves intake files into the buffer
+  logs            list stderr log files
   psql            interactive psql to ''${UNIDORK_DB_NAME}
-  clean-stage     truncate probe_cache (re-probe next run)
+  clean-stage     truncate probe_cache
 EOF
         ;;
       *) echo "unknown command: $cmd" >&2; exit 1 ;;

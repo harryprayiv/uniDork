@@ -9,6 +9,7 @@ pkgs.mkShell {
     pgcli
     ffmpeg
     rhash
+    rsync
     jq
 
     postgres.pg-start
@@ -31,9 +32,10 @@ pkgs.mkShell {
     export UNIDORK_CACHE_FFPROBE="${config.cache.ffprobeDir}"
     export UNIDORK_CACHE_STAGE="${config.cache.stageDir}"
 
-    export UNIDORK_PATH_CONFIG="${config.library.configFile}"
-    export UNIDORK_PATH_STAGING="${config.staging.movies}"
-    export UNIDORK_PATH_RENAME_TARGET="${config.rename.targetDir}"
+    export UNIDORK_PATH_CONFIG="${config.paths.configFile}"
+    export UNIDORK_PATH_INTAKE="${config.paths.intake}"
+    export UNIDORK_PATH_BUFFER="${config.paths.buffer}"
+    export UNIDORK_PATH_LIBRARY="${config.paths.library}"
 
     export UNIDORK_FORMAT_MOVIE="${config.rename.movieFormat}"
 
