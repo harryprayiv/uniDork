@@ -70,9 +70,11 @@ pkgs.writeShellApplication {
     cmd_resolve()  { ensure_pg; unidork-import resolve; }
     cmd_identify() { ensure_pg; unidork-import identify; }
 
-    cmd_import_buffer()  { ensure_pg; unidork-import import-buffer; }
+    cmd_reconcile()      { ensure_pg; unidork-import reconcile; }
     cmd_import_library() { ensure_pg; unidork-import import-library "$UNIDORK_PATH_CONFIG"; }
     cmd_import_all()     { ensure_pg; unidork-import import-all "$UNIDORK_PATH_CONFIG"; }
+
+    cmd_process() { ensure_pg; unidork-import process; }
 
     cmd_move() { ensure_pg; unidork-import move "$@"; }
 
@@ -131,7 +133,9 @@ SQL
       probe)          cmd_probe ;;
       probe-stage)    cmd_probe ;;
       probe-resolve)  cmd_probe_resolve ;;
-      import-buffer)  cmd_import_buffer ;;
+      process)        cmd_process ;;
+      reconcile)      cmd_reconcile ;;
+      import-buffer)  cmd_reconcile ;;
       import-library) cmd_import_library ;;
       import-all)     cmd_import_all ;;
       move)           cmd_move "$@" ;;
@@ -148,16 +152,18 @@ unidork - pipeline orchestrator
 
 Usage: unidork <command>
 
+  process         DESTRUCTIVE: probe-stage + resolve + rename (intake -> buffer)
   run             start + probe-stage + import-library + resolve
   start | stop    postgres lifecycle
   status          row counts (files split by stage)
   probe-stage     intake probes -> files (stage=staging)
   probe-resolve   probe then resolve
-  import-buffer   probe buffer -> files (stage=buffer, not resolved)
+  reconcile       record/repair buffer entries (only probes files uniDork didn't put there)
   import-library  library -> files + library_movies (stage=library)
-  import-all      import-buffer then import-library
+  import-all      reconcile then import-library
   move [folder]   promote buffer folder(s) into the library
-                  (DESTRUCTIVE: rsync to library + delete from buffer)
+                  (DESTRUCTIVE: rsync to library + delete from buffer;
+                   aborts if the destination folder already exists)
   resolve         associate files -> movies (skips stage=buffer)
   identify        read-only TMDB report
   rename --apply  DESTRUCTIVE: moves intake files into the buffer
