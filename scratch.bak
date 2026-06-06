@@ -1902,6 +1902,25 @@ List.distinctText xs =
 mig : '{IO, Exception} ()
 mig = do migrate fromEnv()
 
+Move.commitFolder : Text -> Text ->{IO} Either Text ()
+Move.commitFolder src dst =
+  match 
+    catch do
+      (stdin, stdout, stderr, p) = Process.start "mv" ["-T", "--", src, dst]
+      _ = Handle.close stdin
+      _ = drainHandle stdout
+      err = drainHandle stderr
+      code = Process.wait p
+      (code, err)
+   with
+    Left f -> Left (Failure.message f)
+    Right (code, err) ->
+      if code Nat.== 0 then Right()
+      else Left ("mv exit " Text.++ Nat.toText code Text.++ ": " Text.++ err)
+
+Move.deviceOf : Text ->{IO} Optional Text
+Move.deviceOf path = statField "%d" path
+
 Move.enforceUnderRoot : Text -> Text -> Boolean
 Move.enforceUnderRoot libraryRoot dstFolder =
   use Text ++
@@ -1915,6 +1934,29 @@ Move.ensureDir path =
   else
     _ = catch do createDirectory fp
     ()
+
+Move.epochSeconds : '{IO} Nat
+Move.epochSeconds = do match 
+  catch do
+    (stdin, stdout, stderr, p) = Process.start "date" ["+%s"]
+    _ = Handle.close stdin
+    out = drainHandle stdout
+    _ = drainHandle stderr
+    _ = Process.wait p
+    out
+ with
+  Left _    -> 0
+  Right out -> Optional.getOrElse 0 (Nat.fromText (trim out))
+
+Move.folderVideoBytes : FilePath ->{IO, Exception} Nat
+Move.folderVideoBytes folder =
+  files = directoryContents.texts folder
+  match findFirstVideo files with
+    None   -> 0
+    Some v ->
+      match fileStat (filePathText (pathJoin folder v)) with
+        Some (_, sz) -> sz
+        None         -> 0
 
 Move.loadIdentity :
   PreparedQuery r a (((Int, Text), Int), Text)
@@ -1933,8 +1975,72 @@ Move.loadIdentity pq bufferPath = match
       []         -> None
 
 Move.moveBatch : Config -> Text -> Text -> [FilePath] ->{IO, Exception} ()
-Move.moveBatch cfg libraryRoot token folders = 
+Move.moveBatch cfg libraryRoot token folders =
+  use List foldLeft size
+  use Nat + toText
+  use Text join
+  sized = List.map (f -> (f, folderVideoBytes f)) folders
+  sumStep acc = cases (_, b) -> acc + b
+  totalBytes = foldLeft sumStep 0 sized
+  totalFolders = size folders
+  _ =
+    printLine
+      (join
+        ""
+        [ "[move] plan: "
+        , toText totalFolders
+        , " folder(s), "
+        , gigabytes totalBytes
+        , " of video"
+        ])
+  counter = IO.ref (0, 0)
+  startEpoch = epochSeconds()
+  chunks = List.chunk moveChunkSize sized
+  n = size chunks
+  step i chunk =
+    _ =
+      printLine
+        (join
+          ""
+          [ "[move] chunk "
+          , toText i
+          , "/"
+          , toText n
+          , " ("
+          , toText (size chunk)
+          , " folder(s))"
+          ])
+    _ =
+      match catch do
+        moveChunk
+          cfg
+          libraryRoot
+          token
+          totalFolders
+          totalBytes
+          startEpoch
+          counter
+          chunk with
+        Right _ -> ()
+        Left f  -> printLine (join "" ["  CHUNK FAILED: ", Failure.message f])
+    i + 1
+  _ = foldLeft step 1 chunks
+  ()
+
+Move.moveChunk :
+  Config
+  -> Text
+  -> Text
+  -> Nat
+  -> Nat
+  -> Nat
+  -> Ref {IO} (Nat, Nat)
+  -> [(FilePath, Nat)]
+  ->{IO, Exception} ()
+Move.moveChunk
+  cfg libraryRoot token totalFolders totalBytes startEpoch counter folders = 
   singleIO (toClientConfig cfg) do
+    use Nat +
     use Text ++
     pqFileByPath = prepareQuery selectFileByPathSql
     pcFiles = prepareCommand upsertFileSql
@@ -1963,41 +2069,46 @@ Move.moveBatch cfg libraryRoot token folders =
     pcDDir = prepareCommand (deleteChildSql "movie_directors")
     pcCre = prepareCommand insertCreditSql
     pcDCre = prepareCommand (deleteChildSql "movie_credits")
-    safeOne folder =
-      match catch do
-        moveOne
-          libraryRoot
-          token
-          pqFileByPath
-          pcFiles
-          pcUpdatePath
-          pqDet
-          pcDet
-          pcAssoc
-          pcUpsert
-          pcVid
-          pcDVid
-          pcAud
-          pcDAud
-          pcSub
-          pcDSub
-          pcAct
-          pcDAct
-          pcGen
-          pcDGen
-          pcTag
-          pcDTag
-          pcCou
-          pcDCou
-          pcStu
-          pcDStu
-          pcDir
-          pcDDir
-          pcCre
-          pcDCre
-          folder with
-        Right _ -> ()
-        Left f  -> printLine ("  FOLDER FAILED: " ++ Failure.message f)
+    safeOne = cases
+      (folder, bytes) ->
+        _ =
+          match catch do
+            moveOne
+              libraryRoot
+              token
+              pqFileByPath
+              pcFiles
+              pcUpdatePath
+              pqDet
+              pcDet
+              pcAssoc
+              pcUpsert
+              pcVid
+              pcDVid
+              pcAud
+              pcDAud
+              pcSub
+              pcDSub
+              pcAct
+              pcDAct
+              pcGen
+              pcDGen
+              pcTag
+              pcDTag
+              pcCou
+              pcDCou
+              pcStu
+              pcDStu
+              pcDir
+              pcDDir
+              pcCre
+              pcDCre
+              folder with
+            Right _ -> ()
+            Left f  -> printLine ("  FOLDER FAILED: " ++ Failure.message f)
+        (dF, dB) = Ref.read counter
+        _ = Ref.write counter (dF + 1, dB + bytes)
+        printProgress totalFolders totalBytes startEpoch counter
     _ = Db.foreach_ safeOne folders
     _ = PreparedQuery.close pqFileByPath
     _ = PreparedCommand.close pcFiles
@@ -2026,6 +2137,9 @@ Move.moveBatch cfg libraryRoot token folders =
     _ = PreparedCommand.close pcDDir
     _ = PreparedCommand.close pcCre
     PreparedCommand.close pcDCre
+
+Move.moveChunkSize : Nat
+Move.moveChunkSize = 25
 
 Move.moveOne :
   Text
@@ -2166,14 +2280,41 @@ Move.moveOne
                           ("  abort: destination already exists in library (possible duplicate, resolve manually): "
                             Text.++ dstFolderText)
                       else
-                        _ = ensureDir dstFolderText
-                        match rsyncFolder (filePathText folder) dstFolderText with
+                        srcText = filePathText folder
+                        sameDev = sameDevice srcText libraryRoot
+                        _ =
+                          if sameDev then
+                            printLine
+                              "  transfer: atomic rename (same filesystem)"
+                          else
+                            printLine
+                              "  transfer: rsync copy (cross filesystem)"
+                        transferred =
+                          if sameDev then commitFolder srcText dstFolderText
+                          else
+                            use Text ++
+                            partDst =
+                              partialRoot libraryRoot ++ "/" ++ folderName
+                            _ = ensureDir (partialRoot libraryRoot)
+                            _ = removeFolderTree partDst
+                            match rsyncFolder srcText partDst with
+                              Left e  -> Left e
+                              Right _ -> commitFolder partDst dstFolderText
+                        match transferred with
                           Left err ->
                             printLine
-                              ("  abort: rsync failed, DB untouched: "
+                              ("  abort: transfer failed, library untouched: "
                                 Text.++ err)
                           Right _ ->
-                            _ = rmdirFolder (filePathText folder)
+                            _ =
+                              if sameDev then ()
+                              else
+                                match removeFolderTree srcText with
+                                  Left e ->
+                                    printLine
+                                      ("  warn: buffer cleanup failed: "
+                                        Text.++ e)
+                                  Right _ -> ()
                             newVideoPath =
                               dstFolderText Text.++ "/" Text.++ videoName
                             fid = FileIdentity.fileId ident
@@ -2229,6 +2370,40 @@ Move.moveOne
                                 mPromoted
                             printLine ("  promoted -> " Text.++ dstFolderText)
 
+Move.partialRoot : Text -> Text
+Move.partialRoot libraryRoot =
+  use Text ++
+  libraryRoot ++ "/.unidork-partial"
+
+Move.printProgress :
+  Nat -> Nat -> Nat -> Ref g (Nat, Nat) ->{g, IO, Exception} ()
+Move.printProgress totalFolders totalBytes startEpoch counter =
+  Progress.report "folders" totalFolders totalBytes startEpoch counter
+
+Move.removeFolderTree : Text ->{IO} Either Text ()
+Move.removeFolderTree path =
+  use Nat ==
+  use Text ++
+  t = trim path
+  bad = List.any (b -> Universal.eq b t) ["", "/"]
+  if bad
+    || Boolean.not (startsWith "/" t) then
+    Left ("refusing to delete suspicious path: '" ++ path ++ "'")
+  else
+    match 
+      catch do
+        (stdin, stdout, stderr, p) = Process.start "rm" ["-rf", "--", t]
+        _ = Handle.close stdin
+        _ = drainHandle stdout
+        err = drainHandle stderr
+        code = Process.wait p
+        (code, err)
+     with
+      Left f -> Left (Failure.message f)
+      Right (code, err) ->
+        if code == 0 then Right()
+        else Left ("rm exit " ++ Nat.toText code ++ ": " ++ err)
+
 Move.rmdirFolder : Text ->{IO} ()
 Move.rmdirFolder folder =
   _ = catch do
@@ -2250,8 +2425,7 @@ Move.rsyncFolder srcFolder dstFolder =
   dstArg = dstFolder ++ "/"
   match 
     catch do
-      (stdin, stdout, stderr, p) =
-        Process.start "rsync" ["-a", "--remove-source-files", srcArg, dstArg]
+      (stdin, stdout, stderr, p) = Process.start "rsync" ["-a", srcArg, dstArg]
       _ = Handle.close stdin
       out = drainHandle stdout
       err = drainHandle stderr
@@ -2275,6 +2449,7 @@ Move.run cfg maybeFolderName =
   if Boolean.not (isDirectory bufferFp) then
     printLine ("buffer not found: " ++ bufferRoot)
   else
+    _ = sweepPartial libraryRoot
     folders =
       match maybeFolderName with
         Some name ->
@@ -2307,6 +2482,11 @@ Move.run cfg maybeFolderName =
         ("[move] " ++ Nat.toText (size folders) ++ " folder(s) to promote")
     if eq (size folders) 0 then () else moveBatch cfg libraryRoot token folders
 
+Move.sameDevice : Text -> Text ->{IO} Boolean
+Move.sameDevice a b = match (deviceOf a, deviceOf b) with
+  (Some x, Some y) -> Universal.eq x y
+  _                -> false
+
 Move.selectFileByPathSql :
   postgres.Query a (Text ->{g, g1} a) (((Int, Text), Int), Text)
 Move.selectFileByPathSql =
@@ -2315,6 +2495,17 @@ Move.selectFileByPathSql =
     "SELECT f.file_id, f.crc32, f.size_bytes, f.original_name FROM files f WHERE f.original_path = "
     %% var text
     |> typedQuery (bigint ~ text ~ bigint ~ text)
+
+Move.sweepPartial : Text ->{IO, Exception} ()
+Move.sweepPartial libraryRoot =
+  use Text ++
+  pr = partialRoot libraryRoot
+  if isDirectory (FilePath pr) then
+    _ = printLine ("[move] sweeping crashed partial transfers: " ++ pr)
+    match removeFolderTree pr with
+      Left e  -> printLine ("[move] sweep failed: " ++ e)
+      Right _ -> ()
+  else ()
 
 Move.updateFilePathSql :
   Command a (Text ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} a)
@@ -3082,6 +3273,39 @@ probeBufferTest = do
 probeStageTest : '{IO, Exception} ()
 probeStageTest = do runProbeStage fromEnv()
 
+Progress.report :
+  Text -> Nat -> Nat -> Nat -> Ref g (Nat, Nat) ->{g, IO, Exception} ()
+Progress.report label totalItems totalBytes startEpoch counter =
+  use Nat - / < == toText
+  use Text ++
+  (doneI, doneB) = Ref.read counter
+  now = epochSeconds()
+  elapsed = if now < startEpoch then 0 else now - startEpoch
+  remB = if doneB < totalBytes then totalBytes - doneB else 0
+  etaTxt =
+    if doneB == 0 then "ETA ?"
+    else
+      if elapsed == 0 then "ETA ?"
+      else
+        rate = doneB / elapsed
+        if rate == 0 then "ETA ?"
+        else "ETA ~" ++ toText (remB / rate / 60) ++ "min"
+  printLine
+    ("[progress] "
+      ++ toText doneI
+      ++ "/"
+      ++ toText totalItems
+      ++ " "
+      ++ label
+      ++ ", "
+      ++ gigabytes doneB
+      ++ " / "
+      ++ gigabytes totalBytes
+      ++ ", elapsed "
+      ++ toText (elapsed / 60)
+      ++ "min, "
+      ++ etaTxt)
+
 Relang.bestOf : [AudioTrack] -> Optional AudioTrack
 Relang.bestOf tracks =
   step acc cur = match acc with
@@ -3552,7 +3776,7 @@ Rename.deleteProbeBySourceSql =
   sql "DELETE FROM stage_probes WHERE source_path = " %% var Codec.text
     |> buildCommand
 
-Rename.deleteProbeCacheSql : Command a (Text -> a)
+Rename.deleteProbeCacheSql : Command a (Text ->{g, g1} a)
 Rename.deleteProbeCacheSql =
   sql "DELETE FROM probe_cache WHERE original_path = " %% var Codec.text
     |> buildCommand
@@ -4139,7 +4363,15 @@ Rename.pathExists fp = match catch do FilePath.exists fp with
   Left _  -> false
 
 Rename.promoteToBufferSql :
-  Command a (Text -> Text -> Text -> Text -> Text -> Int -> a)
+  Command
+    a
+    (Text
+    ->{g10, g11} Text
+    ->{g8, g9} Text
+    ->{g6, g7} Text
+    ->{g4, g5} Text
+    ->{g2, g3} Int
+    ->{g, g1} a)
 Rename.promoteToBufferSql =
   use Codec text
   sql "UPDATE files SET original_path = "
@@ -5384,7 +5616,7 @@ Stage.parseNatString = cases
   Some s -> Nat.fromText (trim s)
 
 Stage.partitionWork :
-  PreparedQuery r a1 Int -> [(a, Text)] ->{IO, Postgres} [(a, Text)]
+  PreparedQuery r a1 Int -> [(a, Text)] ->{IO, Postgres} [(Nat, (a, Text))]
 Stage.partitionWork pqCached work =
   use List +:
   step acc item =
@@ -5395,8 +5627,7 @@ Stage.partitionWork pqCached work =
         if isFileCachedWith pqCached videoPath mt (Nat.toInt sz) then acc
         else (sz, item) +: acc
   withSizes = List.foldLeft step [] work
-  sorted = sortBySize withSizes
-  List.map (cases (_, item) -> item) sorted
+  sortBySize withSizes
 
 Stage.probeBatch : [(a, Text)] ->{IO, Exception} [(a, Text, ProbeResult)]
 Stage.probeBatch toProbe =
@@ -5624,8 +5855,8 @@ Stage.runFfprobe path =
 
 Stage.runProbeAt : Config -> Text -> Text ->{IO, Exception} ()
 Stage.runProbeAt cfg rootText stage =
-  use List size
-  use Nat - toText
+  use List foldLeft size
+  use Nat + - toText
   use PreparedCommand close
   use Text ++
   jobs = Tuning.probeJobs (tuning cfg)
@@ -5646,17 +5877,31 @@ Stage.runProbeAt cfg rootText stage =
       pcFiles = prepareCommand upsertFileSql
       pcGate = prepareCommand upsertProbeCacheSql
       toProbe = partitionWork pqCached work
+      sumStep acc = cases (b, _) -> acc + b
+      totalBytes = foldLeft sumStep 0 toProbe
+      totalFiles = size toProbe
       _ =
         printLine
           (Text.join
             ""
             [ "[probe] to probe: "
-            , toText (size toProbe)
-            , ", cached: "
-            , toText (size work - size toProbe)
+            , toText totalFiles
+            , " ("
+            , gigabytes totalBytes
+            , "), cached: "
+            , toText (size work - totalFiles)
             ])
+      counter = IO.ref (0, 0)
+      startEpoch = epochSeconds()
       chunks = List.chunk jobs toProbe
-      _ = Db.foreach_ (runChunk stage pcFiles pcGate) chunks
+      probeChunk chunk =
+        chunkBytes = foldLeft sumStep 0 chunk
+        items = List.map (cases (_, item) -> item) chunk
+        _ = runChunk stage pcFiles pcGate items
+        (dF, dB) = Ref.read counter
+        _ = Ref.write counter (dF + size items, dB + chunkBytes)
+        Progress.report "files" totalFiles totalBytes startEpoch counter
+      _ = Db.foreach_ probeChunk chunks
       _ = close pcFiles
       _ = close pcGate
       printLine "[probe] done"
@@ -8107,8 +8352,8 @@ uniDork.alreadyImported pq claimedCrc =
 
 uniDork.batchedMain : Config -> Boolean -> Text ->{IO, Exception} ()
 uniDork.batchedMain cfg force configPath =
-  use List size
-  use Nat toText
+  use List foldLeft size
+  use Nat + toText
   use Text join
   configText = readFileUtf8 (FilePath configPath)
   dirs = List.filterMap parseConfigLine (lines configText)
@@ -8117,7 +8362,20 @@ uniDork.batchedMain cfg force configPath =
   folders = collectFolders dirs
   total = size folders
   _ = printLine (join "" ["found ", toText total, " folders to process"])
-  batches = List.chunk batchSize folders
+  sized = List.map (f -> (f, folderVideoBytes f)) folders
+  sumStep acc = cases (_, b) -> acc + b
+  totalBytes = foldLeft sumStep 0 sized
+  _ =
+    printLine
+      (join
+        ""
+        [ "[import] plan: "
+        , gigabytes totalBytes
+        , " of video (already-imported folders skip fast)"
+        ])
+  counter = IO.ref (0, 0)
+  startEpoch = epochSeconds()
+  batches = List.chunk batchSize sized
   nBatches = size batches
   _ =
     printLine
@@ -8129,10 +8387,11 @@ uniDork.batchedMain cfg force configPath =
         , toText batchSize
         ])
   step i batch =
-    use Nat +
-    _ = runBatchSafe cfg force i nBatches batch
+    _ =
+      runBatchSafe
+        cfg force i nBatches total totalBytes startEpoch counter batch
     i + 1
-  _ = List.foldLeft step 1 batches
+  _ = foldLeft step 1 batches
   printLine "done"
 
 uniDork.batchedRun : Config ->{IO, Exception} ()
@@ -8223,9 +8482,19 @@ uniDork.identify cfg =
       close pcDet
   else printLine ("staging not found: " ++ stagingText)
 
-uniDork.processBatch : Config -> Boolean -> [FilePath] ->{IO, Exception} ()
-uniDork.processBatch cfg force folders = 
+uniDork.processBatch :
+  Config
+  -> Boolean
+  -> Nat
+  -> Nat
+  -> Nat
+  -> Ref {IO} (Nat, Nat)
+  -> [(FilePath, Nat)]
+  ->{IO, Exception} ()
+uniDork.processBatch
+  cfg force totalFolders totalBytes startEpoch counter folders = 
   singleIO (toClientConfig cfg) do
+    use Nat +
     pqImported = prepareQuery selectImportedCrcSql
     pcFiles = prepareCommand upsertFileSql
     pcUpsert = prepareCommand upsertMovieSql
@@ -8249,35 +8518,40 @@ uniDork.processBatch cfg force folders =
     pcDDir = prepareCommand (deleteChildSql "movie_directors")
     pcCre = prepareCommand insertCreditSql
     pcDCre = prepareCommand (deleteChildSql "movie_credits")
-    _ =
-      Db.foreach_
-        (processOne
-          cfg
-          force
-          pqImported
-          pcFiles
-          pcUpsert
-          pcVid
-          pcDVid
-          pcAud
-          pcDAud
-          pcSub
-          pcDSub
-          pcAct
-          pcDAct
-          pcGen
-          pcDGen
-          pcTag
-          pcDTag
-          pcCou
-          pcDCou
-          pcStu
-          pcDStu
-          pcDir
-          pcDDir
-          pcCre
-          pcDCre)
-        folders
+    oneWithProgress = cases
+      (folder, bytes) ->
+        _ =
+          processOne
+            cfg
+            force
+            pqImported
+            pcFiles
+            pcUpsert
+            pcVid
+            pcDVid
+            pcAud
+            pcDAud
+            pcSub
+            pcDSub
+            pcAct
+            pcDAct
+            pcGen
+            pcDGen
+            pcTag
+            pcDTag
+            pcCou
+            pcDCou
+            pcStu
+            pcDStu
+            pcDir
+            pcDDir
+            pcCre
+            pcDCre
+            folder
+        (dF, dB) = Ref.read counter
+        _ = Ref.write counter (dF + 1, dB + bytes)
+        Progress.report "folders" totalFolders totalBytes startEpoch counter
+    _ = Db.foreach_ oneWithProgress folders
     _ = PreparedQuery.close pqImported
     _ = PreparedCommand.close pcFiles
     _ = PreparedCommand.close pcUpsert
@@ -8473,8 +8747,18 @@ uniDork.renameNewCombined cfg fullFormat =
         runNew cfg folderFmt fileFmt ()
 
 uniDork.runBatchSafe :
-  Config -> Boolean -> Nat -> Nat -> [FilePath] ->{IO, Exception} ()
-uniDork.runBatchSafe cfg force i n batch =
+  Config
+  -> Boolean
+  -> Nat
+  -> Nat
+  -> Nat
+  -> Nat
+  -> Nat
+  -> Ref {IO} (Nat, Nat)
+  -> [(FilePath, Nat)]
+  ->{IO, Exception} ()
+uniDork.runBatchSafe
+  cfg force i n totalFolders totalBytes startEpoch counter batch =
   use Nat toText
   use Text join
   _ =
@@ -8489,7 +8773,8 @@ uniDork.runBatchSafe cfg force i n batch =
         , toText (List.size batch)
         , " folders)"
         ])
-  match catch do processBatch cfg force batch with
+  match catch do
+    processBatch cfg force totalFolders totalBytes startEpoch counter batch with
     Right _ -> ()
     Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
 
