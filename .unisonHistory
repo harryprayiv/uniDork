@@ -1,6 +1,15 @@
 compile cli ./bin/unidork-import
 edit.namespace .
 compile cli ./bin/unidork-import
+update
+[Bq
+update
+edit.namespace .
+cancel
+update
+compile cli ./bin/unidork-import
+edit.namespace .
+compile cli ./bin/unidork-import
 edit.namespace .
 compile cli ./bin/unidork-import
 update
