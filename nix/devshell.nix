@@ -39,7 +39,12 @@ pkgs.mkShell {
     export UNIDORK_PATH_BUFFER="${config.paths.buffer}"
     export UNIDORK_PATH_LIBRARY="${config.paths.library}"
 
+    export UNIDORK_PATH_TV_INTAKE="${config.paths.tvIntake}"
+    export UNIDORK_PATH_TV_BUFFER="${config.paths.tvBuffer}"
+    export UNIDORK_PATH_TV_LIBRARY="${config.paths.tvLibrary}"
+
     export UNIDORK_FORMAT_MOVIE="${config.rename.movieFormat}"
+    export UNIDORK_FORMAT_TV="${config.rename.tvFormat}"
 
     export UNIDORK_TOKEN_TMDB="${config.tmdb.tokenFile}"
     export UNIDORK_TOKEN_SUB="${config.subs.tokenFile}"
@@ -53,8 +58,10 @@ pkgs.mkShell {
     export PGHOST="$PGDATA"
 
     echo ""
-    echo "  uniDork — run 'unidork help' for the orchestrator."
-    echo "  Common: unidork run | unidork status | unidork rename --apply"
+    echo "  uniDork dev shell"
+    echo "  Movies:  unidork process | move | identify | status"
+    echo "  TV:      unidork tv-process | tv-identify"
+    echo "  Both:    unidork run-all"
     echo ""
   '';
 }

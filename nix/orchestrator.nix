@@ -19,33 +19,47 @@ pkgs.writeShellApplication {
     : "''${PGDATA:=${config.database.dataDir}}"
     export PGDATA
 
+    # ── database ──────────────────────────────────────────────────────
     : "''${UNIDORK_DB_HOST:=${config.database.host}}"
     : "''${UNIDORK_DB_PORT:=${toString config.database.port}}"
     : "''${UNIDORK_DB_USER:=${config.database.user}}"
     : "''${UNIDORK_DB_NAME:=${config.database.name}}"
     export UNIDORK_DB_HOST UNIDORK_DB_PORT UNIDORK_DB_USER UNIDORK_DB_NAME
 
+    # ── cache ─────────────────────────────────────────────────────────
     : "''${UNIDORK_CACHE_FFPROBE:=${config.cache.ffprobeDir}}"
     : "''${UNIDORK_CACHE_STAGE:=${config.cache.stageDir}}"
     export UNIDORK_CACHE_FFPROBE UNIDORK_CACHE_STAGE
 
+    # ── movie paths ───────────────────────────────────────────────────
     : "''${UNIDORK_PATH_CONFIG:=${config.paths.configFile}}"
     : "''${UNIDORK_PATH_INTAKE:=${config.paths.intake}}"
     : "''${UNIDORK_PATH_BUFFER:=${config.paths.buffer}}"
     : "''${UNIDORK_PATH_LIBRARY:=${config.paths.library}}"
     export UNIDORK_PATH_CONFIG UNIDORK_PATH_INTAKE UNIDORK_PATH_BUFFER UNIDORK_PATH_LIBRARY
 
-    : "''${UNIDORK_FORMAT_MOVIE:=${config.rename.movieFormat}}"
-    export UNIDORK_FORMAT_MOVIE
+    # ── tv paths ──────────────────────────────────────────────────────
+    : "''${UNIDORK_PATH_TV_INTAKE:=${config.paths.tvIntake}}"
+    : "''${UNIDORK_PATH_TV_BUFFER:=${config.paths.tvBuffer}}"
+    : "''${UNIDORK_PATH_TV_LIBRARY:=${config.paths.tvLibrary}}"
+    export UNIDORK_PATH_TV_INTAKE UNIDORK_PATH_TV_BUFFER UNIDORK_PATH_TV_LIBRARY
 
+    # ── formats ───────────────────────────────────────────────────────
+    : "''${UNIDORK_FORMAT_MOVIE:=${config.rename.movieFormat}}"
+    : "''${UNIDORK_FORMAT_TV:=${config.rename.tvFormat}}"
+    export UNIDORK_FORMAT_MOVIE UNIDORK_FORMAT_TV
+
+    # ── tokens ────────────────────────────────────────────────────────
     : "''${UNIDORK_TOKEN_TMDB:=${config.tmdb.tokenFile}}"
     : "''${UNIDORK_TOKEN_SUB:=${config.subs.tokenFile}}"
     export UNIDORK_TOKEN_TMDB UNIDORK_TOKEN_SUB
 
+    # ── tuning ────────────────────────────────────────────────────────
     : "''${UNIDORK_TUNE_PROBE_JOBS:=${toString config.tuning.probeJobs}}"
     : "''${UNIDORK_TUNE_SUB_LANGS:=${lib.concatStringsSep "," config.subs.languages}}"
     export UNIDORK_TUNE_PROBE_JOBS UNIDORK_TUNE_SUB_LANGS
 
+    # ── psql convenience ──────────────────────────────────────────────
     export PGPORT="$UNIDORK_DB_PORT"
     export PGUSER="$UNIDORK_DB_USER"
     export PGDATABASE="$UNIDORK_DB_NAME"
@@ -63,26 +77,81 @@ pkgs.writeShellApplication {
       fi
     }
 
+    # ── postgres lifecycle ────────────────────────────────────────────
     cmd_start()  { pg-start; }
     cmd_stop()   { pg-stop; }
 
+    # ── movie commands ────────────────────────────────────────────────
     cmd_probe()    { ensure_pg; unidork-import probe-stage; }
     cmd_resolve()  { ensure_pg; unidork-import resolve; }
     cmd_identify() { ensure_pg; unidork-import identify; }
+    cmd_process()  { ensure_pg; unidork-import process; }
+    cmd_move()     { ensure_pg; unidork-import move "$@"; }
 
     cmd_reconcile()      { ensure_pg; unidork-import reconcile; }
     cmd_import_library() { ensure_pg; unidork-import import-library "$UNIDORK_PATH_CONFIG"; }
     cmd_import_all()     { ensure_pg; unidork-import import-all "$UNIDORK_PATH_CONFIG"; }
 
-    cmd_process() { ensure_pg; unidork-import process; }
+    cmd_rename() {
+      ensure_pg
+      apply=0
+      for a in "$@"; do [ "$a" = "--apply" ] && apply=1; done
+      if [ "$apply" -ne 1 ]; then
+        echo "rename is destructive. pass --apply to actually move files."
+        echo "for a read-only TMDB report: unidork identify"
+        exit 1
+      fi
+      unidork-import rename "$UNIDORK_FORMAT_MOVIE"
+    }
 
-    cmd_move() { ensure_pg; unidork-import move "$@"; }
+    # ── tv commands ───────────────────────────────────────────────────
+    cmd_tv_init()     { ensure_pg; unidork-import tv-init; }
+    cmd_tv_probe()    { ensure_pg; unidork-import tv-probe; }
+    cmd_tv_resolve()  { ensure_pg; unidork-import tv-resolve; }
+    cmd_tv_identify() { ensure_pg; unidork-import tv-identify; }
+    cmd_tv_process()  { ensure_pg; unidork-import tv-process; }
+
+    cmd_tv_rename() {
+      ensure_pg
+      apply=0
+      for a in "$@"; do [ "$a" = "--apply" ] && apply=1; done
+      if [ "$apply" -ne 1 ]; then
+        echo "tv-rename is destructive. pass --apply to actually move files."
+        echo "for a read-only report: unidork tv-identify"
+        exit 1
+      fi
+      unidork-import tv-rename
+    }
+
+    # ── combined commands ─────────────────────────────────────────────
+    cmd_process_all() {
+      ensure_pg
+      echo "[orchestrator] === movie process ==="
+      unidork-import process
+      echo ""
+      echo "[orchestrator] === tv process ==="
+      unidork-import tv-process
+      echo ""
+      echo "[orchestrator] both pipelines done."
+      echo "  review movie buffer: $UNIDORK_PATH_BUFFER"
+      echo "  review tv buffer:    $UNIDORK_PATH_TV_BUFFER"
+    }
+
+    cmd_run_all() {
+      echo "[orchestrator] start -> import-library -> movie process -> tv process"
+      cmd_start
+      cmd_import_library
+      cmd_process
+      cmd_tv_process
+      echo "[orchestrator] done."
+    }
 
     cmd_probe_resolve() {
       cmd_probe
       cmd_resolve
     }
 
+    # ── utility ───────────────────────────────────────────────────────
     cmd_clean_stage() {
       ensure_pg
       echo "[clean-stage] truncating probe_cache"
@@ -90,86 +159,114 @@ pkgs.writeShellApplication {
       echo "[clean-stage] done (files + associations left intact)"
     }
 
-    cmd_rename() {
-      ensure_pg
-      apply=0
-      for a in "$@"; do [ "$a" = "--apply" ] && apply=1; done
-      if [ "$apply" -ne 1 ]; then
-        echo "rename is destructive — pass --apply to actually move files."
-        echo "for a read-only TMDB report: unidork identify"
-        exit 1
-      fi
-      unidork-import rename "$UNIDORK_FORMAT_MOVIE"
-    }
-
     cmd_status() {
       ensure_pg
+      echo "=== files ==="
       psql -At <<'SQL'
-SELECT '  files:            ' || COUNT(*)::text FROM files;
-SELECT '  buffer files:     ' || COUNT(*)::text FROM files WHERE stage = 'buffer';
-SELECT '  library files:    ' || COUNT(*)::text FROM files WHERE stage = 'library';
-SELECT '  library movies:   ' || COUNT(*)::text FROM library_movies;
-SELECT '  crc mismatches:   ' || COUNT(*)::text FROM library_movies WHERE crc32 IS NOT NULL AND crc32 <> folder_checksum;
-SELECT '  movies:           ' || COUNT(*)::text FROM movies;
-SELECT '  associations:     ' || COUNT(*)::text FROM associations;
-SELECT '  probe cache:      ' || COUNT(*)::text FROM probe_cache;
-SELECT '  tmdb searches:    ' || COUNT(*)::text FROM tmdb_search_cache;
+SELECT '  total:              ' || COUNT(*)::text FROM files;
+SELECT '  staging (movie):    ' || COUNT(*)::text FROM files WHERE stage = 'staging' AND media_kind = 'movie';
+SELECT '  staging (episode):  ' || COUNT(*)::text FROM files WHERE stage = 'staging' AND media_kind = 'episode';
+SELECT '  buffer:             ' || COUNT(*)::text FROM files WHERE stage = 'buffer';
+SELECT '  library:            ' || COUNT(*)::text FROM files WHERE stage = 'library';
 SQL
+      echo "=== movies ==="
+      psql -At <<'SQL'
+SELECT '  tmdb movies:        ' || COUNT(*)::text FROM movies;
+SELECT '  associations:       ' || COUNT(*)::text FROM associations;
+SELECT '  library_movies:     ' || COUNT(*)::text FROM library_movies;
+SQL
+      # tv tables may not exist yet; guard with a check
+      if psql -At -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'shows'" 2>/dev/null | grep -q 1; then
+        echo "=== tv ==="
+        psql -At <<'SQL'
+SELECT '  shows:              ' || COUNT(*)::text FROM shows;
+SELECT '  episodes:           ' || COUNT(*)::text FROM episodes;
+SELECT '  ep associations:    ' || COUNT(*)::text FROM episode_associations;
+SQL
+      fi
+      echo "=== cache ==="
+      psql -At <<'SQL'
+SELECT '  probe_cache:        ' || COUNT(*)::text FROM probe_cache;
+SELECT '  tmdb searches:      ' || COUNT(*)::text FROM tmdb_search_cache;
+SQL
+      if psql -At -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'tmdb_tv_search_cache'" 2>/dev/null | grep -q 1; then
+        psql -At <<'SQL'
+SELECT '  tmdb tv searches:   ' || COUNT(*)::text FROM tmdb_tv_search_cache;
+SELECT '  season cache:       ' || COUNT(*)::text FROM tmdb_season_cache;
+SQL
+      fi
     }
 
-    cmd_run() {
-      echo "[orchestrator] start -> probe-stage -> import-library -> resolve"
-      cmd_start
-      cmd_probe
-      cmd_import_library
-      cmd_resolve
-      echo "[orchestrator] done. review, then: unidork rename --apply"
-    }
-
+    # ── dispatch ──────────────────────────────────────────────────────
     case "$cmd" in
+      # postgres
       start)          cmd_start ;;
       stop)           cmd_stop ;;
-      status)         cmd_status ;;
-      probe)          cmd_probe ;;
-      probe-stage)    cmd_probe ;;
-      probe-resolve)  cmd_probe_resolve ;;
-      process)        cmd_process ;;
-      reconcile)      cmd_reconcile ;;
-      import-buffer)  cmd_reconcile ;;
-      import-library) cmd_import_library ;;
-      import-all)     cmd_import_all ;;
-      move)           cmd_move "$@" ;;
-      resolve)        cmd_resolve ;;
-      identify)       cmd_identify ;;
-      rename)         cmd_rename "$@" ;;
-      run)            cmd_run ;;
-      psql|connect)   pg-connect ;;
-      clean-stage)    cmd_clean_stage ;;
-      logs)           ls -la "$log_dir" 2>/dev/null || echo "no logs yet at $log_dir" ;;
+
+      # movie pipeline
+      probe|probe-stage)   cmd_probe ;;
+      resolve)             cmd_resolve ;;
+      identify)            cmd_identify ;;
+      process)             cmd_process ;;
+      move)                cmd_move "$@" ;;
+      rename)              cmd_rename "$@" ;;
+      probe-resolve)       cmd_probe_resolve ;;
+      reconcile|import-buffer) cmd_reconcile ;;
+      import-library)      cmd_import_library ;;
+      import-all)          cmd_import_all ;;
+
+      # tv pipeline
+      tv-init)             cmd_tv_init ;;
+      tv-probe)            cmd_tv_probe ;;
+      tv-resolve)          cmd_tv_resolve ;;
+      tv-identify)         cmd_tv_identify ;;
+      tv-rename)           cmd_tv_rename "$@" ;;
+      tv-process)          cmd_tv_process ;;
+
+      # combined
+      process-all)         cmd_process_all ;;
+      run-all)             cmd_run_all ;;
+      run)                 cmd_run_all ;;
+
+      # utility
+      status)              cmd_status ;;
+      psql|connect)        pg-connect ;;
+      clean-stage)         cmd_clean_stage ;;
+      logs)                ls -la "$log_dir" 2>/dev/null || echo "no logs yet at $log_dir" ;;
+
       help|--help|-h|"")
         cat <<EOF
 unidork - pipeline orchestrator
 
-Usage: unidork <command>
+MOVIE PIPELINE
+  process           probe intake + resolve + rename -> movie buffer  (DESTRUCTIVE)
+  probe             probe movie intake -> files (stage=staging, media_kind=movie)
+  resolve           associate staging movie files -> tmdb movies
+  identify          read-only TMDB match report for movie intake
+  rename --apply    rename staging movies into buffer                (DESTRUCTIVE)
+  move [folder]     promote buffer folder(s) into movie library     (DESTRUCTIVE)
+  reconcile         probe movie buffer (repair/record existing files)
+  import-library    scan library dirs -> files + library_movies
+  import-all        reconcile + import-library
 
-  process         DESTRUCTIVE: probe-stage + resolve + rename (intake -> buffer)
-  run             start + probe-stage + import-library + resolve
-  start | stop    postgres lifecycle
-  status          row counts (files split by stage)
-  probe-stage     intake probes -> files (stage=staging)
-  probe-resolve   probe then resolve
-  reconcile       record/repair buffer entries (only probes files uniDork didn't put there)
-  import-library  library -> files + library_movies (stage=library)
-  import-all      reconcile then import-library
-  move [folder]   promote buffer folder(s) into the library
-                  (DESTRUCTIVE: rsync to library + delete from buffer;
-                   aborts if the destination folder already exists)
-  resolve         associate files -> movies (skips stage=buffer)
-  identify        read-only TMDB report
-  rename --apply  DESTRUCTIVE: moves intake files into the buffer
-  logs            list stderr log files
-  psql            interactive psql to ''${UNIDORK_DB_NAME}
-  clean-stage     truncate probe_cache
+TV PIPELINE
+  tv-process        probe tv intake + resolve + rename -> tv buffer  (DESTRUCTIVE)
+  tv-probe          probe tv intake -> files (stage=staging, media_kind=episode)
+  tv-resolve        associate staging episode files -> shows/episodes
+  tv-identify       read-only TMDB match report for tv intake
+  tv-rename --apply rename staging episodes into tv buffer           (DESTRUCTIVE)
+  tv-init           create tv schema tables (runs automatically on tv-probe)
+
+COMBINED
+  process-all       movie process then tv process                    (DESTRUCTIVE)
+  run               import-library + movie process + tv process
+
+UTILITY
+  start | stop      postgres lifecycle
+  status            row counts across all tables
+  psql              interactive psql session
+  clean-stage       truncate probe_cache
+  logs              list log files
 EOF
         ;;
       *) echo "unknown command: $cmd" >&2; exit 1 ;;

@@ -365,7 +365,8 @@ type Tv.Resolve.FileRow
       originalName : Text,
       hintTitle : Optional Text,
       hintYear : Optional Nat,
-      hintShowTmdbId : Optional Nat }
+      hintShowTmdbId : Optional Nat,
+      hintImdbId : Optional Text }
 
 type Tv.Resolve.Outcome
   = NoEpisodeRef Int Text
@@ -382,7 +383,8 @@ type Tv.Tmdb.CachedSearch
       error : Optional Text }
 
 type Tv.Tmdb.EpisodeDetails
-  = { season : Nat,
+  = { episodeId : Nat,
+      season : Nat,
       episode : Nat,
       title : Text,
       airDate : Text,
@@ -409,7 +411,11 @@ type Tv.Tmdb.ShowDetails
       genres : [Text],
       rating : Text,
       imdbId : Optional Text,
-      tvdbId : Optional Nat }
+      tvdbId : Optional Nat,
+      voteAverage : Float,
+      voteCount : Nat,
+      networks : [Text],
+      cast : [CastMember] }
 
 type Tv.Tmdb.ShowResult
   = { tmdbId : Nat,
@@ -772,6 +778,7 @@ Db.filesDdl =
     , "  proposed_name   TEXT,"
     , "  proposed_folder TEXT,"
     , "  stage           TEXT NOT NULL DEFAULT 'library',"
+    , "  media_kind      TEXT NOT NULL DEFAULT 'movie',"
     , "  probed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
     , "  UNIQUE (crc32, size_bytes)"
     , ")"
@@ -968,6 +975,7 @@ Db.migrate cfg =
         , "ALTER TABLE library_movies ADD COLUMN IF NOT EXISTS size_bytes BIGINT"
         , "ALTER TABLE library_movies ADD COLUMN IF NOT EXISTS actual_runtime_sec INTEGER"
         , "ALTER TABLE files ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'library'"
+        , "ALTER TABLE files ADD COLUMN IF NOT EXISTS media_kind TEXT NOT NULL DEFAULT 'movie'"
         ]
     runDDLList Db.indexDdl
 
@@ -5136,7 +5144,7 @@ Resolve.selectUnresolvedSql :
 Resolve.selectUnresolvedSql =
   use Codec optional text
   sql
-    "SELECT f.file_id, f.original_name, f.duration_sec, f.hint_title, f.hint_year, f.hint_tmdb_id FROM files f LEFT JOIN associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.stage <> 'buffer'"
+    "SELECT f.file_id, f.original_name, f.duration_sec, f.hint_title, f.hint_year, f.hint_tmdb_id FROM files f LEFT JOIN associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.stage <> 'buffer' AND f.media_kind = 'movie'"
     |> typedQuery
       (bigint
         ~ text
@@ -8460,6 +8468,7 @@ Tv.Db.alterFilesDdl : [Text]
 Tv.Db.alterFilesDdl =
   [ "ALTER TABLE files ADD COLUMN IF NOT EXISTS media_kind TEXT NOT NULL DEFAULT 'movie'"
   , "ALTER TABLE files ADD COLUMN IF NOT EXISTS hint_show_tmdb_id INTEGER"
+  , "ALTER TABLE files ADD COLUMN IF NOT EXISTS hint_imdb_id TEXT"
   , "ALTER TABLE files ADD COLUMN IF NOT EXISTS hint_season INTEGER"
   , "ALTER TABLE files ADD COLUMN IF NOT EXISTS hint_episode INTEGER"
   ]
@@ -8574,9 +8583,11 @@ Tv.Nfo.episodeBlock :
   -> [Text]
 Tv.Nfo.episodeBlock showName seasonNum epNum fallbackTitle details first crc pr =
   use EpisodeDetails voteCount
+  use List flatMap
   use Nat >
-  use Text ++ size
+  use Text size
   use Universal eq
+  use VideoInfo height width
   esc = escapeXml
   title = match details with
     Some d ->
@@ -8585,7 +8596,15 @@ Tv.Nfo.episodeBlock showName seasonNum epNum fallbackTitle details first crc pr 
     None   -> fallbackTitle
   optLine tag value =
     if eq (size value) 0 then []
-    else ["  <" ++ tag ++ ">" ++ esc value ++ "</" ++ tag ++ ">"]
+    else
+      [ "  <"
+          Text.++ tag
+          Text.++ ">"
+          Text.++ esc value
+          Text.++ "</"
+          Text.++ tag
+          Text.++ ">"
+      ]
   plotLines = match details with
     Some d -> optLine "plot" (EpisodeDetails.overview d)
     None   -> []
@@ -8595,7 +8614,7 @@ Tv.Nfo.episodeBlock showName seasonNum epNum fallbackTitle details first crc pr 
   runtimeLines = match details with
     Some d ->
       match EpisodeDetails.runtimeMin d with
-        Some r -> ["  <runtime>" ++ Nat.toText r ++ "</runtime>"]
+        Some r -> ["  <runtime>" Text.++ Nat.toText r Text.++ "</runtime>"]
         None   -> []
     None   -> []
   ratingLines =
@@ -8603,69 +8622,160 @@ Tv.Nfo.episodeBlock showName seasonNum epNum fallbackTitle details first crc pr 
       Some d ->
         if voteCount d > 0 then
           [ "  <ratings>"
-          , "    <rating name=\"tmdb\" max=\"10\" default=\"true\">"
+          , "    <rating name=\"themoviedb\" max=\"10\" default=\"true\">"
           , "      <value>"
-              ++ Float.toText (EpisodeDetails.voteAverage d)
-              ++ "</value>"
-          , "      <votes>" ++ Nat.toText (voteCount d) ++ "</votes>"
+              Text.++ Float.toText (EpisodeDetails.voteAverage d)
+              Text.++ "</value>"
+          , "      <votes>" Text.++ Nat.toText (voteCount d) Text.++ "</votes>"
           , "    </rating>"
           , "  </ratings>"
           ]
         else []
       None -> []
+  tmdbIdLines =
+    match details with
+      Some d ->
+        use Text ++
+        eid = episodeId d
+        if eid > 0 then
+          ["  <uniqueid type=\"tmdb\">" ++ Nat.toText eid ++ "</uniqueid>"]
+        else []
+      None -> []
   vid = ProbeResult.video pr
   durSec = durationSeconds (ProbeResult.durationSec pr)
+  videoLines =
+    [ "      <video>"
+    , "        <codec>" Text.++ esc (VideoInfo.codec vid) Text.++ "</codec>"
+    , "        <aspect>"
+        Text.++ aspectRatio (width vid) (height vid)
+        Text.++ "</aspect>"
+    , "        <width>" Text.++ Nat.toText (width vid) Text.++ "</width>"
+    , "        <height>" Text.++ Nat.toText (height vid) Text.++ "</height>"
+    , "        <durationinseconds>"
+        Text.++ Nat.toText durSec
+        Text.++ "</durationinseconds>"
+    , "      </video>"
+    ]
+  audioLines = flatMap audioBlock (ProbeResult.audios pr)
+  subtitleLines = flatMap subtitleBlock (ProbeResult.subtitles pr)
   fileinfoLines =
     if first then
-      [ "  <fileinfo>"
-      , "    <streamdetails>"
-      , "      <video>"
-      , "        <codec>" ++ esc (VideoInfo.codec vid) ++ "</codec>"
-      , "        <width>" ++ Nat.toText (VideoInfo.width vid) ++ "</width>"
-      , "        <height>" ++ Nat.toText (VideoInfo.height vid) ++ "</height>"
-      , "        <durationinseconds>"
-          ++ Nat.toText durSec
-          ++ "</durationinseconds>"
-      , "      </video>"
-      , "    </streamdetails>"
-      , "  </fileinfo>"
-      ]
+      ["  <fileinfo>", "    <streamdetails>"]
+        List.++ videoLines
+        List.++ audioLines
+        List.++ subtitleLines
+        List.++ ["    </streamdetails>", "  </fileinfo>"]
     else []
-  List.flatMap
+  flatMap
     (x -> x)
     [ [ "<episodedetails>"
-      , "  <title>" ++ esc title ++ "</title>"
-      , "  <showtitle>" ++ esc showName ++ "</showtitle>"
-      , "  <season>" ++ Nat.toText seasonNum ++ "</season>"
-      , "  <episode>" ++ Nat.toText epNum ++ "</episode>"
+      , "  <title>" Text.++ esc title Text.++ "</title>"
+      , "  <showtitle>" Text.++ esc showName Text.++ "</showtitle>"
+      , "  <season>" Text.++ Nat.toText seasonNum Text.++ "</season>"
+      , "  <episode>" Text.++ Nat.toText epNum Text.++ "</episode>"
       ]
     , plotLines
     , airedLines
     , runtimeLines
     , ratingLines
-    , ["  <uniqueid type=\"crc32\">" ++ esc crc ++ "</uniqueid>"]
+    , ["  <uniqueid type=\"crc32\">" Text.++ esc crc Text.++ "</uniqueid>"]
+    , tmdbIdLines
     , fileinfoLines
     , ["</episodedetails>"]
     ]
 
+Tv.Nfo.extractImdbId : Text -> Optional Text
+Tv.Nfo.extractImdbId raw =
+  use Nat + >=
+  use Text size
+  needle = "imdb.com/title/"
+  match Text.indexOf needle raw with
+    None -> None
+    Some i ->
+      after = Text.drop (i + size needle) raw
+      parts = Text.split ?/ after
+      match List.head parts with
+        None -> None
+        Some seg ->
+          cleaned = trim seg
+          if startsWith "tt" cleaned && size cleaned >= 7 then Some cleaned
+          else None
+
+test> Tv.Nfo.extractImdbId.test =
+  use Tv.Nfo extractImdbId
+  use Universal eq
+  List.flatMap
+    check
+    [ eq
+        (extractImdbId "IMDB: https://www.imdb.com/title/tt34675596/")
+        (Some "tt34675596")
+    , eq (extractImdbId "http://imdb.com/title/tt1234567") (Some "tt1234567")
+    , eq (extractImdbId "no link here") None
+    , eq (extractImdbId "imdb.com/title/tt12") None
+    , eq (extractImdbId "imdb.com/title/notanid/") None
+    ]
+
 Tv.Nfo.generateShowNfo : ShowDetails -> Text
 Tv.Nfo.generateShowNfo d =
-  use Nat toText
-  use Text ++
+  use List flatMap
+  use Nat >
+  use ShowDetails firstAirDate imdbId tmdbId voteCount
+  use Text ++ join
   esc = escapeXml
   optLine tag value =
     if Universal.eq (Text.size value) 0 then []
     else ["  <" ++ tag ++ ">" ++ esc value ++ "</" ++ tag ++ ">"]
+  epGuideJson =
+    use Nat toText
+    use Optional map
+    parts =
+      List.filterMap
+        (x -> x)
+        [ Some ("\"tmdb\": \"" ++ toText (tmdbId d) ++ "\"")
+        , map (i -> "\"imdb\": \"" ++ i ++ "\"") (imdbId d)
+        , map (t -> "\"tvdb\": \"" ++ toText t ++ "\"") (tvdbId d)
+        ]
+    "{" ++ join ", " parts ++ "}"
+  epGuideLine = ["  <episodeguide>" ++ epGuideJson ++ "</episodeguide>"]
+  ratingLines =
+    if voteCount d > 0 then
+      [ "  <ratings>"
+      , "    <rating name=\"themoviedb\" max=\"10\" default=\"true\">"
+      , "      <value>"
+          ++ Float.toText (ShowDetails.voteAverage d)
+          ++ "</value>"
+      , "      <votes>" ++ Nat.toText (voteCount d) ++ "</votes>"
+      , "    </rating>"
+      , "  </ratings>"
+      ]
+    else []
+  sortTitle = Nfo.sortTitle (ShowDetails.name d) (firstAirDate d)
   genreLines =
     List.map (g -> "  <genre>" ++ esc g ++ "</genre>") (ShowDetails.genres d)
-  imdbLines = match ShowDetails.imdbId d with
+  networkLines =
+    List.map (n -> "  <studio>" ++ esc n ++ "</studio>") (networks d)
+  actorLines =
+    flatMap
+      (a ->
+        [ "  <actor>"
+        , "    <name>" ++ esc (CastMember.name a) ++ "</name>"
+        , "    <role>" ++ esc (character a) ++ "</role>"
+        , "    <order>" ++ Nat.toText (order a) ++ "</order>"
+        , "  </actor>"
+        ])
+      (List.take 30 (ShowDetails.cast d))
+  imdbLines = match imdbId d with
     None   -> []
     Some i -> ["  <uniqueid type=\"imdb\">" ++ esc i ++ "</uniqueid>"]
   tvdbLines = match tvdbId d with
     None   -> []
-    Some t -> ["  <uniqueid type=\"tvdb\">" ++ toText t ++ "</uniqueid>"]
+    Some t -> ["  <uniqueid type=\"tvdb\">" ++ Nat.toText t ++ "</uniqueid>"]
+  seasonLine =
+    if numberOfSeasons d > 0 then
+      ["  <season>" ++ Nat.toText (numberOfSeasons d) ++ "</season>"]
+    else []
   allLines =
-    List.flatMap
+    flatMap
       (x -> x)
       [ [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
         , "<tvshow>"
@@ -8673,32 +8783,41 @@ Tv.Nfo.generateShowNfo d =
         , "  <originaltitle>"
             ++ esc (ShowDetails.originalName d)
             ++ "</originaltitle>"
+        , "  <sorttitle>" ++ esc sortTitle ++ "</sorttitle>"
         , "  <plot>" ++ esc (ShowDetails.overview d) ++ "</plot>"
         ]
-      , optLine "premiered" (ShowDetails.firstAirDate d)
-      , optLine "status" (ShowDetails.status d)
+      , ratingLines
       , optLine "mpaa" (ShowDetails.rating d)
+      , epGuideLine
+      , optLine "premiered" (firstAirDate d)
+      , optLine "status" (ShowDetails.status d)
+      , seasonLine
       , genreLines
+      , networkLines
+      , actorLines
       , [ "  <uniqueid type=\"tmdb\" default=\"true\">"
-            ++ toText (ShowDetails.tmdbId d)
+            ++ Nat.toText (tmdbId d)
             ++ "</uniqueid>"
         ]
       , imdbLines
       , tvdbLines
+      , optLine "originallanguage" (ShowDetails.originalLanguage d)
       , ["</tvshow>", ""]
       ]
-  Text.join "\n" allLines
+  join "\n" allLines
 
 Tv.Nfo.minimalShowNfo : Nat -> Text -> Text
 Tv.Nfo.minimalShowNfo showId name =
   use Text ++
+  tmdbText = Nat.toText showId
   Text.join
     "\n"
     [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
     , "<tvshow>"
     , "  <title>" ++ escapeXml name ++ "</title>"
+    , "  <episodeguide>{\"tmdb\": \"" ++ tmdbText ++ "\"}</episodeguide>"
     , "  <uniqueid type=\"tmdb\" default=\"true\">"
-        ++ Nat.toText showId
+        ++ tmdbText
         ++ "</uniqueid>"
     , "</tvshow>"
     , ""
@@ -8724,6 +8843,23 @@ Tv.Nfo.readShowTmdbId folder =
               match withXML xml parseShowId with
                 Right (idOpt +: _) -> idOpt
                 _                  -> None
+
+Tv.Nfo.scanFolderForImdb : FilePath ->{IO, Exception} Optional Text
+Tv.Nfo.scanFolderForImdb folder =
+  match catch do directoryContents.texts folder with
+    Left _      -> None
+    Right files ->
+      nfos = List.filter isNfo files
+      go = cases
+        []        -> None
+        n +: rest ->
+          match catch do readFileUtf8 (pathJoin folder n) with
+            Left _    -> go rest
+            Right raw ->
+              match Tv.Nfo.extractImdbId raw with
+                Some id -> Some id
+                None    -> go rest
+      go nfos
 
 Tv.Parse.epSegment : Text -> Optional [Nat]
 Tv.Parse.epSegment t =
@@ -9309,6 +9445,7 @@ Tv.Resolve.resolveOne :
   -> PreparedCommand r1 a1
   -> PreparedCommand rA aA
   -> PreparedCommand rD aD
+  -> PreparedQuery rI aI Int
   -> Text
   -> Tv.Resolve.FileRow
   ->{IO, Postgres} Tv.Resolve.Outcome
@@ -9323,6 +9460,7 @@ Tv.Resolve.resolveOne
   pcEp
   pcAssoc
   pcDel
+  pqShowByImdb
   token
   row =
   fid = Tv.Resolve.FileRow.fileId row
@@ -9337,26 +9475,39 @@ Tv.Resolve.resolveOne
         match hintShowTmdbId row with
           Some sid -> Right (sid, 100, "nfo_id")
           None ->
-            titleOpt = match Tv.Resolve.FileRow.hintTitle row with
-              Some t -> Some t
-              None   -> titlePrefix p
-            match titleOpt with
-              None -> Left (NoShowHint fid)
-              Some t ->
-                yearOpt = Tv.Resolve.FileRow.hintYear row
-                match Tv.Tmdb.cachedSearchWith
-                  pqSearch pcSearch token t yearOpt with
-                  Left err -> Left (NoShowMatch fid err)
-                  Right resp ->
-                    candidates = Tv.Tmdb.SearchResponse.results resp
-                    scored =
-                      List.map
-                        (r -> (r, scoreShow t yearOpt None r)) candidates
-                    match pickBestShow scored with
-                      None ->
-                        Left (NoShowMatch fid "no single high-scoring match")
-                      Some (r, s) ->
-                        Right (ShowResult.tmdbId r, s, "title_year")
+            imdbHit = match hintImdbId row with
+              None      -> None
+              Some imdb ->
+                match lookupShowByImdb pqShowByImdb imdb with
+                  Some sid -> Some sid
+                  None     ->
+                    match findShowByImdb token imdb with
+                      Right sid -> Some sid
+                      Left _    -> None
+            match imdbHit with
+              Some sid -> Right (sid, 95, "imdb_find")
+              None ->
+                titleOpt = match Tv.Resolve.FileRow.hintTitle row with
+                  Some t -> Some t
+                  None   -> titlePrefix p
+                match titleOpt with
+                  None -> Left (NoShowHint fid)
+                  Some t ->
+                    yearOpt = Tv.Resolve.FileRow.hintYear row
+                    match Tv.Tmdb.cachedSearchWith
+                      pqSearch pcSearch token t yearOpt with
+                      Left err -> Left (NoShowMatch fid err)
+                      Right resp ->
+                        candidates = Tv.Tmdb.SearchResponse.results resp
+                        scored =
+                          List.map
+                            (r -> (r, scoreShow t yearOpt None r)) candidates
+                        match pickBestShow scored with
+                          None ->
+                            Left
+                              (NoShowMatch fid "no single high-scoring match")
+                          Some (r, s) ->
+                            Right (ShowResult.tmdbId r, s, "title_year")
       match showPick with
         Left o -> o
         Right (showId, conf, source) ->
@@ -9383,11 +9534,12 @@ Tv.Resolve.resolveOne
                     TvResolved fid showId seasonNum eps conf source
 
 Tv.Resolve.rowToFile :
-  ((((Int, Text), Optional Text), Optional Int), Optional Int)
+  (((((Int, Text), Optional Text), Optional Int), Optional Int), Optional Text)
   -> Tv.Resolve.FileRow
 Tv.Resolve.rowToFile = cases
-  ((((fid, oname), ht), hy), hsid) ->
-    Tv.Resolve.FileRow.FileRow fid oname ht (optIntToNat hy) (optIntToNat hsid)
+  (((((fid, oname), ht), hy), hsid), himdb) ->
+    Tv.Resolve.FileRow.FileRow
+      fid oname ht (optIntToNat hy) (optIntToNat hsid) himdb
 
 Tv.Resolve.run : Config ->{IO, Exception} ()
 Tv.Resolve.run cfg = Tv.Resolve.runWith false cfg
@@ -9407,6 +9559,7 @@ Tv.Resolve.runWith dryRun cfg =
     pcEp = prepareCommand upsertEpisodeSql
     pcAssoc = prepareCommand upsertEpAssocSql
     pcDel = prepareCommand deleteFileAssocSql
+    pqShowByImdb = prepareQuery selectShowByImdbSql
     rows = match 
       catch do
         portal = bindQuery pqFiles []
@@ -9432,6 +9585,7 @@ Tv.Resolve.runWith dryRun cfg =
           pcEp
           pcAssoc
           pcDel
+          pqShowByImdb
           token
           row
       Tv.Resolve.printOutcome outcome
@@ -9446,19 +9600,28 @@ Tv.Resolve.runWith dryRun cfg =
     _ = PreparedCommand.close pcEp
     _ = PreparedCommand.close pcAssoc
     _ = PreparedCommand.close pcDel
+    _ = PreparedQuery.close pqShowByImdb
     printLine
       (if dryRun then "[tv-identify] done (no writes)"
       else "[tv-resolve] done")
 
 Tv.Resolve.selectUnresolvedTvSql :
   postgres.Query
-    r r ((((Int, Text), Optional Text), Optional Int), Optional Int)
+    r
+    r
+    ( ((((Int, Text), Optional Text), Optional Int), Optional Int),
+      Optional Text)
 Tv.Resolve.selectUnresolvedTvSql =
   use Codec optional text
   sql
-    "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging'"
+    "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id, f.hint_imdb_id FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging'"
     |> typedQuery
-      (bigint ~ text ~ optional text ~ optional integer ~ optional integer)
+      (bigint
+        ~ text
+        ~ optional text
+        ~ optional integer
+        ~ optional integer
+        ~ optional text)
 
 Tv.Resolve.upsertEpAssocSql :
   Command b (Int -> Int -> Int -> Int -> Int -> Text -> b)
@@ -9537,10 +9700,12 @@ Tv.Stage.episodeHints :
   ->{IO, Exception} ( Optional Text,
     Optional Nat,
     Optional Nat,
+    Optional Text,
     Optional Nat,
     Optional Nat)
 Tv.Stage.episodeHints root videoPath =
   use List head
+  use Universal eq
   fileName = filePathBasename (FilePath videoPath)
   parsed = parseEpisodeName (basenameNoExt fileName)
   folders = relFolders root videoPath
@@ -9567,16 +9732,29 @@ Tv.Stage.episodeHints root videoPath =
           None -> None
           Some top ->
             topFp = pathJoin (FilePath root) top
-            if Universal.eq (filePathText topFp) (filePathText immediateFolder) then
-              None
+            if eq (filePathText topFp) (filePathText immediateFolder) then None
             else readShowTmdbId topFp
+  imdbId =
+    match showId with
+      Some _ -> None
+      None ->
+        match scanFolderForImdb immediateFolder with
+          Some id -> Some id
+          None ->
+            match topFolderOpt with
+              None -> None
+              Some top ->
+                topFp = pathJoin (FilePath root) top
+                if eq (filePathText topFp) (filePathText immediateFolder) then
+                  None
+                else scanFolderForImdb topFp
   (seasonH, epH) =
     match parsed with
       Some p ->
         r = ParsedEpisode.ref p
         (Some (EpisodeRef.season r), head (EpisodeRef.episodes r))
       None   -> (None, None)
-  (title, year, showId, seasonH, epH)
+  (title, year, showId, imdbId, seasonH, epH)
 
 Tv.Stage.isSampleName : Text -> Boolean
 Tv.Stage.isSampleName n = match Text.indexOf "sample" (Text.toLowercase n) with
@@ -9700,27 +9878,28 @@ Tv.Stage.upsertFileSql :
   Command
     b
     (Text
-    ->{g32, g33} Int
-    ->{g30, g31} Text
-    ->{g28, g29} Text
-    ->{g26, g27} Float
-    ->{g24, g25} Text
-    ->{g22, g23} Int
-    ->{g20, g21} Int
-    ->{g18, g19} Int
-    ->{g16, g17} Text
-    ->{g14, g15} Optional Text
-    ->{g12, g13} Optional Int
-    ->{g10, g11} Optional Int
-    ->{g8, g9} Optional Int
-    ->{g6, g7} Optional Int
-    ->{g4, g5} Text
-    ->{g2, g3} Text
-    ->{g, g1} b)
+    -> Int
+    -> Text
+    -> Text
+    -> Float
+    -> Text
+    -> Int
+    -> Int
+    -> Int
+    -> Text
+    -> Optional Text
+    -> Optional Int
+    -> Optional Int
+    -> Optional Text
+    -> Optional Int
+    -> Optional Int
+    -> Text
+    -> Text
+    -> b)
 Tv.Stage.upsertFileSql =
   use Codec optional text
   sql
-    "INSERT INTO files (crc32, size_bytes, original_path, original_name, duration_sec, video_codec, width, height, bit_depth, probe_json, hint_title, hint_year, hint_show_tmdb_id, hint_season, hint_episode, stage, media_kind) VALUES ("
+    "INSERT INTO files (crc32, size_bytes, original_path, original_name, duration_sec, video_codec, width, height, bit_depth, probe_json, hint_title, hint_year, hint_show_tmdb_id, hint_imdb_id, hint_season, hint_episode, stage, media_kind) VALUES ("
     %% var text
     %% sql ", "
     %% var bigint
@@ -9747,6 +9926,8 @@ Tv.Stage.upsertFileSql =
     %% sql ", "
     %% var (optional integer)
     %% sql ", "
+    %% var (optional text)
+    %% sql ", "
     %% var (optional integer)
     %% sql ", "
     %% var (optional integer)
@@ -9755,14 +9936,19 @@ Tv.Stage.upsertFileSql =
     %% sql ", "
     %% var text
     %% sql
-         ") ON CONFLICT (crc32, size_bytes) DO UPDATE SET original_path = EXCLUDED.original_path, original_name = EXCLUDED.original_name, duration_sec = EXCLUDED.duration_sec, video_codec = EXCLUDED.video_codec, width = EXCLUDED.width, height = EXCLUDED.height, bit_depth = EXCLUDED.bit_depth, probe_json = EXCLUDED.probe_json, hint_title = COALESCE(EXCLUDED.hint_title, files.hint_title), hint_year = COALESCE(EXCLUDED.hint_year, files.hint_year), hint_show_tmdb_id = COALESCE(EXCLUDED.hint_show_tmdb_id, files.hint_show_tmdb_id), hint_season = COALESCE(EXCLUDED.hint_season, files.hint_season), hint_episode = COALESCE(EXCLUDED.hint_episode, files.hint_episode), stage = EXCLUDED.stage, media_kind = EXCLUDED.media_kind, probed_at = NOW()"
+         ") ON CONFLICT (crc32, size_bytes) DO UPDATE SET original_path = EXCLUDED.original_path, original_name = EXCLUDED.original_name, duration_sec = EXCLUDED.duration_sec, video_codec = EXCLUDED.video_codec, width = EXCLUDED.width, height = EXCLUDED.height, bit_depth = EXCLUDED.bit_depth, probe_json = EXCLUDED.probe_json, hint_title = COALESCE(EXCLUDED.hint_title, files.hint_title), hint_year = COALESCE(EXCLUDED.hint_year, files.hint_year), hint_show_tmdb_id = COALESCE(EXCLUDED.hint_show_tmdb_id, files.hint_show_tmdb_id), hint_imdb_id = COALESCE(EXCLUDED.hint_imdb_id, files.hint_imdb_id), hint_season = COALESCE(EXCLUDED.hint_season, files.hint_season), hint_episode = COALESCE(EXCLUDED.hint_episode, files.hint_episode), stage = EXCLUDED.stage, media_kind = EXCLUDED.media_kind, probed_at = NOW()"
     |> buildCommand
 
 Tv.Stage.upsertFileWith :
   PreparedCommand r a
   -> Text
   -> Text
-  -> (Optional Text, Optional Nat, Optional Nat, Optional Nat, Optional Nat)
+  -> ( Optional Text,
+    Optional Nat,
+    Optional Nat,
+    Optional Text,
+    Optional Nat,
+    Optional Nat)
   -> Text
   -> ProbeResult
   ->{Postgres} ()
@@ -9771,7 +9957,7 @@ Tv.Stage.upsertFileWith pc originalPath originalName hints stage pr =
   use List ++
   use Nat toInt
   use Optional map
-  (hintTitle, hintYear, hintShowId, hintSeason, hintEpisode) = hints
+  (hintTitle, hintYear, hintShowId, hintImdb, hintSeason, hintEpisode) = hints
   vid = ProbeResult.video pr
   probeJson = Json.toText (ProbeResult.toJson pr)
   _ = 
@@ -9791,6 +9977,7 @@ Tv.Stage.upsertFileWith pc originalPath originalName hints stage pr =
           ++ pot hintTitle
           ++ poi (map toInt hintYear)
           ++ poi (map toInt hintShowId)
+          ++ pot hintImdb
           ++ poi (map toInt hintSeason)
           ++ poi (map toInt hintEpisode)
           ++ pt stage
@@ -9919,7 +10106,9 @@ Tv.Tmdb.detailsURI : Nat -> URI
 Tv.Tmdb.detailsURI showId =
   use Path /
   path = Path.root / "3" / "tv" / Nat.toText showId
-  q = Query.empty & ("append_to_response", "external_ids,content_ratings")
+  q =
+    Query.empty
+      & ("append_to_response", "external_ids,content_ratings,credits")
   URI Scheme.https (Some Tmdb.apiAuthority) path (fromQuery q) Fragment.empty
 
 Tv.Tmdb.EpisodeDetails.fromJson : '{unison_json_1_4_2.Decoder} EpisodeDetails
@@ -9928,6 +10117,7 @@ Tv.Tmdb.EpisodeDetails.fromJson =
     use Decoder nat optional! text
     use Optional getOrElse
     use object at at!
+    episodeId = getOrElse 0 (optional! (at "id" nat))
     season = at! "season_number" nat
     episode = at! "episode_number" nat
     title = getOrElse "" (optional! (at "name" text))
@@ -9937,7 +10127,15 @@ Tv.Tmdb.EpisodeDetails.fromJson =
     voteAverage = getOrElse 0.0 (optional! (at "vote_average" Decoder.float))
     voteCount = getOrElse 0 (optional! (at "vote_count" nat))
     EpisodeDetails
-      season episode title airDate runtimeMin overview voteAverage voteCount
+      episodeId
+      season
+      episode
+      title
+      airDate
+      runtimeMin
+      overview
+      voteAverage
+      voteCount
 
 Tv.Tmdb.episodeFor : Season -> Nat -> Optional EpisodeDetails
 Tv.Tmdb.episodeFor s epNum =
@@ -9974,6 +10172,61 @@ Tv.Tmdb.exampleSeasonJson =
     , "  ]"
     , "}"
     ]
+
+Tv.Tmdb.findByImdbURI : Text -> URI
+Tv.Tmdb.findByImdbURI imdbId =
+  use Path /
+  path = Path.root / "3" / "find" / imdbId
+  q = Query.empty & ("external_source", "imdb_id")
+  URI Scheme.https (Some Tmdb.apiAuthority) path (fromQuery q) Fragment.empty
+
+Tv.Tmdb.findShowByImdb : Text -> Text ->{IO} Either Text Nat
+Tv.Tmdb.findShowByImdb token imdbId =
+  req = authedGet token (findByImdbURI imdbId)
+  match 
+    catch do
+      Threads.run do
+        Http.run do
+          resp = request req
+          ok = ensureSuccess resp
+          body = bodyText ok
+          Decoder.run findShowResultFromJson body
+   with
+    Right v -> v
+    Left f  -> Left (Failure.message f)
+
+Tv.Tmdb.findShowResultFromJson : '{unison_json_1_4_2.Decoder} Either Text Nat
+Tv.Tmdb.findShowResultFromJson =
+  do
+    use Decoder array nat optional!
+    use Optional getOrElse
+    use object at at!
+    parseShowId = do at! "id" nat
+    parseEpShowId = do at! "show_id" nat
+    tvShows = getOrElse [] (optional! (at "tv_results" (array parseShowId)))
+    match tvShows with
+      id +: _ -> Right id
+      [] ->
+        tvEps =
+          getOrElse
+            [] (optional! (at "tv_episode_results" (array parseEpShowId)))
+        match tvEps with
+          showId +: _ -> Right showId
+          []          -> Left "no tv_results or tv_episode_results for IMDB ID"
+
+Tv.Tmdb.lookupShowByImdb :
+  PreparedQuery r a Int -> Text ->{Postgres} Optional Nat
+Tv.Tmdb.lookupShowByImdb pq imdbId = match 
+  catch do
+    portal = bindQuery pq (pt imdbId)
+    (rows, _) = executeQueryPortal portal 0
+    rows
+ with
+  Left _   -> None
+  Right rs ->
+    match rs with
+      sid +: _ -> Nat.fromInt sid
+      []       -> None
 
 Tv.Tmdb.maxScore : [(ShowResult, Nat)] -> Optional Nat
 Tv.Tmdb.maxScore xs =
@@ -10085,7 +10338,7 @@ Tv.Tmdb.scoreShow queryTitle queryYear hintTmdbId r =
   ovO = tokenOverlapPercent q o
   bestOv = if ovT > ovO then ovT else ovO
   titleScore =
-    if exactMatch then 30
+    if exactMatch then 40
     else if bestOv >= 75 then 20 else if bestOv >= 50 then 10 else 0
   yearScore = match queryYear with
     None    -> 0
@@ -10222,6 +10475,11 @@ Tv.Tmdb.selectSeasonSql =
     %% var integer
     |> typedQuery Codec.text
 
+Tv.Tmdb.selectShowByImdbSql : postgres.Query a (Text -> a) Int
+Tv.Tmdb.selectShowByImdbSql =
+  sql "SELECT tmdb_show_id FROM shows WHERE imdb_id = " %% var Codec.text
+    |> typedQuery integer
+
 Tv.Tmdb.selectShowSql : postgres.Query a (Int ->{g, g1} a) Text
 Tv.Tmdb.selectShowSql =
   sql "SELECT details_json FROM shows WHERE tmdb_show_id = " %% var integer
@@ -10263,6 +10521,13 @@ Tv.Tmdb.ShowDetails.fromJson =
       getOrElse "" (optional! (at "external_ids" do at! "imdb_id" text))
     imdbId = if eq (size rawImdb) 0 then None else Some rawImdb
     tvdbId = optional! (at "external_ids" do at! "tvdb_id" nat)
+    voteAverage = getOrElse 0.0 (optional! (at "vote_average" Decoder.float))
+    voteCount = getOrElse 0 (optional! (at "vote_count" nat))
+    networks =
+      getOrElse [] (optional! (at "networks" (array namedObjectFromJson)))
+    cast =
+      getOrElse
+        [] (optional! (at "credits" do at! "cast" (array CastMember.fromJson)))
     ShowDetails
       tmdbId
       name
@@ -10276,6 +10541,10 @@ Tv.Tmdb.ShowDetails.fromJson =
       rating
       imdbId
       tvdbId
+      voteAverage
+      voteCount
+      networks
+      cast
 
 Tv.Tmdb.ShowResult.fromJson : '{unison_json_1_4_2.Decoder} ShowResult
 Tv.Tmdb.ShowResult.fromJson =
@@ -10961,1186 +11230,3 @@ videoExtensions = [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv"]
 
 ---- Anything below this line is ignored by Unison.
 
-
--- =====================================================================
--- Tv.Nfo: parse tvshow.nfo for show id; generate tvshow.nfo and
--- per-episode <episodedetails> NFOs (named <videobase>.nfo per Kodi).
--- =====================================================================
-
-Tv.Nfo.parseShowId : Soup ->{Throw XMLError} Optional Nat
-Tv.Nfo.parseShowId s = match uniqueIdOfType "tmdb" s with
-  Some v -> Nat.fromText (trim v)
-  None   -> None
-
-Tv.Nfo.readShowTmdbId : FilePath ->{IO, Exception} Optional Nat
-Tv.Nfo.readShowTmdbId folder =
-  match catch do directoryContents.texts folder with
-    Left _      -> None
-    Right files ->
-      match
-        List.find
-          (n -> Universal.eq (Text.toLowercase n) "tvshow.nfo") files
-      with
-        None         -> None
-        Some nfoName ->
-          match catch do readFileUtf8 (pathJoin folder nfoName) with
-            Left _    -> None
-            Right xml ->
-              match withXML xml Tv.Nfo.parseShowId with
-                Right (idOpt +: _) -> idOpt
-                _                  -> None
-
-Tv.Nfo.generateShowNfo : Tv.Tmdb.ShowDetails -> Text
-Tv.Nfo.generateShowNfo d =
-  use List map
-  use Nat toText
-  use Text ++ size
-  use Universal eq
-  esc = escapeXml
-  optLine tag value =
-    if eq (size value) 0 then []
-    else ["  <" ++ tag ++ ">" ++ esc value ++ "</" ++ tag ++ ">"]
-  genreLines =
-    map (g -> "  <genre>" ++ esc g ++ "</genre>") (ShowDetails.genres d)
-  imdbLines = match ShowDetails.imdbId d with
-    None   -> []
-    Some i -> ["  <uniqueid type=\"imdb\">" ++ esc i ++ "</uniqueid>"]
-  tvdbLines = match ShowDetails.tvdbId d with
-    None   -> []
-    Some t -> ["  <uniqueid type=\"tvdb\">" ++ toText t ++ "</uniqueid>"]
-  allLines =
-    List.flatMap
-      (x -> x)
-      [ [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
-        , "<tvshow>"
-        , "  <title>" ++ esc (ShowDetails.name d) ++ "</title>"
-        , "  <originaltitle>"
-            ++ esc (ShowDetails.originalName d)
-            ++ "</originaltitle>"
-        , "  <plot>" ++ esc (ShowDetails.overview d) ++ "</plot>"
-        ]
-      , optLine "premiered" (ShowDetails.firstAirDate d)
-      , optLine "status" (ShowDetails.status d)
-      , optLine "mpaa" (ShowDetails.rating d)
-      , genreLines
-      , [ "  <uniqueid type=\"tmdb\" default=\"true\">"
-            ++ toText (ShowDetails.tmdbId d)
-            ++ "</uniqueid>"
-        ]
-      , imdbLines
-      , tvdbLines
-      , ["</tvshow>", ""]
-      ]
-  Text.join "\n" allLines
-
-Tv.Nfo.minimalShowNfo : Nat -> Text -> Text
-Tv.Nfo.minimalShowNfo showId name =
-  use Text ++
-  Text.join
-    "\n"
-    [ "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"
-    , "<tvshow>"
-    , "  <title>" ++ escapeXml name ++ "</title>"
-    , "  <uniqueid type=\"tmdb\" default=\"true\">"
-        ++ Nat.toText showId
-        ++ "</uniqueid>"
-    , "</tvshow>"
-    , ""
-    ]
-
-Tv.Nfo.episodeBlock :
-  Text
-  -> Nat
-  -> Nat
-  -> Text
-  -> Optional Tv.Tmdb.EpisodeDetails
-  -> Boolean
-  -> Text
-  -> ProbeResult
-  -> [Text]
-Tv.Nfo.episodeBlock showName seasonNum epNum fallbackTitle details first crc pr =
-  use Nat > toText
-  use Text ++ size
-  use Universal eq
-  esc = escapeXml
-  title = match details with
-    Some d ->
-      t = EpisodeDetails.title d
-      if eq (size t) 0 then fallbackTitle else t
-    None   -> fallbackTitle
-  optLine tag value =
-    if eq (size value) 0 then []
-    else ["  <" ++ tag ++ ">" ++ esc value ++ "</" ++ tag ++ ">"]
-  plotLines = match details with
-    Some d -> optLine "plot" (EpisodeDetails.overview d)
-    None   -> []
-  airedLines = match details with
-    Some d -> optLine "aired" (EpisodeDetails.airDate d)
-    None   -> []
-  runtimeLines = match details with
-    Some d ->
-      match EpisodeDetails.runtimeMin d with
-        Some r -> ["  <runtime>" ++ toText r ++ "</runtime>"]
-        None   -> []
-    None   -> []
-  ratingLines = match details with
-    Some d ->
-      if EpisodeDetails.voteCount d > 0 then
-        [ "  <ratings>"
-        , "    <rating name=\"tmdb\" max=\"10\" default=\"true\">"
-        , "      <value>"
-            ++ Float.toText (EpisodeDetails.voteAverage d)
-            ++ "</value>"
-        , "      <votes>" ++ toText (EpisodeDetails.voteCount d) ++ "</votes>"
-        , "    </rating>"
-        , "  </ratings>"
-        ]
-      else []
-    None   -> []
-  vid = ProbeResult.video pr
-  durSec = durationSeconds (ProbeResult.durationSec pr)
-  fileinfoLines =
-    if first then
-      [ "  <fileinfo>"
-      , "    <streamdetails>"
-      , "      <video>"
-      , "        <codec>" ++ esc (VideoInfo.codec vid) ++ "</codec>"
-      , "        <width>" ++ toText (VideoInfo.width vid) ++ "</width>"
-      , "        <height>" ++ toText (VideoInfo.height vid) ++ "</height>"
-      , "        <durationinseconds>"
-          ++ toText durSec
-          ++ "</durationinseconds>"
-      , "      </video>"
-      , "    </streamdetails>"
-      , "  </fileinfo>"
-      ]
-    else []
-  List.flatMap
-    (x -> x)
-    [ [ "<episodedetails>"
-      , "  <title>" ++ esc title ++ "</title>"
-      , "  <showtitle>" ++ esc showName ++ "</showtitle>"
-      , "  <season>" ++ toText seasonNum ++ "</season>"
-      , "  <episode>" ++ toText epNum ++ "</episode>"
-      ]
-    , plotLines
-    , airedLines
-    , runtimeLines
-    , ratingLines
-    , ["  <uniqueid type=\"crc32\">" ++ esc crc ++ "</uniqueid>"]
-    , fileinfoLines
-    , ["</episodedetails>"]
-    ]
-
--- =====================================================================
--- Tv.Stage: probe the Episodic intake recursively, stamping
--- media_kind = 'episode' plus show/season/episode hints.
--- =====================================================================
-
-Tv.Stage.maxDepth : Nat
-Tv.Stage.maxDepth = 4
-
-Tv.Stage.isSampleName : Text -> Boolean
-Tv.Stage.isSampleName n =
-  match Text.indexOf "sample" (Text.toLowercase n) with
-    Some _ -> true
-    None   -> false
-
-Tv.Stage.collectVideos : FilePath -> Nat ->{IO, Exception} [Text]
-Tv.Stage.collectVideos dir depth =
-  use Nat + >=
-  use Universal eq
-  entries = directoryContents.texts dir
-  step acc n =
-    if eq n "." then acc
-    else
-      if eq n ".." then acc
-      else
-        fp = pathJoin dir n
-        if isDirectory fp then
-          (if depth >= Tv.Stage.maxDepth then acc
-          else acc List.++ Tv.Stage.collectVideos fp (depth + 1))
-        else
-          if isVideo n && Boolean.not (Tv.Stage.isSampleName n) then
-            acc List.:+ filePathText fp
-          else acc
-  List.foldLeft step [] entries
-
-Tv.Stage.relFolders : Text -> Text -> [Text]
-Tv.Stage.relFolders root fullPath =
-  use Nat >
-  use Text ++ drop size
-  prefix = root ++ "/"
-  rel =
-    if startsWith prefix fullPath then drop (size prefix) fullPath
-    else fullPath
-  parts = List.filter (p -> size p > 0) (Text.split ?/ rel)
-  match List.reverse parts with
-    _ +: restRev -> List.reverse restRev
-    []           -> []
-
-test> Tv.Stage.relFolders.test =
-  use Tv.Stage relFolders
-  use Universal eq
-  List.flatMap
-    check
-    [ eq
-        (relFolders "/x" "/x/Show (2022)/Season 01/ep.mkv")
-        ["Show (2022)", "Season 01"]
-    , eq (relFolders "/x" "/x/Pack.S01.2160p/ep.mkv") ["Pack.S01.2160p"]
-    , eq (relFolders "/x" "/x/loose.mkv") []
-    ]
-
-Tv.Stage.episodeHints :
-  Text
-  -> Text
-  ->{IO, Exception} ( Optional Text,
-    Optional Nat,
-    Optional Nat,
-    Optional Nat,
-    Optional Nat)
-Tv.Stage.episodeHints root videoPath =
-  use Optional map
-  fileName = filePathBasename (FilePath videoPath)
-  parsed = Tv.Parse.parseEpisodeName (basenameNoExt fileName)
-  folders = Tv.Stage.relFolders root videoPath
-  topFolderOpt = List.head folders
-  folderParse = match topFolderOpt with
-    None   -> None
-    Some f -> Tv.Parse.parseShowFolder f
-  folderTitle = map (cases (t, _) -> t) folderParse
-  title = match parsed with
-    Some p ->
-      match ParsedEpisode.titlePrefix p with
-        Some t -> Some t
-        None   -> folderTitle
-    None   -> folderTitle
-  year = match folderParse with
-    Some (_, y) -> y
-    None        -> None
-  immediateFolder = parentDir (FilePath videoPath)
-  showId = match Tv.Nfo.readShowTmdbId immediateFolder with
-    Some i -> Some i
-    None   ->
-      match topFolderOpt with
-        None     -> None
-        Some top ->
-          topFp = pathJoin (FilePath root) top
-          if Universal.eq (filePathText topFp) (filePathText immediateFolder)
-          then None
-          else Tv.Nfo.readShowTmdbId topFp
-  (seasonH, epH) = match parsed with
-    Some p ->
-      r = ParsedEpisode.ref p
-      ( Some (Tv.Parse.EpisodeRef.season r),
-        List.head (Tv.Parse.EpisodeRef.episodes r))
-    None   -> (None, None)
-  (title, year, showId, seasonH, epH)
-
-Tv.Stage.upsertFileSql :
-  Command
-    b
-    (Text
-    ->{g32, g33} Int
-    ->{g30, g31} Text
-    ->{g28, g29} Text
-    ->{g26, g27} Float
-    ->{g24, g25} Text
-    ->{g22, g23} Int
-    ->{g20, g21} Int
-    ->{g18, g19} Int
-    ->{g16, g17} Text
-    ->{g14, g15} Optional Text
-    ->{g12, g13} Optional Int
-    ->{g10, g11} Optional Int
-    ->{g8, g9} Optional Int
-    ->{g6, g7} Optional Int
-    ->{g4, g5} Text
-    ->{g2, g3} Text
-    ->{g, g1} b)
-Tv.Stage.upsertFileSql =
-  use Codec optional text
-  sql
-    "INSERT INTO files (crc32, size_bytes, original_path, original_name, duration_sec, video_codec, width, height, bit_depth, probe_json, hint_title, hint_year, hint_show_tmdb_id, hint_season, hint_episode, stage, media_kind) VALUES ("
-    %% var text
-    %% sql ", "
-    %% var bigint
-    %% sql ", "
-    %% var text
-    %% sql ", "
-    %% var text
-    %% sql ", "
-    %% var Codec.double
-    %% sql ", "
-    %% var text
-    %% sql ", "
-    %% var integer
-    %% sql ", "
-    %% var integer
-    %% sql ", "
-    %% var integer
-    %% sql ", "
-    %% var text
-    %% sql ", "
-    %% var (optional text)
-    %% sql ", "
-    %% var (optional integer)
-    %% sql ", "
-    %% var (optional integer)
-    %% sql ", "
-    %% var (optional integer)
-    %% sql ", "
-    %% var (optional integer)
-    %% sql ", "
-    %% var text
-    %% sql ", "
-    %% var text
-    %% sql
-         ") ON CONFLICT (crc32, size_bytes) DO UPDATE SET original_path = EXCLUDED.original_path, original_name = EXCLUDED.original_name, duration_sec = EXCLUDED.duration_sec, video_codec = EXCLUDED.video_codec, width = EXCLUDED.width, height = EXCLUDED.height, bit_depth = EXCLUDED.bit_depth, probe_json = EXCLUDED.probe_json, hint_title = COALESCE(EXCLUDED.hint_title, files.hint_title), hint_year = COALESCE(EXCLUDED.hint_year, files.hint_year), hint_show_tmdb_id = COALESCE(EXCLUDED.hint_show_tmdb_id, files.hint_show_tmdb_id), hint_season = COALESCE(EXCLUDED.hint_season, files.hint_season), hint_episode = COALESCE(EXCLUDED.hint_episode, files.hint_episode), stage = EXCLUDED.stage, media_kind = EXCLUDED.media_kind, probed_at = NOW()"
-    |> buildCommand
-
-Tv.Stage.upsertFileWith :
-  PreparedCommand r a
-  -> Text
-  -> Text
-  -> ( Optional Text,
-    Optional Nat,
-    Optional Nat,
-    Optional Nat,
-    Optional Nat)
-  -> Text
-  -> ProbeResult
-  ->{Postgres} ()
-Tv.Stage.upsertFileWith pc originalPath originalName hints stage pr =
-  use Db pi
-  use List ++
-  use Nat toInt
-  use Optional map
-  (hintTitle, hintYear, hintShowId, hintSeason, hintEpisode) = hints
-  vid = ProbeResult.video pr
-  probeJson = Json.toText (ProbeResult.toJson pr)
-  _ = 
-    catch do
-      bindAndExecuteCommand
-        pc
-        (pt (ProbeResult.crc32 pr)
-          ++ pobi (Some (toInt (ProbeResult.sizeBytes pr)))
-          ++ pt originalPath
-          ++ pt originalName
-          ++ pf (ProbeResult.durationSec pr)
-          ++ pt (VideoInfo.codec vid)
-          ++ pi (toInt (VideoInfo.width vid))
-          ++ pi (toInt (VideoInfo.height vid))
-          ++ pi (toInt (VideoInfo.bitDepth vid))
-          ++ pt probeJson
-          ++ pot hintTitle
-          ++ poi (map toInt hintYear)
-          ++ poi (map toInt hintShowId)
-          ++ poi (map toInt hintSeason)
-          ++ poi (map toInt hintEpisode)
-          ++ pt stage
-          ++ pt "episode")
-  ()
-
-Tv.Stage.runChunk :
-  Text
-  -> Text
-  -> PreparedCommand r1 a1
-  -> PreparedCommand r a
-  -> [((), Text)]
-  ->{IO, Exception, Postgres} ()
-Tv.Stage.runChunk root stage pcFiles pcGate chunk =
-  results = forkChunk chunk
-  Db.foreach_
-    (cases
-      (_, videoPath, outcome) ->
-        match outcome with
-          Left _   -> ()
-          Right pr ->
-            originalName = filePathBasename (FilePath videoPath)
-            hints = Tv.Stage.episodeHints root videoPath
-            _ =
-              Tv.Stage.upsertFileWith
-                pcFiles videoPath originalName hints stage pr
-            mtime = match fileStat videoPath with
-              Some (mt, _) -> mt
-              None         -> +0
-            upsertProbeCacheWith pcGate videoPath mtime pr)
-    results
-
-Tv.Stage.runProbeAtTv : Config -> Text -> Text ->{IO, Exception} ()
-Tv.Stage.runProbeAtTv cfg rootText stage =
-  use List foldLeft size
-  use Nat + - toText
-  use PreparedCommand close
-  use Text ++
-  jobs = Tuning.probeJobs (tuning cfg)
-  root = FilePath rootText
-  if isDirectory root then
-    work = List.map (v -> ((), v)) (Tv.Stage.collectVideos root 0)
-    _ =
-      printLine
-        ("[tv-probe] "
-          ++ rootText
-          ++ " ("
-          ++ stage
-          ++ "): "
-          ++ toText (size work)
-          ++ " video(s) found")
-    singleIO (toClientConfig cfg) do
-      pqCached = prepareQuery probeCacheFreshSql
-      pcFiles = prepareCommand Tv.Stage.upsertFileSql
-      pcGate = prepareCommand upsertProbeCacheSql
-      toProbe = partitionWork pqCached work
-      sumStep acc = cases (b, _) -> acc + b
-      totalBytes = foldLeft sumStep 0 toProbe
-      totalFiles = size toProbe
-      _ =
-        printLine
-          (Text.join
-            ""
-            [ "[tv-probe] to probe: "
-            , toText totalFiles
-            , " ("
-            , gigabytes totalBytes
-            , "), cached: "
-            , toText (size work - totalFiles)
-            ])
-      counter = IO.ref (0, 0)
-      startEpoch = epochSeconds()
-      chunks = List.chunk jobs toProbe
-      probeChunk chunk =
-        chunkBytes = foldLeft sumStep 0 chunk
-        items = List.map (cases (_, item) -> item) chunk
-        _ = Tv.Stage.runChunk rootText stage pcFiles pcGate items
-        (dF, dB) = Ref.read counter
-        _ = Ref.write counter (dF + size items, dB + chunkBytes)
-        Progress.report "files" totalFiles totalBytes startEpoch counter
-      _ = Db.foreach_ probeChunk chunks
-      _ = close pcFiles
-      _ = close pcGate
-      printLine "[tv-probe] done"
-  else printLine ("[tv-probe] root not found: " ++ rootText)
-
-Tv.Stage.runProbeTv : Config ->{IO, Exception} ()
-Tv.Stage.runProbeTv cfg =
-  _ = Tv.Db.createSchema cfg
-  Tv.Stage.runProbeAtTv cfg (tvIntake (paths cfg)) "staging"
-
--- =====================================================================
--- Tv.Resolve: file -> (show, season, episodes).
--- =====================================================================
-
-type Tv.Resolve.FileRow
-  = { fileId : Int,
-      originalName : Text,
-      hintTitle : Optional Text,
-      hintYear : Optional Nat,
-      hintShowTmdbId : Optional Nat }
-
-type Tv.Resolve.Outcome
-  = NoEpisodeRef Int Text
-  | NoShowHint Int
-  | NoShowMatch Int Text
-  | TvDetailsFailed Int Nat Text
-  | TvSeasonFailed Int Nat Nat Text
-  | TvEpisodeMissing Int Nat Nat [Nat]
-  | TvResolved Int Nat Nat [Nat] Nat Text
-
-Tv.Resolve.selectUnresolvedTvSql :
-  postgres.Query
-    r r ((((Int, Text), Optional Text), Optional Int), Optional Int)
-Tv.Resolve.selectUnresolvedTvSql =
-  use Codec optional text
-  sql
-    "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging'"
-    |> typedQuery
-      (bigint ~ text ~ optional text ~ optional integer ~ optional integer)
-
-Tv.Resolve.rowToFile :
-  ((((Int, Text), Optional Text), Optional Int), Optional Int)
-  -> Tv.Resolve.FileRow
-Tv.Resolve.rowToFile = cases
-  ((((fid, oname), ht), hy), hsid) ->
-    FileRow fid oname ht (Resolve.optIntToNat hy) (Resolve.optIntToNat hsid)
-
--- NOTE: signature deliberately omitted; let UCM infer it.
-Tv.Resolve.upsertEpAssocSql =
-  sql
-    "INSERT INTO episode_associations (file_id, tmdb_show_id, season, episode, confidence, match_source) VALUES ("
-    %% var bigint
-    %% sql ", "
-    %% var integer
-    %% sql ", "
-    %% var integer
-    %% sql ", "
-    %% var integer
-    %% sql ", "
-    %% var integer
-    %% sql ", "
-    %% var Codec.text
-    %% sql
-         ") ON CONFLICT (file_id, tmdb_show_id, season, episode) DO UPDATE SET confidence = EXCLUDED.confidence, match_source = EXCLUDED.match_source, associated_at = NOW()"
-    |> buildCommand
-
-Tv.Resolve.deleteFileAssocSql : Command a (Int ->{g, g1} a)
-Tv.Resolve.deleteFileAssocSql =
-  sql "DELETE FROM episode_associations WHERE file_id = " %% var bigint
-    |> buildCommand
-
-Tv.Resolve.writeMatch :
-  PreparedCommand r1 a1
-  -> PreparedCommand r a
-  -> Int
-  -> Nat
-  -> Nat
-  -> [Nat]
-  -> Nat
-  -> Text
-  ->{Postgres} ()
-Tv.Resolve.writeMatch pcAssoc pcDel fileId showId seasonNum eps confidence source =
-  use Db pi
-  use List ++
-  use Nat toInt
-  _ = catch do bindAndExecuteCommand pcDel (pobi (Some fileId))
-  one ep =
-    _ = 
-      catch do
-        bindAndExecuteCommand
-          pcAssoc
-          (pobi (Some fileId)
-            ++ pi (toInt showId)
-            ++ pi (toInt seasonNum)
-            ++ pi (toInt ep)
-            ++ pi (toInt confidence)
-            ++ pt source)
-    ()
-  Db.foreach_ one eps
-
-Tv.Resolve.resolveOne :
-  Boolean
-  -> PreparedQuery r7 a7 Text
-  -> PreparedCommand r6 a6
-  -> PreparedQuery r5 a5 Text
-  -> PreparedCommand r4 a4
-  -> PreparedQuery r3 a3 Text
-  -> PreparedCommand r2 a2
-  -> PreparedCommand r1 a1
-  -> PreparedCommand rA aA
-  -> PreparedCommand rD aD
-  -> Text
-  -> Tv.Resolve.FileRow
-  ->{IO, Postgres} Tv.Resolve.Outcome
-Tv.Resolve.resolveOne
-  dryRun pqSearch pcSearch pqShow pcShow pqSeason pcSeason pcEp pcAssoc pcDel
-  token row =
-  use Universal eq
-  fid = Tv.Resolve.FileRow.fileId row
-  oname = Tv.Resolve.FileRow.originalName row
-  match Tv.Parse.parseEpisodeName (basenameNoExt oname) with
-    None   -> NoEpisodeRef fid oname
-    Some p ->
-      ref = ParsedEpisode.ref p
-      seasonNum = Tv.Parse.EpisodeRef.season ref
-      eps = Tv.Parse.EpisodeRef.episodes ref
-      showPick = match Tv.Resolve.FileRow.hintShowTmdbId row with
-        Some sid -> Right (sid, 100, "nfo_id")
-        None     ->
-          titleOpt = match Tv.Resolve.FileRow.hintTitle row with
-            Some t -> Some t
-            None   -> ParsedEpisode.titlePrefix p
-          match titleOpt with
-            None   -> Left (NoShowHint fid)
-            Some t ->
-              yearOpt = Tv.Resolve.FileRow.hintYear row
-              match Tv.Tmdb.cachedSearchWith pqSearch pcSearch token t yearOpt with
-                Left err   -> Left (NoShowMatch fid err)
-                Right resp ->
-                  candidates = Tv.Tmdb.SearchResponse.results resp
-                  scored =
-                    List.map
-                      (r -> (r, Tv.Tmdb.scoreShow t yearOpt None r)) candidates
-                  match Tv.Tmdb.pickBestShow scored with
-                    None        ->
-                      Left (NoShowMatch fid "no single high-scoring match")
-                    Some (r, s) ->
-                      Right (Tv.Tmdb.ShowResult.tmdbId r, s, "title_year")
-      match showPick with
-        Left o -> o
-        Right (showId, conf, source) ->
-          match Tv.Tmdb.cachedShowDetailsWith pqShow pcShow token showId with
-            Left err -> TvDetailsFailed fid showId err
-            Right _  ->
-              match
-                Tv.Tmdb.cachedSeasonWith
-                  pqSeason pcSeason pcEp token showId seasonNum
-              with
-                Left err -> TvSeasonFailed fid showId seasonNum err
-                Right seasonData ->
-                  missing =
-                    List.filter
-                      (epNum ->
-                        (match Tv.Tmdb.episodeFor seasonData epNum with
-                          None   -> true
-                          Some _ -> false))
-                      eps
-                  if Boolean.not (eq (List.size missing) 0) then
-                    TvEpisodeMissing fid showId seasonNum missing
-                  else
-                    _ =
-                      if dryRun then ()
-                      else
-                        Tv.Resolve.writeMatch
-                          pcAssoc pcDel fid showId seasonNum eps conf source
-                    TvResolved fid showId seasonNum eps conf source
-
-Tv.Resolve.printOutcome : Tv.Resolve.Outcome ->{IO, Exception} ()
-Tv.Resolve.printOutcome = cases
-  TvResolved fid showId seasonNum eps conf source ->
-    printLine
-      (Text.join
-        ""
-        [ "  file "
-        , Int.toText fid
-        , " -> tv:"
-        , Nat.toText showId
-        , " S"
-        , Nat.toText seasonNum
-        , " E"
-        , Text.join "," (List.map Nat.toText eps)
-        , " ("
-        , Nat.toText conf
-        , "%, "
-        , source
-        , ")"
-        ])
-  NoEpisodeRef fid name ->
-    printLine
-      (Text.join
-        "" ["  file ", Int.toText fid, " -> no SxxEyy in \"", name, "\""])
-  NoShowHint fid ->
-    printLine ("  file " Text.++ Int.toText fid Text.++ " -> no show title")
-  NoShowMatch fid reason ->
-    printLine
-      (Text.join "" ["  file ", Int.toText fid, " -> no show match: ", reason])
-  TvDetailsFailed fid showId err ->
-    printLine
-      (Text.join
-        ""
-        [ "  file "
-        , Int.toText fid
-        , " -> show "
-        , Nat.toText showId
-        , " details failed: "
-        , err
-        ])
-  TvSeasonFailed fid showId seasonNum err ->
-    printLine
-      (Text.join
-        ""
-        [ "  file "
-        , Int.toText fid
-        , " -> tv:"
-        , Nat.toText showId
-        , " S"
-        , Nat.toText seasonNum
-        , " fetch failed: "
-        , err
-        ])
-  TvEpisodeMissing fid showId seasonNum missing ->
-    printLine
-      (Text.join
-        ""
-        [ "  file "
-        , Int.toText fid
-        , " -> tv:"
-        , Nat.toText showId
-        , " S"
-        , Nat.toText seasonNum
-        , " has no episode(s) "
-        , Text.join "," (List.map Nat.toText missing)
-        , " (refused)"
-        ])
-
-Tv.Resolve.runWith : Boolean -> Config ->{IO, Exception} ()
-Tv.Resolve.runWith dryRun cfg =
-  use Text ++
-  token = readTmdbToken cfg
-  singleIO (toClientConfig cfg) do
-    pqFiles = prepareQuery Tv.Resolve.selectUnresolvedTvSql
-    pqSearch = prepareQuery Tv.Tmdb.selectSearchSql
-    pcSearch = prepareCommand Tv.Tmdb.upsertSearchSql
-    pqShow = prepareQuery Tv.Tmdb.selectShowSql
-    pcShow = prepareCommand Tv.Tmdb.upsertShowSql
-    pqSeason = prepareQuery Tv.Tmdb.selectSeasonSql
-    pcSeason = prepareCommand Tv.Tmdb.upsertSeasonSql
-    pcEp = prepareCommand Tv.Tmdb.upsertEpisodeSql
-    pcAssoc = prepareCommand Tv.Resolve.upsertEpAssocSql
-    pcDel = prepareCommand Tv.Resolve.deleteFileAssocSql
-    rows = match 
-      catch do
-        portal = bindQuery pqFiles []
-        (rs, _) = executeQueryPortal portal 0
-        rs
-     with
-      Left _   -> []
-      Right rs -> List.map Tv.Resolve.rowToFile rs
-    label = if dryRun then "[tv-identify] " else "[tv-resolve] "
-    _ =
-      printLine
-        (label ++ Nat.toText (List.size rows) ++ " unresolved episode file(s)")
-    step row =
-      outcome =
-        Tv.Resolve.resolveOne
-          dryRun
-          pqSearch
-          pcSearch
-          pqShow
-          pcShow
-          pqSeason
-          pcSeason
-          pcEp
-          pcAssoc
-          pcDel
-          token
-          row
-      Tv.Resolve.printOutcome outcome
-    _ = Db.foreach_ step rows
-    _ = PreparedQuery.close pqFiles
-    _ = PreparedQuery.close pqSearch
-    _ = PreparedCommand.close pcSearch
-    _ = PreparedQuery.close pqShow
-    _ = PreparedCommand.close pcShow
-    _ = PreparedQuery.close pqSeason
-    _ = PreparedCommand.close pcSeason
-    _ = PreparedCommand.close pcEp
-    _ = PreparedCommand.close pcAssoc
-    _ = PreparedCommand.close pcDel
-    printLine
-      (if dryRun then "[tv-identify] done (no writes)"
-      else "[tv-resolve] done")
-
-Tv.Resolve.run : Config ->{IO, Exception} ()
-Tv.Resolve.run cfg = Tv.Resolve.runWith false cfg
-
-Tv.Resolve.identify : Config ->{IO, Exception} ()
-Tv.Resolve.identify cfg = Tv.Resolve.runWith true cfg
-
--- =====================================================================
--- Tv.Rename: intake -> TV buffer. DESTRUCTIVE. Guards:
---   1. SELECT filters stage='staging' AND media_kind='episode'
---   2. no file touched unless under the TV intake root; no file written
---      unless under the TV buffer root.
--- =====================================================================
-
-type Tv.Rename.EpisodeJob
-  = { fileId : Int,
-      crc32 : Text,
-      originalPath : Text,
-      probeJson : Text,
-      showId : Nat,
-      showName : Text,
-      firstAirYear : Optional Nat,
-      season : Nat,
-      episodes : [(Nat, Text)] }
-
-type Tv.Rename.TvRenameOutcome
-  = EpRenamed Text Text
-  | EpDuplicateRemoved Text Text
-  | EpNoVideo Text
-  | EpConflict Text Text
-  | EpOutsideRoot Text Text
-  | EpBadProbe Text Text
-  | EpError Text Text
-
-Tv.Rename.selectEpisodeRenamableSql :
-  postgres.Query
-    r
-    r
-    ( ((((((((Int, Text), Text), Text), Int), Text), Optional Int), Int), Int),
-      Text)
-Tv.Rename.selectEpisodeRenamableSql =
-  use Codec optional text
-  sql
-    "SELECT f.file_id, f.crc32, f.original_path, f.probe_json, s.tmdb_show_id, s.name, s.first_air_year, a.season, a.episode, e.title FROM files f JOIN episode_associations a ON a.file_id = f.file_id JOIN shows s ON s.tmdb_show_id = a.tmdb_show_id JOIN episodes e ON e.tmdb_show_id = a.tmdb_show_id AND e.season = a.season AND e.episode = a.episode WHERE f.stage = 'staging' AND f.media_kind = 'episode' ORDER BY f.file_id, a.season, a.episode"
-    |> typedQuery
-      (bigint
-        ~ text
-        ~ text
-        ~ text
-        ~ integer
-        ~ text
-        ~ optional integer
-        ~ integer
-        ~ integer
-        ~ text)
-
-Tv.Rename.groupJobs :
-  [ ( ((((((((Int, Text), Text), Text), Int), Text), Optional Int), Int), Int),
-    Text)]
-  -> [Tv.Rename.EpisodeJob]
-Tv.Rename.groupJobs rows =
-  use List +:
-  use Optional getOrElse
-  use Universal eq
-  step acc = cases
-    (((((((((fid, crc), opath), pjson), sid), sname), fyear), seas), ep), title) ->
-      epNat = getOrElse 0 (Nat.fromInt ep)
-      seasNat = getOrElse 0 (Nat.fromInt seas)
-      sidNat = getOrElse 0 (Nat.fromInt sid)
-      newJob =
-        EpisodeJob
-          fid
-          crc
-          opath
-          pjson
-          sidNat
-          sname
-          (Resolve.optIntToNat fyear)
-          seasNat
-          [(epNat, title)]
-      match acc with
-        j +: rest ->
-          if eq (Tv.Rename.EpisodeJob.fileId j) fid then
-            Tv.Rename.EpisodeJob.episodes.modify
-              (es -> es List.:+ (epNat, title)) j
-              +: rest
-          else newJob +: acc
-        []        -> [newJob]
-  List.reverse (List.foldLeft step [] rows)
-
-Tv.Rename.resolveEpisodeToken :
-  Tv.Rename.EpisodeJob -> ProbeResult -> Text -> Text
-Tv.Rename.resolveEpisodeToken job pr tok =
-  use Nat toText
-  use ProbeResult durationSec primaryAudio sizeBytes
-  use Text ++
-  use VideoInfo height width
-  vid = ProbeResult.video pr
-  epNums = List.map (cases (n, _) -> n) (Tv.Rename.EpisodeJob.episodes job)
-  epTitles = List.map (cases (_, t) -> t) (Tv.Rename.EpisodeJob.episodes job)
-  pad2 n = Nfo.padLeft 2 "0" (toText n)
-  nameSan = sanitize (Tv.Rename.EpisodeJob.showName job)
-  match tok with
-    "n" -> nameSan
-    "y" ->
-      match Tv.Rename.EpisodeJob.firstAirYear job with
-        Some y -> toText y
-        None   -> "0000"
-    "ny" ->
-      match Tv.Rename.EpisodeJob.firstAirYear job with
-        Some y -> nameSan ++ " (" ++ toText y ++ ")"
-        None   -> nameSan
-    "s" -> toText (Tv.Rename.EpisodeJob.season job)
-    "s00" -> pad2 (Tv.Rename.EpisodeJob.season job)
-    "e00" -> Text.join "E" (List.map pad2 epNums)
-    "t" -> sanitize (Text.join " + " epTitles)
-    "crc32" -> Tv.Rename.EpisodeJob.crc32 job
-    "gigabytes" -> gigabytes (sizeBytes pr)
-    "vf" -> vfTag (width vid) (height vid)
-    "vc" -> vcTag (VideoInfo.codec vid)
-    "bitdepth" -> toText (VideoInfo.bitDepth vid)
-    "minutes" -> toText (Rename.minutes (durationSec pr))
-    "resolution" -> resolutionStr (width vid) (height vid)
-    "mbps" ->
-      mbps
-        (effectiveBitRate
-          (VideoInfo.bitRate vid) (sizeBytes pr) (durationSec pr))
-    "ac" ->
-      match primaryAudio pr with
-        Some a -> acTag (AudioInfo.codec a)
-        None   -> "noaudio"
-    "channels" ->
-      match primaryAudio pr with
-        Some a -> channelsTag (AudioInfo.channels a)
-        None   -> "0"
-    _ -> ""
-
-Tv.Rename.renderEpisode :
-  [FormatPart] -> Tv.Rename.EpisodeJob -> ProbeResult -> Text
-Tv.Rename.renderEpisode parts job pr =
-  render = cases
-    Literal t             -> t
-    FormatPart.Token name -> Tv.Rename.resolveEpisodeToken job pr name
-  tighten (Text.join "" (List.map render parts))
-
-Tv.Rename.splitTvFormat :
-  Text -> Optional ([FormatPart], [FormatPart], [FormatPart])
-Tv.Rename.splitTvFormat fmt = match Text.split ?/ fmt with
-  [showF, seasonF, fileF] ->
-    Some (parseFormat showF, parseFormat seasonF, parseFormat fileF)
-  _ -> None
-
-Tv.Rename.episodeNfoFor :
-  Optional Tv.Tmdb.Season -> Tv.Rename.EpisodeJob -> ProbeResult -> Text
-Tv.Rename.episodeNfoFor seasonOpt job pr =
-  use Universal eq
-  seasonNum = Tv.Rename.EpisodeJob.season job
-  crc = Tv.Rename.EpisodeJob.crc32 job
-  showName = Tv.Rename.EpisodeJob.showName job
-  indexed = Db.withIndex (Tv.Rename.EpisodeJob.episodes job)
-  blocks =
-    List.flatMap
-      (cases
-        (i, (epNum, fallbackTitle)) ->
-          details = match seasonOpt with
-            Some s -> Tv.Tmdb.episodeFor s epNum
-            None   -> None
-          Tv.Nfo.episodeBlock
-            showName seasonNum epNum fallbackTitle details (eq i 0) crc pr)
-      indexed
-  Text.join
-    "\n"
-    (List.flatMap
-      (x -> x)
-      [ ["<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>"]
-      , blocks
-      , [""]
-      ])
-
-Tv.Rename.executeEpisode :
-  PreparedQuery rS aS Text
-  -> PreparedQuery rQ aQ Text
-  -> PreparedCommand rP aP
-  -> PreparedCommand rC aC
-  -> PreparedCommand rD aD
-  -> Text
-  -> Text
-  -> [FormatPart]
-  -> [FormatPart]
-  -> [FormatPart]
-  -> Tv.Rename.EpisodeJob
-  ->{IO, Exception, Postgres} Tv.Rename.TvRenameOutcome
-Tv.Rename.executeEpisode
-  pqShow pqSeason pcPromote pcCache pcDelCache intakeRoot bufferRoot showFmt
-  seasonFmt fileFmt job =
-  use Boolean not
-  use Text ++
-  crc = Tv.Rename.EpisodeJob.crc32 job
-  sourceText = Tv.Rename.EpisodeJob.originalPath job
-  showId = Tv.Rename.EpisodeJob.showId job
-  if not (enforceUnderRoot intakeRoot sourceText) then
-    EpOutsideRoot sourceText intakeRoot
-  else
-    pjson = Tv.Rename.EpisodeJob.probeJson job
-    match catch do Decoder.run ProbeResult.fromJson pjson with
-      Left f   -> EpBadProbe sourceText (Failure.message f)
-      Right pr ->
-        showFolder = Tv.Rename.renderEpisode showFmt job pr
-        seasonFolder = Tv.Rename.renderEpisode seasonFmt job pr
-        base = Tv.Rename.renderEpisode fileFmt job pr
-        showDirText = bufferRoot ++ "/" ++ showFolder
-        seasonDirText = showDirText ++ "/" ++ seasonFolder
-        videoExt = fileExt sourceText
-        targetVideoText = seasonDirText ++ "/" ++ base ++ videoExt
-        sourceVideo = FilePath sourceText
-        if not (enforceUnderRoot bufferRoot seasonDirText) then
-          EpOutsideRoot targetVideoText bufferRoot
-        else
-          if targetHasCrc (FilePath seasonDirText) crc then
-            _ = catch do removeFile sourceVideo
-            EpDuplicateRemoved sourceText targetVideoText
-          else
-            if not (pathExists sourceVideo) then EpNoVideo sourceText
-            else
-              if pathExists (FilePath targetVideoText) then
-                EpConflict sourceText targetVideoText
-              else
-                seasonOpt =
-                  match
-                    readSeasonBodyWith
-                      pqSeason showId (Tv.Rename.EpisodeJob.season job)
-                  with
-                    None      -> None
-                    Some body ->
-                      match catch do Decoder.run Tv.Tmdb.Season.fromJson body with
-                        Right s -> Some s
-                        Left _  -> None
-                showNfoText = match readShowBodyWith pqShow showId with
-                  None      ->
-                    minimalShowNfo
-                      showId (Tv.Rename.EpisodeJob.showName job)
-                  Some body ->
-                    match catch do
-                      Decoder.run Tv.Tmdb.ShowDetails.fromJson body with
-                      Right d -> generateShowNfo d
-                      Left _  ->
-                        minimalShowNfo
-                          showId (Tv.Rename.EpisodeJob.showName job)
-                epNfoText = Tv.Rename.episodeNfoFor seasonOpt job pr
-                match 
-                  catch do
-                    _ = Move.ensureDir showDirText
-                    _ = Move.ensureDir seasonDirText
-                    tvshowNfo = FilePath (showDirText ++ "/tvshow.nfo")
-                    _ =
-                      if pathExists tvshowNfo then ()
-                      else writeFileUtf8 tvshowNfo showNfoText
-                    _ =
-                      writeFileUtf8
-                        (FilePath (seasonDirText ++ "/" ++ base ++ ".nfo"))
-                        epNfoText
-                    renameFile sourceVideo (FilePath targetVideoText)
-                 with
-                  Right _ ->
-                    newName = base ++ videoExt
-                    szInt = Nat.toInt (ProbeResult.sizeBytes pr)
-                    _ = 
-                      catch do
-                        bindAndExecuteCommand
-                          pcPromote
-                          (pt targetVideoText
-                            List.++ pt newName
-                            List.++ pt base
-                            List.++ pt seasonDirText
-                            List.++ pt crc
-                            List.++ pobi (Some szInt))
-                    _ =
-                      match fileStat targetVideoText with
-                        Some (mt, _) ->
-                          upsertProbeCacheWith pcCache targetVideoText mt pr
-                        None -> ()
-                    _ = 
-                      catch do
-                        bindAndExecuteCommand pcDelCache (pt sourceText)
-                    EpRenamed sourceText targetVideoText
-                  Left f -> EpError sourceText (Failure.message f)
-
-Tv.Rename.printTvOutcome : Tv.Rename.TvRenameOutcome ->{IO, Exception} ()
-Tv.Rename.printTvOutcome =
-  use Text ++
-  cases
-    EpRenamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
-    EpDuplicateRemoved _ tgt ->
-      printLine ("  DUPLICATE -> source removed (already at " ++ tgt ++ ")")
-    EpNoVideo src -> printLine ("  SKIP: source file not found at " ++ src)
-    EpConflict _ t -> printLine ("  SKIP: different file already at " ++ t)
-    EpOutsideRoot path root ->
-      printLine
-        ("  REFUSED: " ++ path ++ " is not under expected root " ++ root)
-    EpBadProbe _ msg -> printLine ("  SKIP: bad probe json: " ++ msg)
-    EpError _ msg -> printLine ("  ERROR: " ++ msg)
-
-Tv.Rename.applyTv : Config -> '{IO, Exception} ()
-Tv.Rename.applyTv cfg =
-  do
-    use Text ++
-    intakeRoot = tvIntake (paths cfg)
-    bufferRoot = tvBuffer (paths cfg)
-    match Tv.Rename.splitTvFormat (tvFormat (paths cfg)) with
-      None ->
-        printLine
-          "[tv-rename] tvFormat must be exactly show/season/file (two '/')"
-      Some (showFmt, seasonFmt, fileFmt) ->
-        _ =
-          if isDirectory (FilePath bufferRoot) then ()
-          else
-            _ = catch do createDirectory (FilePath bufferRoot)
-            ()
-        singleIO (toClientConfig cfg) do
-          pqRows = prepareQuery Tv.Rename.selectEpisodeRenamableSql
-          pqShow = prepareQuery Tv.Tmdb.selectShowSql
-          pqSeason = prepareQuery Tv.Tmdb.selectSeasonSql
-          pcPromote = prepareCommand promoteToBufferSql
-          pcCache = prepareCommand upsertProbeCacheSql
-          pcDelCache = prepareCommand deleteProbeCacheSql
-          rows = match 
-            catch do
-              portal = bindQuery pqRows []
-              (rs, _) = executeQueryPortal portal 0
-              rs
-           with
-            Left f   ->
-              _ =
-                printLine ("[tv-rename] QUERY FAILED: " ++ Failure.message f)
-              []
-            Right rs -> rs
-          jobs = Tv.Rename.groupJobs rows
-          _ =
-            printLine
-              ("[tv-rename] "
-                ++ Nat.toText (List.size jobs)
-                ++ " resolved episode file(s)")
-          step job =
-            _ =
-              printLine
-                ("processing: " ++ Tv.Rename.EpisodeJob.originalPath job)
-            outcome =
-              Tv.Rename.executeEpisode
-                pqShow
-                pqSeason
-                pcPromote
-                pcCache
-                pcDelCache
-                intakeRoot
-                bufferRoot
-                showFmt
-                seasonFmt
-                fileFmt
-                job
-            Tv.Rename.printTvOutcome outcome
-          _ = Db.foreach_ step jobs
-          _ = PreparedQuery.close pqRows
-          _ = PreparedQuery.close pqShow
-          _ = PreparedQuery.close pqSeason
-          _ = PreparedCommand.close pcPromote
-          _ = PreparedCommand.close pcCache
-          _ = PreparedCommand.close pcDelCache
-          printLine "[tv-rename] done"
-
-tvProbeTest : '{IO, Exception} ()
-tvProbeTest = do Tv.Stage.runProbeTv fromEnv()
-
-tvResolveTest : '{IO, Exception} ()
-tvResolveTest = do Tv.Resolve.run fromEnv()
-
-tvIdentifyTest : '{IO, Exception} ()
-tvIdentifyTest = do Tv.Resolve.identify fromEnv()
-
-tvRenameTest : '{IO, Exception} ()
-tvRenameTest = do Tv.Rename.applyTv fromEnv() ()
-
-cli : '{IO, Exception} ()
-cli =
-  do
-    cfg = fromEnv()
-    args = getArgs()
-    match args with
-      "import-library" +: _ -> batchedRun cfg
-      "reconcile" +: _ -> runProbeAt cfg (buffer (paths cfg)) "buffer"
-      "import-buffer" +: _ -> runProbeAt cfg (buffer (paths cfg)) "buffer"
-      "import-all" +: _ ->
-        _ = runProbeAt cfg (buffer (paths cfg)) "buffer"
-        batchedRun cfg
-      "process" +: _ ->
-        _ = runProbeStage cfg
-        _ = Resolve.run cfg
-        _ = renameNewCombined cfg (movieFormat (paths cfg)) ()
-        printLine "[process] done. review the buffer, then: unidork move"
-      "move" +: rest ->
-        match rest with
-          name +: _ -> Move.run cfg (Some name)
-          []        -> Move.run cfg None
-      "identify" +: _ -> Resolve.identify cfg
-      "resolve" +: _ -> Resolve.run cfg
-      "probe-stage" +: _ -> runProbeStage cfg
-      "rename" +: rest ->
-        match rest with
-          format +: _ -> renameNewCombined cfg format ()
-          []          -> printLine "rename requires a format string"
-      "tv-init" +: _ -> Tv.Db.createSchema cfg
-      "tv-probe" +: _ -> Tv.Stage.runProbeTv cfg
-      "tv-identify" +: _ -> Tv.Resolve.identify cfg
-      "tv-resolve" +: _ -> Tv.Resolve.run cfg
-      "tv-rename" +: _ -> Tv.Rename.applyTv cfg ()
-      "tv-process" +: _ ->
-        _ = Tv.Stage.runProbeTv cfg
-        _ = Tv.Resolve.run cfg
-        _ = Tv.Rename.applyTv cfg ()
-        printLine
-          "[tv-process] done. review the TV buffer; tv-move lands next."
-      _ ->
-        _ =
-          printLine
-            "usage: unidork-import <process|reconcile|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-identify|tv-resolve|tv-rename|tv-process> [arg]"
-        ()
