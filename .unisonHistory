@@ -1,3 +1,7 @@
+compile cli ./bin/unidork-import
+edit.namespace .
+compile cli ./bin/unidork-import
+update
 edit.namespace .
 compile cli ./bin/unidork-import
 update

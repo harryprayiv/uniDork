@@ -110,6 +110,7 @@ pkgs.writeShellApplication {
     cmd_tv_resolve()  { ensure_pg; unidork-import tv-resolve; }
     cmd_tv_identify() { ensure_pg; unidork-import tv-identify; }
     cmd_tv_process()  { ensure_pg; unidork-import tv-process; }
+    cmd_tv_move() { ensure_pg; unidork-import tv-move "$@"; }
 
     cmd_tv_rename() {
       ensure_pg
@@ -222,6 +223,7 @@ SQL
       tv-identify)         cmd_tv_identify ;;
       tv-rename)           cmd_tv_rename "$@" ;;
       tv-process)          cmd_tv_process ;;
+      tv-move)             cmd_tv_move "$@" ;;
 
       # combined
       process-all)         cmd_process_all ;;

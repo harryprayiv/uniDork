@@ -516,16 +516,20 @@ cli =
       "tv-identify" +: _ -> Tv.Resolve.identify cfg
       "tv-resolve" +: _ -> Tv.Resolve.run cfg
       "tv-rename" +: _ -> applyTv cfg ()
+      "tv-move" +: rest ->
+        match rest with
+          name +: _ -> Tv.Move.run cfg (Some name)
+          []        -> Tv.Move.run cfg None
       "tv-process" +: _ ->
         _ = runProbeTv cfg
         _ = Tv.Resolve.run cfg
         _ = applyTv cfg ()
         printLine
-          "[tv-process] done. review the TV buffer; tv-move lands next."
+          "[tv-process] done. review the TV buffer, then: unidork tv-move"
       _ ->
         _ =
           printLine
-            "usage: unidork-import <process|reconcile|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-identify|tv-resolve|tv-rename|tv-process> [arg]"
+            "usage: unidork-import <process|reconcile|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-identify|tv-resolve|tv-rename|tv-move|tv-process> [arg]"
         ()
 
 Config.fromEnv : '{IO} Config
@@ -8570,6 +8574,196 @@ Tv.Db.showsDdl =
 
 Tv.initDb : '{IO, Exception} ()
 Tv.initDb = do Tv.Db.createSchema fromEnv()
+
+Tv.Move.collectVideoFiles : FilePath ->{IO, Exception} [Text]
+Tv.Move.collectVideoFiles dir =
+  use List ++ :+
+  use Universal eq
+  entries = directoryContents.texts dir
+  step acc n =
+    if eq n "." then acc
+    else
+      if eq n ".." then acc
+      else
+        fp = pathJoin dir n
+        if isDirectory fp then acc ++ Tv.Move.collectVideoFiles fp
+        else if isVideo n then acc :+ filePathText fp else acc
+  List.foldLeft step [] entries
+
+Tv.Move.mergeTree : Text -> Text ->{IO, Exception} ()
+Tv.Move.mergeTree src dst =
+  use Text ++
+  use Universal eq
+  ensureDir dst
+  entries = directoryContents.texts (FilePath src)
+  processEntry n =
+    if eq n "." then ()
+    else
+      if eq n ".." then ()
+      else
+        srcPath = src ++ "/" ++ n
+        dstPath = dst ++ "/" ++ n
+        if isDirectory (FilePath srcPath) then
+          if isDirectory (FilePath dstPath) then
+            Tv.Move.mergeTree srcPath dstPath
+          else
+            match commitFolder srcPath dstPath with
+              Left err ->
+                printLine ("    merge dir failed: " ++ n ++ " " ++ err)
+              Right _ -> ()
+        else
+          if pathExists (FilePath dstPath)
+            && isVideo n then printLine ("    skip (exists): " ++ n)
+          else
+            match catch do renameFile (FilePath srcPath) (FilePath dstPath) with
+              Left f ->
+                printLine
+                  ("    file move failed: " ++ n ++ " " ++ Failure.message f)
+              Right _ -> ()
+  _ = Db.foreach_ processEntry entries
+  rmdirFolder src
+
+Tv.Move.moveShow :
+  Text -> PreparedCommand r a -> FilePath ->{IO, Exception, Postgres} ()
+Tv.Move.moveShow libraryRoot pcUpdate folder =
+  use Boolean not
+  showName = filePathBasename folder
+  srcText = filePathText folder
+  dstText = libraryRoot Text.++ "/" Text.++ showName
+  _ = printLine ("TV-MOVE: " Text.++ showName)
+  if not (enforceUnderRoot libraryRoot dstText) then
+    printLine "  abort: destination not under library root"
+  else
+    videoPaths = collectVideoFiles folder
+    _ =
+      printLine
+        ("  "
+          Text.++ Nat.toText (List.size videoPaths)
+          Text.++ " video file(s)")
+    sameDev = sameDevice srcText libraryRoot
+    moveOk =
+      if isDirectory (FilePath dstText) then
+        use Text ++
+        _ = printLine "  merge: show folder exists in library"
+        if sameDev then
+          _ = mergeTree srcText dstText
+          true
+        else
+          match rsyncFolder srcText dstText with
+            Left err ->
+              _ = printLine ("  abort: rsync failed: " ++ err)
+              false
+            Right _  ->
+              _ = match removeFolderTree srcText with
+                Left e  -> printLine ("  warn: cleanup failed: " ++ e)
+                Right _ -> ()
+              true
+      else
+        if sameDev then
+          use Text ++
+          _ = printLine "  transfer: atomic rename (same filesystem)"
+          match commitFolder srcText dstText with
+            Left err ->
+              _ = printLine ("  abort: move failed: " ++ err)
+              false
+            Right _  -> true
+        else
+          use Text ++
+          _ = printLine "  transfer: rsync copy (cross filesystem)"
+          match rsyncFolder srcText dstText with
+            Left err ->
+              _ = printLine ("  abort: rsync failed: " ++ err)
+              false
+            Right _  ->
+              _ = match removeFolderTree srcText with
+                Left e  -> printLine ("  warn: cleanup failed: " ++ e)
+                Right _ -> ()
+              true
+    if not moveOk then ()
+    else
+      updateOne oldPath =
+        use List ++
+        newPath = rebasePath srcText dstText oldPath
+        newName = filePathBasename (FilePath newPath)
+        _ = 
+          catch do
+            bindAndExecuteCommand
+              pcUpdate (pt newPath ++ pt newName ++ pt oldPath)
+        ()
+      _ = Db.foreach_ updateOne videoPaths
+      printLine ("  promoted -> " Text.++ dstText)
+
+Tv.Move.rebasePath : Text -> Text -> Text -> Text
+Tv.Move.rebasePath oldPrefix newPrefix path =
+  use Text ++
+  suffix = Text.drop (Text.size oldPrefix) path
+  newPrefix ++ suffix
+
+Tv.Move.run : Config -> Optional Text ->{IO, Exception} ()
+Tv.Move.run cfg maybeFolderName =
+  use List size
+  use Text ++
+  use Universal eq
+  bufferRoot = tvBuffer (paths cfg)
+  libraryRoot = tvLibrary (paths cfg)
+  bufferFp = FilePath bufferRoot
+  if Boolean.not (isDirectory bufferFp) then
+    printLine ("tv buffer not found: " ++ bufferRoot)
+  else
+    folders =
+      match maybeFolderName with
+        Some name ->
+          trimmed = trim name
+          bad = List.any (b -> eq b trimmed) ["", ".", ".."]
+          if bad then
+            _ =
+              printLine
+                ("refusing to move: invalid folder name: '" ++ name ++ "'")
+            []
+          else
+            fp = pathJoin bufferFp trimmed
+            if isDirectory fp then [fp]
+            else
+              _ = printLine ("no such buffer folder: " ++ name)
+              []
+        None ->
+          entries = directoryContents.texts bufferFp
+          names =
+            List.filter
+              (n ->
+                (if eq n "." then false
+                else
+                  if eq n ".." then false
+                  else isDirectory (pathJoin bufferFp n)))
+              entries
+          List.map (n -> pathJoin bufferFp n) names
+    _ =
+      printLine
+        ("[tv-move] "
+          ++ Nat.toText (size folders)
+          ++ " show folder(s) to promote")
+    if eq (size folders) 0 then ()
+    else
+      singleIO (toClientConfig cfg) do
+        pcUpdate = prepareCommand updatePathSql
+        safeMove folder =
+          _ = match catch do moveShow libraryRoot pcUpdate folder with
+            Right _ -> ()
+            Left f  -> printLine ("  SHOW FAILED: " ++ Failure.message f)
+          ()
+        _ = Db.foreach_ safeMove folders
+        PreparedCommand.close pcUpdate
+
+Tv.Move.updatePathSql : Command a (Text -> Text -> Text -> a)
+Tv.Move.updatePathSql =
+  use Codec text
+  sql "UPDATE files SET original_path = "
+    %% var text
+    %% sql ", original_name = "
+    %% var text
+    %% sql ", stage = 'library' WHERE original_path = "
+    %% var text
+    |> buildCommand
 
 Tv.Nfo.episodeBlock :
   Text
