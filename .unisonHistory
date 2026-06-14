@@ -1,3 +1,11 @@
+compile cli bin/unidork-import
+edit.namespace .
+update
+compile cli bin/unidork-import
+update
+compile cli bin/unidork-import
+update
+edit.namespace .
 quit
 compile cli bin/unidork-import
 update
@@ -90,11 +98,3 @@ update
 compile cli bin/unidork-import
 test
 delete.type Tmdb.MovieDetails Tmdb.Credits Tmdb.CrewMember Tmdb.Genre Tmdb.Country Tmdb.Studio Tmdb.Collection Tmdb.ExternalIds Tmdb.ReleaseInfo
-delete.term Tmdb.MovieDetails.id Tmdb.MovieDetails.id.set Tmdb.MovieDetails.id.modify Tmdb.MovieDetails.title Tmdb.MovieDetails.title.set Tmdb.MovieDetails.title.modify Tmdb.MovieDetails.originalTitle Tmdb.MovieDetails.originalTitle.set Tmdb.MovieDetails.originalTitle.modify Tmdb.MovieDetails.overview Tmdb.MovieDetails.overview.set Tmdb.MovieDetails.overview.modify Tmdb.MovieDetails.tagline Tmdb.MovieDetails.tagline.set Tmdb.MovieDetails.tagline.modify Tmdb.MovieDetails.releaseDate Tmdb.MovieDetails.releaseDate.set Tmdb.MovieDetails.releaseDate.modify Tmdb.MovieDetails.runtime Tmdb.MovieDetails.runtime.set Tmdb.MovieDetails.runtime.modify Tmdb.MovieDetails.voteAverage Tmdb.MovieDetails.voteAverage.set Tmdb.MovieDetails.voteAverage.modify Tmdb.MovieDetails.voteCount Tmdb.MovieDetails.voteCount.set Tmdb.MovieDetails.voteCount.modify Tmdb.MovieDetails.genres Tmdb.MovieDetails.genres.set Tmdb.MovieDetails.genres.modify Tmdb.MovieDetails.productionCountries Tmdb.MovieDetails.productionCountries.set Tmdb.MovieDetails.productionCountries.modify Tmdb.MovieDetails.productionCompanies Tmdb.MovieDetails.productionCompanies.set Tmdb.MovieDetails.productionCompanies.modify Tmdb.MovieDetails.collection Tmdb.MovieDetails.collection.set Tmdb.MovieDetails.collection.modify Tmdb.MovieDetails.posterPath Tmdb.MovieDetails.posterPath.set Tmdb.MovieDetails.posterPath.modify Tmdb.MovieDetails.backdropPath Tmdb.MovieDetails.backdropPath.set Tmdb.MovieDetails.backdropPath.modify Tmdb.MovieDetails.credits Tmdb.MovieDetails.credits.set Tmdb.MovieDetails.credits.modify Tmdb.MovieDetails.releaseDates Tmdb.MovieDetails.releaseDates.set Tmdb.MovieDetails.releaseDates.modify Tmdb.MovieDetails.externalIds Tmdb.MovieDetails.externalIds.set Tmdb.MovieDetails.externalIds.modify Tmdb.Credits.cast Tmdb.Credits.cast.set Tmdb.Credits.cast.modify Tmdb.Credits.crew Tmdb.Credits.crew.set Tmdb.Credits.crew.modify Tmdb.CrewMember.id Tmdb.CrewMember.id.set Tmdb.CrewMember.id.modify Tmdb.CrewMember.name Tmdb.CrewMember.name.set Tmdb.CrewMember.name.modify Tmdb.CrewMember.job Tmdb.CrewMember.job.set Tmdb.CrewMember.job.modify Tmdb.CrewMember.department Tmdb.CrewMember.department.set Tmdb.CrewMember.department.modify Tmdb.Genre.id Tmdb.Genre.id.set Tmdb.Genre.id.modify Tmdb.Genre.name Tmdb.Genre.name.set Tmdb.Genre.name.modify Tmdb.Country.code Tmdb.Country.code.set Tmdb.Country.code.modify Tmdb.Country.name Tmdb.Country.name.set Tmdb.Country.name.modify Tmdb.Studio.id Tmdb.Studio.id.set Tmdb.Studio.id.modify Tmdb.Studio.name Tmdb.Studio.name.set Tmdb.Studio.name.modify Tmdb.Collection.id Tmdb.Collection.id.set Tmdb.Collection.id.modify Tmdb.Collection.name Tmdb.Collection.name.set Tmdb.Collection.name.modify Tmdb.ExternalIds.imdbId Tmdb.ExternalIds.imdbId.set Tmdb.ExternalIds.imdbId.modify Tmdb.ReleaseInfo.country Tmdb.ReleaseInfo.country.set Tmdb.ReleaseInfo.country.modify Tmdb.ReleaseInfo.certification Tmdb.ReleaseInfo.certification.set Tmdb.ReleaseInfo.certification.modify
-delete.term Tmdb.readToken Tmdb.tokenPath Tmdb.detailsFromResult Rename.buildNfo Rename.maxCast Rename.imageBaseUrl Tmdb.MovieDetails.fromJson Tmdb.MovieDetails.castList Tmdb.MovieDetails.directors Tmdb.MovieDetails.writers Tmdb.MovieDetails.imdb Tmdb.MovieDetails.mpaa Tmdb.Credits.fromJson Tmdb.CrewMember.fromJson Tmdb.Genre.fromJson Tmdb.Country.fromJson Tmdb.Studio.fromJson Tmdb.Collection.fromJson Tmdb.ExternalIds.fromJson Tmdb.releaseDatesParser Tmdb.releaseInfoEntry
-dependents Tmdb.MovieDetails.fromJson
-dependents Rename.buildNfo
-dependents Tmdb.detailsFromResult
-dependents Tmdb.readToken
-find Confidence
-find Context

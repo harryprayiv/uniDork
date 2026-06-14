@@ -48,6 +48,11 @@ ability db.MovieCatalog where
     Optional Text -> Optional Nat -> Optional Nat -> Movie ->{MovieCatalog} ()
   updateLibraryPath : Text -> Text -> Text -> Int ->{MovieCatalog} ()
 
+ability db.MovieMoveCatalog where
+  identityForFile : Text ->{MovieMoveCatalog} Optional FileIdentity
+  updateFilePathById : Text -> Text -> Text -> Int ->{MovieMoveCatalog} ()
+  updateFilePathByName : Text -> Text -> Text ->{MovieMoveCatalog} ()
+
 ability db.RenameCatalog where
   deleteProbeCache : Text ->{RenameCatalog} ()
   priorTargetForCrc : Text ->{RenameCatalog} Optional Text
@@ -352,7 +357,8 @@ type Tv.Resolve.FileRow
       hintTitle : Optional Text,
       hintYear : Optional Nat,
       hintShowTmdbId : Optional Nat,
-      hintImdbId : Optional Text }
+      hintImdbId : Optional Text,
+      originalPath : Text }
 
 type Tv.Resolve.Outcome
   = NoEpisodeRef Int Text
@@ -406,6 +412,9 @@ type Tv.Tmdb.ShowResult
       firstAirDate : Text,
       popularity : Float,
       overview : Text }
+
+ability TvInteract where
+  chooseShow : Int -> [(Nat, Text, Optional Nat)] ->{TvInteract} Optional Nat
 
 type Video
   = { codec : Text, aspect : Float, width : Nat, height : Nat }
@@ -461,6 +470,7 @@ classifyPiece p m =
 cli : '{IO, Exception} ()
 cli =
   do
+    use Resolve runWith
     cfg = fromEnv()
     args = getArgs()
     match args with
@@ -473,7 +483,7 @@ cli =
       "process" +: rest ->
         dry = hasFlag "--dry-run" rest
         _ = runProbeStage cfg
-        _ = Resolve.run cfg
+        _ = runWith false cfg
         _ = renameNewCombined cfg (movieFormat (paths cfg)) dry ()
         doneMsg =
           if dry then
@@ -486,8 +496,8 @@ cli =
         match nonFlags rest with
           name +: _ -> run cfg (Some name) dry
           []        -> run cfg None dry
-      "identify" +: _ -> identify cfg
-      "resolve" +: _ -> Resolve.run cfg
+      "identify" +: _ -> runWith true cfg
+      "resolve" +: _ -> runWith false cfg
       "probe-stage" +: _ -> runProbeStage cfg
       "rename" +: rest ->
         dry = hasFlag "--dry-run" rest
@@ -500,7 +510,7 @@ cli =
       "tv-resolve" +: _ -> Resolve.run cfg
       "tv-rename" +: rest -> applyTv cfg (hasFlag "--dry-run" rest) ()
       "tv-move" +: rest ->
-        use Move run
+        use Tv.Move run
         dry = hasFlag "--dry-run" rest
         match nonFlags rest with
           name +: _ -> run cfg (Some name) dry
@@ -1590,6 +1600,62 @@ Move.loadIdentity pq bufferPath = match
 Move.moveChunkSize : Nat
 Move.moveChunkSize = 25
 
+Move.moveFolder :
+  Boolean -> Text -> FilePath ->{IO, MovieMoveCatalog, Exception} ()
+Move.moveFolder dryRun libraryRoot folder =
+  use Boolean not
+  use List size
+  use Nat - toText
+  use Text ++
+  folderName = filePathBasename folder
+  srcText = filePathText folder
+  dstText = libraryRoot ++ "/" ++ folderName
+  _ = printLine ("MOVE: " ++ folderName)
+  if not (enforceUnderRoot libraryRoot dstText) then
+    printLine "  abort: destination not under library root"
+  else
+    if isDirectory (FilePath dstText) then
+      printLine ("  abort: destination already exists in library: " ++ dstText)
+    else
+      entries = directoryContents.texts folder
+      videoPaths = match findFirstVideo entries with
+        Some v -> [filePathText (pathJoin folder v)]
+        None   -> []
+      _ = printLine ("  " ++ toText (size videoPaths) ++ " video file(s)")
+      verified = List.map verifyFile videoPaths
+      verifiedCount = size (List.filter (cases (_, ok, _) -> ok) verified)
+      _ =
+        printLine
+          ("  identity verified: "
+            ++ toText verifiedCount
+            ++ "/"
+            ++ toText (size verified))
+      sameDev = sameDevice srcText libraryRoot
+      if dryRun then
+        method =
+          if sameDev then "atomic rename" else "rsync to partial then commit"
+        _ =
+          printLine
+            ("  DRY-RUN: would create new library folder at "
+              ++ dstText
+              ++ " via "
+              ++ method)
+        printLine
+          ("  DRY-RUN: would update "
+            ++ toText verifiedCount
+            ++ " by identity, "
+            ++ toText (size verified - verifiedCount)
+            ++ " by name")
+      else
+        moveOk = transferFolder sameDev srcText dstText libraryRoot
+        if not moveOk then ()
+        else
+          applyOne = cases
+            (oldPath, ok, identOpt) ->
+              updateMovieFile srcText dstText oldPath ok identOpt
+          _ = Db.foreach_ applyOne verified
+          printLine ("  promoted -> " ++ dstText)
+
 Move.partialRoot : Text -> Text
 Move.partialRoot libraryRoot =
   use Text ++
@@ -1663,6 +1729,103 @@ Move.rsyncFolder srcFolder dstFolder =
       else
         Left ("rsync exit " Text.++ Nat.toText code Text.++ ": " Text.++ err)
 
+Move.run : Config -> Optional Text -> Boolean ->{IO, Exception} ()
+Move.run cfg maybeFolderName dryRun =
+  use Db foreach_
+  use List size
+  use Nat +
+  use Universal eq
+  bufferRoot = buffer (paths cfg)
+  libraryRoot = library (paths cfg)
+  bufferFp = FilePath bufferRoot
+  if Boolean.not (isDirectory bufferFp) then
+    printLine ("buffer not found: " Text.++ bufferRoot)
+  else
+    _ =
+      if dryRun then
+        printLine "[move] DRY RUN: no files will be moved or deleted"
+      else ()
+    folders =
+      match maybeFolderName with
+        Some name ->
+          use Text ++
+          trimmed = trim name
+          bad = List.any (b -> eq b trimmed) ["", ".", ".."]
+          if bad then
+            _ =
+              printLine
+                ("refusing to move: invalid folder name: '" ++ name ++ "'")
+            []
+          else
+            fp = pathJoin bufferFp trimmed
+            if isDirectory fp then [fp]
+            else
+              _ = printLine ("no such buffer folder: " ++ name)
+              []
+        None ->
+          entries = directoryContents.texts bufferFp
+          names =
+            List.filter
+              (n ->
+                (if eq n "." then false
+                else
+                  if eq n ".." then false
+                  else isDirectory (pathJoin bufferFp n)))
+              entries
+          List.map (n -> pathJoin bufferFp n) names
+    _ =
+      printLine
+        ("[move] "
+          Text.++ Nat.toText (size folders)
+          Text.++ " folder(s) to promote")
+    if eq (size folders) 0 then ()
+    else
+      _ = if dryRun then () else sweepPartial libraryRoot
+      chunks = List.chunk moveChunkSize folders
+      total = size folders
+      counter = IO.ref (0, 0)
+      startEpoch = epochSeconds()
+      runChunk chunk = 
+        singleIO (toClientConfig cfg) do
+          pqIdent = prepareQuery selectFileByPathSql
+          pcById = prepareCommand updateFilePathSql
+          pcByName = prepareCommand updatePathSql
+          moveGo = cases
+            { r } -> r
+            { identityForFile path -> k } ->
+              handle k (loadIdentity pqIdent path) with moveGo
+            { updateFilePathById newPath newName crc sz -> k } ->
+              use List ++
+              _ = 
+                catch do
+                  bindAndExecuteCommand
+                    pcById
+                    (pt newPath ++ pt newName ++ pt crc ++ pobi (Some sz))
+              handle k() with moveGo
+            { updateFilePathByName newPath newName oldPath -> k } ->
+              use List ++
+              _ = 
+                catch do
+                  bindAndExecuteCommand
+                    pcByName (pt newPath ++ pt newName ++ pt oldPath)
+              handle k() with moveGo
+          safeMove folder =
+            use Text ++
+            outcome = 
+              catch do handle moveFolder dryRun libraryRoot folder with moveGo
+            _ = match outcome with
+              Right _ -> ()
+              Left f  -> printLine ("  FOLDER FAILED: " ++ Failure.message f)
+            ()
+          _ = foreach_ safeMove chunk
+          (dn, _) = Ref.read counter
+          _ = Ref.write counter (dn + size chunk, 0)
+          _ = printProgress total 0 startEpoch counter
+          _ = PreparedQuery.close pqIdent
+          _ = PreparedCommand.close pcById
+          PreparedCommand.close pcByName
+      foreach_ runChunk chunks
+
 Move.sameDevice : Text -> Text ->{IO} Boolean
 Move.sameDevice a b = match (deviceOf a, deviceOf b) with
   (Some x, Some y) -> Universal.eq x y
@@ -1688,6 +1851,39 @@ Move.sweepPartial libraryRoot =
       Right _ -> ()
   else ()
 
+Move.transferFolder : Boolean -> Text -> Text -> Text ->{IO, Exception} Boolean
+Move.transferFolder sameDev srcText dstText libraryRoot =
+  use Text ++
+  if sameDev then
+    _ = printLine "  transfer: atomic rename (same filesystem)"
+    match commitFolder srcText dstText with
+      Left err ->
+        _ = printLine ("  abort: move failed: " ++ err)
+        false
+      Right _  -> true
+  else
+    _ =
+      printLine "  transfer: rsync to partial, then commit (cross filesystem)"
+    pRoot = partialRoot libraryRoot
+    folderBase = filePathBasename (FilePath srcText)
+    partialDst = pRoot ++ "/" ++ folderBase
+    _ = ensureDir pRoot
+    match rsyncFolder srcText partialDst with
+      Left err ->
+        _ = printLine ("  abort: rsync to partial failed: " ++ err)
+        false
+      Right _  ->
+        match commitFolder partialDst dstText with
+          Left err ->
+            _ = printLine ("  abort: commit from partial failed: " ++ err)
+            false
+          Right _  ->
+            _ = match removeFolderTree srcText with
+              Left e  -> printLine ("  warn: source cleanup failed: " ++ e)
+              Right _ -> ()
+            ()
+            true
+
 Move.updateFilePathSql :
   Command a (Text ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} a)
 Move.updateFilePathSql =
@@ -1701,6 +1897,46 @@ Move.updateFilePathSql =
     %% sql " AND size_bytes = "
     %% var bigint
     |> buildCommand
+
+Move.updateMovieFile :
+  Text
+  -> Text
+  -> Text
+  -> Boolean
+  -> Optional FileIdentity
+  ->{IO, MovieMoveCatalog, Exception} ()
+Move.updateMovieFile srcText dstText oldPath verified identOpt =
+  use Text ++
+  rel = Text.drop (Text.size srcText) oldPath
+  newPath = dstText ++ rel
+  newName = filePathBasename (FilePath newPath)
+  match (verified, identOpt) with
+    (true, Some ident) ->
+      crc = FileIdentity.crc32 ident
+      sz = FileIdentity.sizeBytes ident
+      updateFilePathById newPath newName crc sz
+    _ ->
+      _ =
+        printLine
+          ("  WARN identity-unverified, path updated by name: " ++ oldPath)
+      updateFilePathByName newPath newName oldPath
+
+Move.verifyFile :
+  Text
+  ->{IO, MovieMoveCatalog, Exception} (Text, Boolean, Optional FileIdentity)
+Move.verifyFile oldPath =
+  use Int toText
+  use Text ==
+  identOpt = identityForFile oldPath
+  match identOpt with
+    None -> (oldPath, false, None)
+    Some ident ->
+      diskOk =
+        match fileStat oldPath with
+          None -> false
+          Some (_, sz) ->
+            toText (FileIdentity.sizeBytes ident) == toText (Nat.toInt sz)
+      (oldPath, diskOk, Some ident)
 
 Movie.fromJson : '{unison_json_1_4_2.Decoder} Movie
 Movie.fromJson =
@@ -2816,16 +3052,24 @@ Rename.executeOne
 Rename.fileExt : Text -> Text
 Rename.fileExt path =
   lower = Text.toLowercase path
-  if endsWith ".mkv" lower then ".mkv"
-  else
-    if endsWith ".mp4" lower then ".mp4"
-    else
-      if endsWith ".avi" lower then ".avi"
-      else
-        if endsWith ".mov" lower then ".mov"
-        else
-          if endsWith ".wmv" lower then ".wmv"
-          else if endsWith ".flv" lower then ".flv" else ""
+  exts =
+    [ ".mkv"
+    , ".mp4"
+    , ".m4v"
+    , ".avi"
+    , ".mov"
+    , ".wmv"
+    , ".flv"
+    , ".mpeg"
+    , ".mpg"
+    , ".m2ts"
+    , ".mts"
+    , ".ts"
+    , ".webm"
+    ]
+  match List.find (e -> endsWith e lower) exts with
+    Some e -> e
+    None   -> ""
 
 Rename.findPriorTargetForCrcWith :
   PreparedQuery r a b -> Text ->{Postgres} Optional b
@@ -6799,6 +7043,120 @@ Tv.Nfo.scanFolderForImdb folder =
                 None    -> go rest
       go nfos
 
+Tv.Parse.bareEpisode : Optional Nat -> Text -> Optional Nat
+Tv.Parse.bareEpisode seasonOpt fileName =
+  use List head
+  tokens = tokenize fileName
+  fromConcat = match seasonOpt with
+    None        -> None
+    Some season -> head (List.filterMap (concatEpisode season) tokens)
+  match fromConcat with
+    Some e -> Some e
+    None   ->
+      match episodeAfterMarker tokens with
+        Some e -> Some e
+        None   ->
+          match head tokens with
+            None   -> None
+            Some t -> plainEpisode t
+
+Tv.Parse.braceTagValue : Text -> Text -> Optional Text
+Tv.Parse.braceTagValue key name =
+  use Nat +
+  use Text ++ indexOf
+  open = "{" ++ key ++ "-"
+  match indexOf open name with
+    None   -> None
+    Some i ->
+      afterOpen = Text.drop (i + Text.size open) name
+      match indexOf "}" afterOpen with
+        None   -> None
+        Some j -> Some (trim (Text.take j afterOpen))
+
+Tv.Parse.cleanShowQuery : Text -> (Text, Optional Nat)
+Tv.Parse.cleanShowQuery raw = match findEnclosedYearAny raw with
+  Some (prefix, y) -> (cutTitle prefix, Some y)
+  None             -> (cutTitle raw, None)
+
+test> Tv.Parse.cleanShowQuery.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (cleanShowQuery "Yellowstone (2018) -") ("Yellowstone", Some 2018)
+    , eq
+        (cleanShowQuery "Silicon Valley (2014) -")
+        ("Silicon Valley", Some 2014)
+    , eq (cleanShowQuery "The Smurfs Collection 1") ("The Smurfs", None)
+    , eq (cleanShowQuery "DORAEMON - stagione 1 -TVRip-") ("DORAEMON", None)
+    , eq
+        (cleanShowQuery "Malcolm in the Middle - The Complete Collection")
+        ("Malcolm in the Middle", None)
+    , eq (cleanShowQuery "Severance") ("Severance", None)
+    ]
+
+Tv.Parse.concatEpisode : Nat -> Text -> Optional Nat
+Tv.Parse.concatEpisode season tok =
+  use Nat + <= >=
+  use Text size
+  if Boolean.not (digitsOnly tok) then None
+  else
+    seasonStr = Nat.toText season
+    sLen = size seasonStr
+    tLen = size tok
+    if Universal.eq tLen (sLen + 2) && startsWith seasonStr tok then
+      epStr = Text.drop sLen tok
+      match Nat.fromText epStr with
+        None   -> None
+        Some e -> if e >= 1 && e <= 99 then Some e else None
+    else None
+
+Tv.Parse.cutTitle : Text -> Text
+Tv.Parse.cutTitle name =
+  use List +: reverse
+  tokens = tokenize name
+  go acc = cases
+    []        -> reverse acc
+    t +: rest -> if titleCutToken t then reverse acc else go (t +: acc) rest
+  trim (Text.join " " (dropTrailingNoise (go [] tokens)))
+
+Tv.Parse.digitsOnly : Text -> Boolean
+Tv.Parse.digitsOnly t =
+  if Universal.eq (Text.size t) 0 then false
+  else
+    match Nat.fromText t with
+      Some _ -> true
+      None   -> false
+
+Tv.Parse.dropTrailingNoise : [Text] -> [Text]
+Tv.Parse.dropTrailingNoise tokens =
+  use List +: reverse
+  noise t =
+    lower = Text.toLowercase t
+    List.any
+      (w -> Universal.eq w lower)
+      ["the", "a", "an", "-", "–", "—", "+", "&", ":", "_"]
+  go = cases
+    []        -> []
+    t +: rest -> if noise t then go rest else t +: rest
+  reverse (go (reverse tokens))
+
+Tv.Parse.episodeAfterMarker : [Text] -> Optional Nat
+Tv.Parse.episodeAfterMarker tokens =
+  use Nat +
+  use Universal eq
+  pairs = withIndex tokens
+  hits =
+    List.filterMap
+      (cases
+        (i, t) ->
+          lower = Text.toLowercase t
+          if eq lower "ep" || eq lower "episode" then
+            match Tmdb.nth (i + 1) tokens with
+              Some next -> plainEpisode next
+              None      -> None
+          else None) pairs
+  List.head hits
+
 Tv.Parse.epSegment : Text -> Optional [Nat]
 Tv.Parse.epSegment t =
   use Nat >
@@ -6807,6 +7165,51 @@ Tv.Parse.epSegment t =
   if Universal.eq (List.size nats) (List.size parts) && List.size parts > 0 then
     Some nats
   else None
+
+Tv.Parse.folderImdbTag : Text -> Optional Text
+Tv.Parse.folderImdbTag name =
+  candidate = match braceTagValue "imdb" name with
+    Some v -> Some v
+    None   -> braceTagValue "imdbid" name
+  match candidate with
+    None   -> None
+    Some v ->
+      t = trim v
+      if startsWith "tt" t then Some t else None
+
+Tv.Parse.foldersOfPath : Text -> [Text]
+Tv.Parse.foldersOfPath fullPath =
+  use List reverse
+  use Nat >
+  parts = List.filter (p -> Text.size p > 0) (Text.split ?/ fullPath)
+  match reverse parts with
+    _ +: restRev -> reverse restRev
+    []           -> []
+
+test> Tv.Parse.folderTag.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq
+        (tmdbTagFromFolders ["Six Feet Under {tmdb-1274}", "Season 01"])
+        (Some 1274)
+    , eq (tmdbTagFromFolders ["Show {tmdbid-555}"]) (Some 555)
+    , eq (tmdbTagFromFolders ["Plain Show", "Season 1"]) None
+    , eq (imdbTagFromFolders ["The Wire {imdb-tt0306414}"]) (Some "tt0306414")
+    , eq (imdbTagFromFolders ["No Tags Here"]) None
+    ]
+
+Tv.Parse.folderTmdbTag : Text -> Optional Nat
+Tv.Parse.folderTmdbTag name = match braceTagValue "tmdb" name with
+  Some v -> Nat.fromText (trim v)
+  None   ->
+    match braceTagValue "tmdbid" name with
+      Some v -> Nat.fromText (trim v)
+      None   -> None
+
+Tv.Parse.imdbTagFromFolders : [Text] -> Optional Text
+Tv.Parse.imdbTagFromFolders folders =
+  List.head (List.filterMap folderImdbTag folders)
 
 Tv.Parse.isCutToken : Text -> Boolean
 Tv.Parse.isCutToken t =
@@ -6896,34 +7299,102 @@ test> Tv.Parse.parseShowFolder.test =
     , eq (parseShowFolder "Better.Call.Saul") (Some ("Better Call Saul", None))
     ]
 
+Tv.Parse.plainEpisode : Text -> Optional Nat
+Tv.Parse.plainEpisode t =
+  use Nat <= >=
+  if Boolean.not (digitsOnly t) then None
+  else
+    match Nat.fromText t with
+      None   -> None
+      Some n -> if n >= 1 && n <= 999 then Some n else None
+
+Tv.Parse.refFromFolders : [Text] -> Text -> Optional EpisodeRef
+Tv.Parse.refFromFolders folders fileName = match seasonFromFolders folders with
+  None        -> None
+  Some season ->
+    match bareEpisode (Some season) fileName with
+      None    -> None
+      Some ep -> Some (EpisodeRef season [ep])
+
+test> Tv.Parse.refFromFolders.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq
+        (refFromFolders
+          ["Rick and Morty", "Season 4"]
+          "Rick and Morty - 401 - Edge of Tomorty")
+        (Some (EpisodeRef 4 [1]))
+    , eq
+        (refFromFolders
+          ["Rick and Morty", "Season 4"] "Rick and Morty - 410 - Star Mort")
+        (Some (EpisodeRef 4 [10]))
+    , eq
+        (refFromFolders
+          ["Kids in the Hall", "S6 Death Comes to Town"]
+          "5 - The Butterfly Is to Blame")
+        (Some (EpisodeRef 6 [5]))
+    , eq
+        (refFromFolders ["S01 - Apollo 11"] "01_We Choose to Go to the Moon")
+        (Some (EpisodeRef 1 [1]))
+    , eq
+        (refFromFolders
+          ["S03 - An Empire of Terror"] "Ep 5 - The Victory Over Democracy")
+        (Some (EpisodeRef 3 [5]))
+    , eq
+        (refFromFolders ["Some Show", "Season 1"] "13 - Plain Episode Thirteen")
+        (Some (EpisodeRef 1 [13]))
+    , eq (refFromFolders ["Some Show"] "No Season Folder Here") None
+    , eq (refFromFolders ["Movies"] "The Matrix 1999 1080p") None
+    ]
+
 Tv.Parse.refFromToken : Text -> Optional EpisodeRef
 Tv.Parse.refFromToken tok =
   use Boolean not
-  use List size
-  use Nat <= >
+  use Nat <= >=
+  use Text split
   use Universal eq
   lower = Text.toLowercase tok
-  if not (startsWith "s" lower) then None
-  else
+  notBlank s = not (eq (Text.size s) 0)
+  seasonValid s = s <= 99 || s >= 1900 && s <= 2030
+  finalize season eps =
+    use List any size
+    use Nat >
+    okShape =
+      seasonValid season && size eps > 0 && size eps <= 3
+        && not (any (n -> n > 999) eps)
+    if not okShape then None
+    else
+      anyNonZero = any (n -> not (eq n 0)) eps
+      if eq season 0 then Some (EpisodeRef 0 eps)
+      else
+        if anyNonZero then Some (EpisodeRef season eps)
+        else Some (EpisodeRef 0 eps)
+  if startsWith "s" lower then
+    use List size
     rest = Text.drop 1 lower
-    match Text.split ?e rest with
-      seasonSeg +: epSegs ->
-        if eq (size epSegs) 0 then None
-        else
-          match natSegment seasonSeg with
-            None -> None
-            Some season ->
-              if season > 99 then None
-              else
-                parsedSegs = List.filterMap epSegment epSegs
-                if eq (size parsedSegs) (size epSegs) then
-                  eps = List.flatMap (x -> x) parsedSegs
-                  ok =
-                    size eps > 0 && size eps <= 3
-                      && not (List.any (n -> n > 999) eps)
-                  if ok then Some (EpisodeRef season eps) else None
-                else None
+    match split ?e rest with
+      seasonSeg +: epSegsRaw ->
+        epSegs = List.filter notBlank epSegsRaw
+        match natSegment seasonSeg with
+          None -> None
+          Some season ->
+            parsedSegs = List.filterMap epSegment epSegs
+            if eq (size parsedSegs) (size epSegs) then
+              finalize season (List.flatMap (x -> x) parsedSegs)
+            else None
       [] -> None
+  else
+    match split ?x lower with
+      [a, b] ->
+        if notBlank a
+          && notBlank b then
+          match (natSegment a, epSegment b) with
+            (Some season, Some eps) ->
+              if season <= 99 then finalize season eps else None
+            _ -> None
+        else None
+      _ -> None
 
 test> Tv.Parse.refFromToken.test =
   use Universal eq
@@ -6934,15 +7405,98 @@ test> Tv.Parse.refFromToken.test =
     , eq (refFromToken "S01E01E02") (Some (EpisodeRef 1 [1, 2]))
     , eq (refFromToken "S01E01-E02") (Some (EpisodeRef 1 [1, 2]))
     , eq (refFromToken "S01E01-02") (Some (EpisodeRef 1 [1, 2]))
-    , eq (refFromToken "S2024E01") None
+    , eq (refFromToken "S04E03E") (Some (EpisodeRef 4 [3]))
+    , eq (refFromToken "S00E02") (Some (EpisodeRef 0 [2]))
+    , eq (refFromToken "S04E00") (Some (EpisodeRef 0 [0]))
+    , eq (refFromToken "S2005e17") (Some (EpisodeRef 2005 [17]))
+    , eq (refFromToken "S2024E01") (Some (EpisodeRef 2024 [1]))
+    , eq (refFromToken "1x004") (Some (EpisodeRef 1 [4]))
+    , eq (refFromToken "1x02") (Some (EpisodeRef 1 [2]))
+    , eq (refFromToken "2x10") (Some (EpisodeRef 2 [10]))
     , eq (refFromToken "se7en") None
     , eq (refFromToken "sample") None
     , eq (refFromToken "soundtrack") None
     , eq (refFromToken "S01") None
     , eq (refFromToken "S01E") None
     , eq (refFromToken "S01E02v2") None
-    , eq (refFromToken "1x02") None
+    , eq (refFromToken "x265") None
+    , eq (refFromToken "1920x1080") None
+    , eq (refFromToken "1280x720") None
     ]
+
+Tv.Parse.seasonFromFolders : [Text] -> Optional Nat
+Tv.Parse.seasonFromFolders folders =
+  go = cases
+    []        -> None
+    f +: rest ->
+      match seasonOfFolder f with
+        Some s -> Some s
+        None   -> go rest
+  go (List.reverse folders)
+
+Tv.Parse.seasonNat : Text -> Optional Nat
+Tv.Parse.seasonNat t =
+  match Nat.fromText t with
+    None -> None
+    Some n ->
+      if n Nat.<= 99 || n Nat.>= 1900 && n Nat.<= 2030 then Some n else None
+
+Tv.Parse.seasonOfFolder : Text -> Optional Nat
+Tv.Parse.seasonOfFolder name =
+  use List filterMap head
+  tokens = tokenize name
+  pairs = withIndex tokens
+  fromWord =
+    use Nat +
+    hits =
+      filterMap
+        (cases
+          (i, t) ->
+            if Universal.eq (Text.toLowercase t) "season" then
+              match Tmdb.nth (i + 1) tokens with
+                Some next -> seasonNat next
+                None      -> None
+            else None) pairs
+    head hits
+  match fromWord with
+    Some s -> Some s
+    None   -> head (filterMap sTokenSeason tokens)
+
+Tv.Parse.sTokenSeason : Text -> Optional Nat
+Tv.Parse.sTokenSeason t =
+  use Nat <= >=
+  lower = Text.toLowercase t
+  if Boolean.not (startsWith "s" lower) then None
+  else
+    rest = Text.drop 1 lower
+    if Universal.eq (Text.size rest) 0 then None
+    else
+      match Nat.fromText rest with
+        None   -> None
+        Some n -> if n <= 99 || n >= 1900 && n <= 2030 then Some n else None
+
+Tv.Parse.titleCutToken : Text -> Boolean
+Tv.Parse.titleCutToken t =
+  lower = Text.toLowercase t
+  words =
+    [ "season"
+    , "seasons"
+    , "stagione"
+    , "stagioni"
+    , "saison"
+    , "saisons"
+    , "temporada"
+    , "staffel"
+    , "collection"
+    , "complete"
+    , "tvrip"
+    ]
+  isWord = List.any (w -> Universal.eq w lower) words
+  isRef = match refFromToken t with
+    Some _ -> true
+    None   -> false
+  isWord || isSeasonOnly t || isRef
+    || isQualityToken t
 
 Tv.Parse.titleTokens : [Text] -> [Text]
 Tv.Parse.titleTokens tokens =
@@ -6951,6 +7505,10 @@ Tv.Parse.titleTokens tokens =
     []        -> reverse acc
     t +: rest -> if isCutToken t then reverse acc else go (t +: acc) rest
   go [] tokens
+
+Tv.Parse.tmdbTagFromFolders : [Text] -> Optional Nat
+Tv.Parse.tmdbTagFromFolders folders =
+  List.head (List.filterMap folderTmdbTag folders)
 
 Tv.Rename.applyTv : Config -> Boolean -> '{IO, Exception} ()
 Tv.Rename.applyTv cfg dryRun =
@@ -7324,6 +7882,13 @@ Tv.Rename.splitTvFormat fmt =
       Some (parseFormat showF, parseFormat seasonF, parseFormat fileF)
     _ -> None
 
+Tv.Resolve.batchInteract : '{g, TvInteract} a ->{g} a
+Tv.Resolve.batchInteract body =
+  h = cases
+    { a }                        -> a
+    { chooseShow _ _ -> resume } -> handle resume None with h
+  handle body() with h
+
 Tv.Resolve.deleteFileAssocSql : Command a (Int ->{g, g1} a)
 Tv.Resolve.deleteFileAssocSql =
   sql "DELETE FROM episode_associations WHERE file_id = " %% var bigint
@@ -7408,16 +7973,28 @@ Tv.Resolve.resolveOne :
 Tv.Resolve.resolveOne dryRun token row =
   fid = Tv.Resolve.FileRow.fileId row
   oname = Tv.Resolve.FileRow.originalName row
-  match parseEpisodeName (basenameNoExt oname) with
+  baseName = basenameNoExt oname
+  folders = foldersOfPath (FileRow.originalPath row)
+  refData = match parseEpisodeName baseName with
+    Some p -> Some (ParsedEpisode.ref p, titlePrefix p)
+    None   ->
+      match refFromFolders folders baseName with
+        Some r -> Some (r, None)
+        None   -> None
+  match refData with
     None -> NoEpisodeRef fid oname
-    Some p ->
-      ref = ParsedEpisode.ref p
+    Some (ref, fileTitle) ->
       seasonNum = EpisodeRef.season ref
       eps = EpisodeRef.episodes ref
-      hintId = hintShowTmdbId row
-      showPick = match hintId with
-        Some sid -> Right (sid, 100, "nfo_id")
-        None     -> resolveShowPick token p row fid
+      directTmdb = match hintShowTmdbId row with
+        Some sid -> Some (sid, "nfo_id")
+        None     ->
+          match tmdbTagFromFolders folders with
+            Some sid -> Some (sid, "folder_tag")
+            None     -> None
+      showPick = match directTmdb with
+        Some (sid, src) -> Right (sid, 100, src)
+        None            -> resolveShowPick token folders fileTitle row fid
       match showPick with
         Left o -> o
         Right (showId, conf, source) ->
@@ -7462,7 +8039,13 @@ test> Tv.Resolve.resolveOne.dryRunNoWrite.test =
       (res, Some (fid, sid, sea, eps, conf, src))
   row =
     Tv.Resolve.FileRow.FileRow
-      +5 "Severance.S01E01.mkv" None None (Some 100) None
+      +5
+      "Severance.S01E01.mkv"
+      None
+      None
+      (Some 100)
+      None
+      "/tv/Severance/Season 01/Severance.S01E01.mkv"
   (outcome, written) =
     handle handle Tv.Resolve.resolveOne true "tok" row with recordingCatalog
     with scriptedMeta
@@ -7470,6 +8053,81 @@ test> Tv.Resolve.resolveOne.dryRunNoWrite.test =
     TvResolved _ _ _ _ _ _ -> true
     _                      -> false
   List.flatMap check [okOutcome, Universal.eq written None]
+
+test> Tv.Resolve.resolveOne.folderFallback.test =
+  use Universal eq
+  scriptedMeta = cases
+    { r } -> r
+    { searchShows _ _ -> k } ->
+      handle k (Right (Tv.Tmdb.SearchResponse.SearchResponse []))
+      with scriptedMeta
+    { showDetails _ -> k } ->
+      handle k (Right testShowDetails) with scriptedMeta
+    { seasonFor _ _ -> k } ->
+      handle k (Right testSeasonOneEp) with scriptedMeta
+    { findShowByImdbApi _ -> k } -> handle k (Left "no") with scriptedMeta
+  recordingCatalog = cases
+    { r } -> (r, None)
+    { lookupShowByImdbDb _ -> k } -> handle k None with recordingCatalog
+    { recordEpisodeMatch fid sid sea eps conf src -> k } ->
+      (res, _) = handle k() with recordingCatalog
+      (res, Some (fid, sid, sea, eps, conf, src))
+  row =
+    Tv.Resolve.FileRow.FileRow
+      +21
+      "Rick and Morty - 401 - Edge of Tomorty.mkv"
+      None
+      None
+      (Some 100)
+      None
+      "/tv/Rick and Morty/Season 4/Rick and Morty - 401 - Edge of Tomorty.mkv"
+  (outcome, written) =
+    handle handle Tv.Resolve.resolveOne false "tok" row with recordingCatalog
+    with scriptedMeta
+  okOutcome =
+    match outcome with
+      TvResolved fid sid sea eps _ src ->
+        eq fid +21 && eq sid 100 && eq sea 4 && eq eps [1] && eq src "nfo_id"
+      _ -> false
+  List.flatMap check [okOutcome]
+
+test> Tv.Resolve.resolveOne.folderTag.test =
+  use Universal eq
+  scriptedMeta = cases
+    { r } -> r
+    { searchShows _ _ -> k } ->
+      handle k (Right (Tv.Tmdb.SearchResponse.SearchResponse []))
+      with scriptedMeta
+    { showDetails _ -> k } ->
+      handle k (Right testShowDetails) with scriptedMeta
+    { seasonFor _ _ -> k } ->
+      handle k (Right testSeasonOneEp) with scriptedMeta
+    { findShowByImdbApi _ -> k } -> handle k (Left "no") with scriptedMeta
+  recordingCatalog = cases
+    { r } -> (r, None)
+    { lookupShowByImdbDb _ -> k } -> handle k None with recordingCatalog
+    { recordEpisodeMatch fid sid sea eps conf src -> k } ->
+      (res, _) = handle k() with recordingCatalog
+      (res, Some (fid, sid, sea, eps, conf, src))
+  row =
+    Tv.Resolve.FileRow.FileRow
+      +31
+      "Some.Show.S01E01.mkv"
+      None
+      None
+      None
+      None
+      "/tv/Some Show {tmdb-100}/Season 01/Some.Show.S01E01.mkv"
+  (outcome, written) =
+    handle handle Tv.Resolve.resolveOne false "tok" row with recordingCatalog
+    with scriptedMeta
+  okOutcome =
+    match outcome with
+      TvResolved fid sid sea eps _ src ->
+        eq fid +31 && eq sid 100 && eq sea 1 && eq eps [1]
+          && eq src "folder_tag"
+      _ -> false
+  List.flatMap check [okOutcome]
 
 test> Tv.Resolve.resolveOne.missingEp.test =
   use Universal eq
@@ -7491,7 +8149,13 @@ test> Tv.Resolve.resolveOne.missingEp.test =
       (res, Some (fid, sid, sea, eps, conf, src))
   row =
     Tv.Resolve.FileRow.FileRow
-      +8 "Severance.S01E05.mkv" None None (Some 100) None
+      +8
+      "Severance.S01E05.mkv"
+      None
+      None
+      (Some 100)
+      None
+      "/tv/Severance/Season 01/Severance.S01E05.mkv"
   (outcome, written) =
     handle handle Tv.Resolve.resolveOne false "tok" row with recordingCatalog
     with scriptedMeta
@@ -7522,7 +8186,13 @@ test> Tv.Resolve.resolveOne.nfoId.test =
       (res, Some (fid, sid, sea, eps, conf, src))
   row =
     Tv.Resolve.FileRow.FileRow
-      +5 "Severance.S01E01.mkv" None None (Some 100) None
+      +5
+      "Severance.S01E01.mkv"
+      None
+      None
+      (Some 100)
+      None
+      "/tv/Severance/Season 01/Severance.S01E01.mkv"
   (outcome, written) =
     handle handle Tv.Resolve.resolveOne false "tok" row with recordingCatalog
     with scriptedMeta
@@ -7557,7 +8227,8 @@ test> Tv.Resolve.resolveOne.noRef.test =
       (res, _) = handle k() with recordingCatalog
       (res, Some (fid, sid, sea, eps, conf, src))
   row =
-    Tv.Resolve.FileRow.FileRow +6 "no episode marker here" None None None None
+    Tv.Resolve.FileRow.FileRow
+      +6 "no episode marker here" None None None None "no episode marker here"
   (outcome, written) =
     handle handle Tv.Resolve.resolveOne false "tok" row with recordingCatalog
     with scriptedMeta
@@ -7568,12 +8239,16 @@ test> Tv.Resolve.resolveOne.noRef.test =
 
 Tv.Resolve.resolveShowPick :
   Text
-  -> ParsedEpisode
+  -> [Text]
+  -> Optional Text
   -> Tv.Resolve.FileRow
   -> Int
   ->{TvMetaApi, TvCatalog} Either Tv.Resolve.Outcome (Nat, Nat, Text)
-Tv.Resolve.resolveShowPick token p row fid =
-  imdbHint = match hintImdbId row with
+Tv.Resolve.resolveShowPick token folders fileTitle row fid =
+  imdbCandidate = match hintImdbId row with
+    Some i -> Some i
+    None   -> imdbTagFromFolders folders
+  imdbHint = match imdbCandidate with
     None      -> None
     Some imdb ->
       dbHit = lookupShowByImdbDb imdb
@@ -7587,31 +8262,39 @@ Tv.Resolve.resolveShowPick token p row fid =
   match imdbHint with
     Some sid -> Right (sid, 95, "imdb_find")
     None ->
-      titleOpt = match Tv.Resolve.FileRow.hintTitle row with
+      rawTitle = match Tv.Resolve.FileRow.hintTitle row with
         Some t -> Some t
-        None   -> titlePrefix p
-      match titleOpt with
+        None   -> fileTitle
+      match rawTitle with
         None -> Left (NoShowHint fid)
-        Some t ->
-          yearOpt = Tv.Resolve.FileRow.hintYear row
-          searchResult = searchShows t yearOpt
-          match searchResult with
-            Left err -> Left (NoShowMatch fid err)
-            Right resp ->
-              candidates = Tv.Tmdb.SearchResponse.results resp
-              scored =
-                List.map (r -> (r, scoreShow t yearOpt None r)) candidates
-              match pickBestShow scored with
-                None -> Left (NoShowMatch fid "no single high-scoring match")
-                Some (r, s) -> Right (ShowResult.tmdbId r, s, "title_year")
+        Some raw ->
+          (cleaned, yearFromTitle) = cleanShowQuery raw
+          yearOpt = match yearFromTitle with
+            Some y -> Some y
+            None   -> Tv.Resolve.FileRow.hintYear row
+          if Universal.eq (Text.size cleaned) 0 then Left (NoShowHint fid)
+          else
+            searchResult = searchShows cleaned yearOpt
+            match searchResult with
+              Left err -> Left (NoShowMatch fid err)
+              Right resp ->
+                candidates = Tv.Tmdb.SearchResponse.results resp
+                scored =
+                  List.map
+                    (r -> (r, scoreShow cleaned yearOpt None r)) candidates
+                match pickBestShow scored with
+                  None -> Left (NoShowMatch fid "no single high-scoring match")
+                  Some (r, s) -> Right (ShowResult.tmdbId r, s, "title_year")
 
 Tv.Resolve.rowToFile :
-  (((((Int, Text), Optional Text), Optional Int), Optional Int), Optional Text)
+  ( ( ((((Int, Text), Optional Text), Optional Int), Optional Int),
+    Optional Text),
+    Text)
   -> Tv.Resolve.FileRow
 Tv.Resolve.rowToFile = cases
-  (((((fid, oname), ht), hy), hsid), himdb) ->
+  ((((((fid, oname), ht), hy), hsid), himdb), opath) ->
     Tv.Resolve.FileRow.FileRow
-      fid oname ht (optIntToNat hy) (optIntToNat hsid) himdb
+      fid oname ht (optIntToNat hy) (optIntToNat hsid) himdb opath
 
 Tv.Resolve.run : Config ->{IO, Exception} ()
 Tv.Resolve.run cfg = Tv.Resolve.runWith false cfg
@@ -7694,19 +8377,21 @@ Tv.Resolve.selectUnresolvedTvSql :
   postgres.Query
     r
     r
-    ( ((((Int, Text), Optional Text), Optional Int), Optional Int),
-      Optional Text)
+    ( ( ((((Int, Text), Optional Text), Optional Int), Optional Int),
+      Optional Text),
+      Text)
 Tv.Resolve.selectUnresolvedTvSql =
   use Codec optional text
   sql
-    "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id, f.hint_imdb_id FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging'"
+    "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id, f.hint_imdb_id, f.original_path FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging'"
     |> typedQuery
       (bigint
         ~ text
         ~ optional text
         ~ optional integer
         ~ optional integer
-        ~ optional text)
+        ~ optional text
+        ~ text)
 
 Tv.Resolve.upsertEpAssocSql :
   Command b (Int -> Int -> Int -> Int -> Int -> Text -> b)
@@ -7772,7 +8457,9 @@ Tv.Stage.collectVideos dir depth =
         fp = pathJoin dir n
         if isDirectory fp then
           if depth >= maxDepth then acc
-          else acc ++ Tv.Stage.collectVideos fp (depth + 1)
+          else
+            if isExtrasDir n then acc
+            else acc ++ Tv.Stage.collectVideos fp (depth + 1)
         else
           if isVideo n && Boolean.not (isSampleName n) then
             acc :+ filePathText fp
@@ -7840,6 +8527,35 @@ Tv.Stage.episodeHints root videoPath =
         (Some (EpisodeRef.season r), head (EpisodeRef.episodes r))
       None   -> (None, None)
   (title, year, showId, imdbId, seasonH, epH)
+
+Tv.Stage.isExtrasDir : Text -> Boolean
+Tv.Stage.isExtrasDir name =
+  lower = Text.toLowercase (trim name)
+  blocked =
+    [ "featurettes"
+    , "featuretts"
+    , "extras"
+    , "extra"
+    , "special features"
+    , "deleted scenes"
+    , "behind the scenes"
+    , "bonus"
+    , "bonus features"
+    , "interviews"
+    , "trailers"
+    , "trailer"
+    , "samples"
+    , "sample"
+    , "subs"
+    , "subtitles"
+    , "proof"
+    , "screens"
+    , "screenshots"
+    , "artwork"
+    , "covers"
+    , "@eadir"
+    ]
+  List.any (x -> Universal.eq x lower) blocked
 
 Tv.Stage.isSampleName : Text -> Boolean
 Tv.Stage.isSampleName n = match Text.indexOf "sample" (Text.toLowercase n) with
@@ -8379,13 +9095,10 @@ Tv.Tmdb.SearchResponse.toJson r =
     ]
 
 Tv.Tmdb.searchURI : Text -> Optional Nat -> URI
-Tv.Tmdb.searchURI title year =
+Tv.Tmdb.searchURI title _year =
   use Path /
   path = Path.root / "3" / "search" / "tv"
-  q0 = Query.empty & ("query", title)
-  q = match year with
-    Some y -> q0 & ("first_air_date_year", Nat.toText y)
-    None   -> q0
+  q = Query.empty & ("query", title)
   URI Scheme.https (Some Tmdb.apiAuthority) path (fromQuery q) Fragment.empty
 
 Tv.Tmdb.Season.fromJson : '{unison_json_1_4_2.Decoder} Season
@@ -9144,7 +9857,21 @@ Video.toJson v =
     ]
 
 videoExtensions : [Text]
-videoExtensions = [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv"]
+videoExtensions =
+  [ ".mkv"
+  , ".mp4"
+  , ".m4v"
+  , ".avi"
+  , ".mov"
+  , ".wmv"
+  , ".flv"
+  , ".mpeg"
+  , ".mpg"
+  , ".m2ts"
+  , ".mts"
+  , ".ts"
+  , ".webm"
+  ]
 
 ---- Anything below this line is ignored by Unison.
 
