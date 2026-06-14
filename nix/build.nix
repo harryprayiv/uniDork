@@ -17,6 +17,6 @@ pkgs.stdenv.mkDerivation {
     mkdir -p $out/bin $out/share
     cp ${prebuiltUc} $out/share/unidork-import.uc
     makeWrapper "${ucm}/bin/ucm" "$out/bin/unidork-import" \
-      --add-flags "run.compiled $out/share/unidork-import.uc"
+      --add-flags "run.compiled $out/share/unidork-import.uc --"
   '';
 }

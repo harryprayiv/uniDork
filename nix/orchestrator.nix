@@ -19,47 +19,39 @@ pkgs.writeShellApplication {
     : "''${PGDATA:=${config.database.dataDir}}"
     export PGDATA
 
-    # ── database ──────────────────────────────────────────────────────
     : "''${UNIDORK_DB_HOST:=${config.database.host}}"
     : "''${UNIDORK_DB_PORT:=${toString config.database.port}}"
     : "''${UNIDORK_DB_USER:=${config.database.user}}"
     : "''${UNIDORK_DB_NAME:=${config.database.name}}"
     export UNIDORK_DB_HOST UNIDORK_DB_PORT UNIDORK_DB_USER UNIDORK_DB_NAME
 
-    # ── cache ─────────────────────────────────────────────────────────
     : "''${UNIDORK_CACHE_FFPROBE:=${config.cache.ffprobeDir}}"
     : "''${UNIDORK_CACHE_STAGE:=${config.cache.stageDir}}"
     export UNIDORK_CACHE_FFPROBE UNIDORK_CACHE_STAGE
 
-    # ── movie paths ───────────────────────────────────────────────────
     : "''${UNIDORK_PATH_CONFIG:=${config.paths.configFile}}"
     : "''${UNIDORK_PATH_INTAKE:=${config.paths.intake}}"
     : "''${UNIDORK_PATH_BUFFER:=${config.paths.buffer}}"
     : "''${UNIDORK_PATH_LIBRARY:=${config.paths.library}}"
     export UNIDORK_PATH_CONFIG UNIDORK_PATH_INTAKE UNIDORK_PATH_BUFFER UNIDORK_PATH_LIBRARY
 
-    # ── tv paths ──────────────────────────────────────────────────────
     : "''${UNIDORK_PATH_TV_INTAKE:=${config.paths.tvIntake}}"
     : "''${UNIDORK_PATH_TV_BUFFER:=${config.paths.tvBuffer}}"
     : "''${UNIDORK_PATH_TV_LIBRARY:=${config.paths.tvLibrary}}"
     export UNIDORK_PATH_TV_INTAKE UNIDORK_PATH_TV_BUFFER UNIDORK_PATH_TV_LIBRARY
 
-    # ── formats ───────────────────────────────────────────────────────
     : "''${UNIDORK_FORMAT_MOVIE:=${config.rename.movieFormat}}"
     : "''${UNIDORK_FORMAT_TV:=${config.rename.tvFormat}}"
     export UNIDORK_FORMAT_MOVIE UNIDORK_FORMAT_TV
 
-    # ── tokens ────────────────────────────────────────────────────────
     : "''${UNIDORK_TOKEN_TMDB:=${config.tmdb.tokenFile}}"
     : "''${UNIDORK_TOKEN_SUB:=${config.subs.tokenFile}}"
     export UNIDORK_TOKEN_TMDB UNIDORK_TOKEN_SUB
 
-    # ── tuning ────────────────────────────────────────────────────────
     : "''${UNIDORK_TUNE_PROBE_JOBS:=${toString config.tuning.probeJobs}}"
     : "''${UNIDORK_TUNE_SUB_LANGS:=${lib.concatStringsSep "," config.subs.languages}}"
     export UNIDORK_TUNE_PROBE_JOBS UNIDORK_TUNE_SUB_LANGS
 
-    # ── psql convenience ──────────────────────────────────────────────
     export PGPORT="$UNIDORK_DB_PORT"
     export PGUSER="$UNIDORK_DB_USER"
     export PGDATABASE="$UNIDORK_DB_NAME"
@@ -77,15 +69,19 @@ pkgs.writeShellApplication {
       fi
     }
 
-    # ── postgres lifecycle ────────────────────────────────────────────
+    has_flag() {
+      flag="$1"; shift
+      for a in "$@"; do [ "$a" = "$flag" ] && return 0; done
+      return 1
+    }
+
     cmd_start()  { pg-start; }
     cmd_stop()   { pg-stop; }
 
-    # ── movie commands ────────────────────────────────────────────────
     cmd_probe()    { ensure_pg; unidork-import probe-stage; }
     cmd_resolve()  { ensure_pg; unidork-import resolve; }
     cmd_identify() { ensure_pg; unidork-import identify; }
-    cmd_process()  { ensure_pg; unidork-import process; }
+    cmd_process()  { ensure_pg; unidork-import process "$@"; }
     cmd_move()     { ensure_pg; unidork-import move "$@"; }
 
     cmd_reconcile()      { ensure_pg; unidork-import reconcile; }
@@ -94,37 +90,35 @@ pkgs.writeShellApplication {
 
     cmd_rename() {
       ensure_pg
-      apply=0
-      for a in "$@"; do [ "$a" = "--apply" ] && apply=1; done
-      if [ "$apply" -ne 1 ]; then
-        echo "rename is destructive. pass --apply to actually move files."
-        echo "for a read-only TMDB report: unidork identify"
+      if has_flag "--dry-run" "$@"; then
+        unidork-import rename "$UNIDORK_FORMAT_MOVIE" --dry-run
+      elif has_flag "--apply" "$@"; then
+        unidork-import rename "$UNIDORK_FORMAT_MOVIE"
+      else
+        echo "rename is destructive. pass --apply to move files, or --dry-run to preview."
         exit 1
       fi
-      unidork-import rename "$UNIDORK_FORMAT_MOVIE"
     }
 
-    # ── tv commands ───────────────────────────────────────────────────
     cmd_tv_init()     { ensure_pg; unidork-import tv-init; }
     cmd_tv_probe()    { ensure_pg; unidork-import tv-probe; }
     cmd_tv_resolve()  { ensure_pg; unidork-import tv-resolve; }
     cmd_tv_identify() { ensure_pg; unidork-import tv-identify; }
-    cmd_tv_process()  { ensure_pg; unidork-import tv-process; }
-    cmd_tv_move() { ensure_pg; unidork-import tv-move "$@"; }
+    cmd_tv_process()  { ensure_pg; unidork-import tv-process "$@"; }
+    cmd_tv_move()     { ensure_pg; unidork-import tv-move "$@"; }
 
     cmd_tv_rename() {
       ensure_pg
-      apply=0
-      for a in "$@"; do [ "$a" = "--apply" ] && apply=1; done
-      if [ "$apply" -ne 1 ]; then
-        echo "tv-rename is destructive. pass --apply to actually move files."
-        echo "for a read-only report: unidork tv-identify"
+      if has_flag "--dry-run" "$@"; then
+        unidork-import tv-rename --dry-run
+      elif has_flag "--apply" "$@"; then
+        unidork-import tv-rename
+      else
+        echo "tv-rename is destructive. pass --apply to move files, or --dry-run to preview."
         exit 1
       fi
-      unidork-import tv-rename
     }
 
-    # ── combined commands ─────────────────────────────────────────────
     cmd_process_all() {
       ensure_pg
       echo "[orchestrator] === movie process ==="
@@ -152,7 +146,6 @@ pkgs.writeShellApplication {
       cmd_resolve
     }
 
-    # ── utility ───────────────────────────────────────────────────────
     cmd_clean_stage() {
       ensure_pg
       echo "[clean-stage] truncating probe_cache"
@@ -176,7 +169,6 @@ SELECT '  tmdb movies:        ' || COUNT(*)::text FROM movies;
 SELECT '  associations:       ' || COUNT(*)::text FROM associations;
 SELECT '  library_movies:     ' || COUNT(*)::text FROM library_movies;
 SQL
-      # tv tables may not exist yet; guard with a check
       if psql -At -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'shows'" 2>/dev/null | grep -q 1; then
         echo "=== tv ==="
         psql -At <<'SQL'
@@ -198,17 +190,14 @@ SQL
       fi
     }
 
-    # ── dispatch ──────────────────────────────────────────────────────
     case "$cmd" in
-      # postgres
       start)          cmd_start ;;
       stop)           cmd_stop ;;
 
-      # movie pipeline
       probe|probe-stage)   cmd_probe ;;
       resolve)             cmd_resolve ;;
       identify)            cmd_identify ;;
-      process)             cmd_process ;;
+      process)             cmd_process "$@" ;;
       move)                cmd_move "$@" ;;
       rename)              cmd_rename "$@" ;;
       probe-resolve)       cmd_probe_resolve ;;
@@ -216,21 +205,18 @@ SQL
       import-library)      cmd_import_library ;;
       import-all)          cmd_import_all ;;
 
-      # tv pipeline
       tv-init)             cmd_tv_init ;;
       tv-probe)            cmd_tv_probe ;;
       tv-resolve)          cmd_tv_resolve ;;
       tv-identify)         cmd_tv_identify ;;
       tv-rename)           cmd_tv_rename "$@" ;;
-      tv-process)          cmd_tv_process ;;
+      tv-process)          cmd_tv_process "$@" ;;
       tv-move)             cmd_tv_move "$@" ;;
 
-      # combined
       process-all)         cmd_process_all ;;
       run-all)             cmd_run_all ;;
       run)                 cmd_run_all ;;
 
-      # utility
       status)              cmd_status ;;
       psql|connect)        pg-connect ;;
       clean-stage)         cmd_clean_stage ;;
@@ -240,27 +226,33 @@ SQL
         cat <<EOF
 unidork - pipeline orchestrator
 
+DRY RUN
+  Every destructive verb accepts --dry-run: no file is created, moved, or
+  deleted. DB metadata (probe rows, associations, TMDB caches) may still be
+  written.
+
 MOVIE PIPELINE
-  process           probe intake + resolve + rename -> movie buffer  (DESTRUCTIVE)
-  probe             probe movie intake -> files (stage=staging, media_kind=movie)
-  resolve           associate staging movie files -> tmdb movies
-  identify          read-only TMDB match report for movie intake
-  rename --apply    rename staging movies into buffer                (DESTRUCTIVE)
-  move [folder]     promote buffer folder(s) into movie library     (DESTRUCTIVE)
-  reconcile         probe movie buffer (repair/record existing files)
-  import-library    scan library dirs -> files + library_movies
-  import-all        reconcile + import-library
+  process [--dry-run]        probe + resolve + rename -> movie buffer   (DESTRUCTIVE without --dry-run)
+  probe                      probe movie intake -> files (stage=staging)
+  resolve                    associate staging movie files -> tmdb movies
+  identify                   read-only resolver report for movie intake
+  rename --apply|--dry-run   rename staging movies into buffer          (DESTRUCTIVE with --apply)
+  move [folder] [--dry-run]  promote buffer folder(s) into movie library
+  reconcile                  probe movie buffer (repair/record existing files)
+  import-library             scan library dirs -> files + library_movies
+  import-all                 reconcile + import-library
 
 TV PIPELINE
-  tv-process        probe tv intake + resolve + rename -> tv buffer  (DESTRUCTIVE)
-  tv-probe          probe tv intake -> files (stage=staging, media_kind=episode)
-  tv-resolve        associate staging episode files -> shows/episodes
-  tv-identify       read-only TMDB match report for tv intake
-  tv-rename --apply rename staging episodes into tv buffer           (DESTRUCTIVE)
-  tv-init           create tv schema tables (runs automatically on tv-probe)
+  tv-process [--dry-run]        probe + resolve + rename -> tv buffer   (DESTRUCTIVE without --dry-run)
+  tv-probe                      probe tv intake -> files
+  tv-resolve                    associate staging episode files -> shows/episodes
+  tv-identify                   read-only resolver report for tv intake
+  tv-rename --apply|--dry-run   rename staging episodes into tv buffer  (DESTRUCTIVE with --apply)
+  tv-move [folder] [--dry-run]  promote tv buffer show folder(s) into tv library
+  tv-init                       create tv schema tables
 
 COMBINED
-  process-all       movie process then tv process                    (DESTRUCTIVE)
+  process-all       movie process then tv process                       (DESTRUCTIVE)
   run               import-library + movie process + tv process
 
 UTILITY

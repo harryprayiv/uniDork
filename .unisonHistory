@@ -1,64 +1,100 @@
-compile cli ./bin/unidork-import
-edit.namespace .
-compile cli ./bin/unidork-import
+quit
+compile cli bin/unidork-import
+update
+find.global : Config -> Optional Text -> Boolean ->{IO, Exception} ()
+debug.find.global planBatch
+debug.find.global moveChunk
+debug.find.global moveBatch
+debug.find.global moveOne
+reflog
 update
 edit.namespace .
-compile cli ./bin/unidork-import
+debug.find.global Move.run
+view cli
+find : Config -> Optional Text -> Boolean ->{IO, Exception} ()
+find within Move
+find Move.moveFolder
+find Move.promote
+find Move.move
+find Move.run
+compile cli bin/unidork-import
+test
 update
-compile cli ./bin/unidork-import
+view Move.partialRoot Move.sweepPartial Move.commitFolder
+view Move.run
+find Move.
+find collectVideoFiles
+find Tv.Move.
+view loadIdentity selectFileByPathSql updateFilePathSql
+view Move.moveOne Move.moveChunk Move.moveBatch Move.run
+view Tv.Move.moveShow Tv.Move.run Tv.Move.updatePathSql
 update
-compile cli ./bin/unidork-import
+test
 update
-compile cli ./bin/unidork-import
+compile cli bin/unidork-import
+test
 update
-compile cli ./bin/unidork-import
+compile cli bin/unidork-import
+update
+view cli
+compile cli bin/unidork-import
 edit.namespace .
-compile cli ./bin/unidork-import
 update
-edit.namespace .
-compile cli ./bin/unidork-import
+delete.term Tmdb.printCandidate
+delete.term Tmdb.reportLooseVideoWith
+delete.term Tmdb.reportFolderWith
+dependents uniDork.identify
 update
-edit.namespace Resolve
-edit.namespace Resolve.selectUnresolvedSql
+delete.term Tmdb.buildParsedRelease
+delete.term Stage.selectProbeJsonByPathSql
+delete.term Stage.probeMinutesForPathWith
+delete.term Tmdb.printCandidate
+delete.term Tmdb.reportLooseVideoWith
+delete.term Tmdb.reportFolderWith
+delete.term uniDork.identify
 update
-edit.namespace Db
-edit.namespace Db.migrate
-update
-edit.namespace Db.migrate
-edit.namespace Db.filesDdl
-edit Db.filesDdl
-compile cli ./bin/unidork-import
-edit.namespace .
-compile cli ./bin/unidork-import
-update
-[Bq
-update
-edit.namespace .
-cancel
-update
-compile cli ./bin/unidork-import
-edit.namespace .
-compile cli ./bin/unidork-import
-edit.namespace .
-compile cli ./bin/unidork-import
-update
-compile cli ./bin/unidork-import
-update
-compile cli ./bin/unidork-import
-update
-compile cli ./bin/unidork-import
-update
-edit.namespace .
-run resetDb
-compile cli ./bin/unidork-import
-unidork start
-update
-compile cli ./bin/unidork-import
-update
-compile cli ./bin/unidork-import
-update
-compile cli ./bin/unidork-import
+delete.term uniDork.identify
+dependents Tmdb.reportLooseVideoWith
+dependents Tmdb.reportFolderWith
+dependents uniDork.identify
 update
 edit.namespace .
-edit .
-edit uniDork
+view Stage.forkChunk
+view Stage.runChunk
+view runProbeAt
+view runProbeStage
+compile cli bin/unidork-import
+edit.namespace .
+compile cli bin/unidork-import
+test
+update
+edit.namespace .
+compile cli bin/unidork-import
+update
+view Stage.fileStat
+compile cli bin/unidork-import
+edit.namespace .
+find getFileSize
+compile cli bin/unidork-import
+test
+update
+view Move.moveChunk
+view Move.moveBatch
+view Move.moveOne
+compile cli bin/unidork-import
+delete.type Tmdb.CachedSearch Tv.Tmdb.CachedSearch
+delete.term Tmdb.CachedSearch.folder Tmdb.CachedSearch.folder.set Tmdb.CachedSearch.folder.modify Tmdb.CachedSearch.response Tmdb.CachedSearch.response.set Tmdb.CachedSearch.response.modify Tmdb.CachedSearch.error Tmdb.CachedSearch.error.set Tmdb.CachedSearch.error.modify Tv.Tmdb.CachedSearch.key Tv.Tmdb.CachedSearch.key.set Tv.Tmdb.CachedSearch.key.modify Tv.Tmdb.CachedSearch.response Tv.Tmdb.CachedSearch.response.set Tv.Tmdb.CachedSearch.response.modify Tv.Tmdb.CachedSearch.error Tv.Tmdb.CachedSearch.error.set Tv.Tmdb.CachedSearch.error.modify
+delete.term Tmdb.readDbCacheWith Tmdb.writeDbCacheWith Tv.Tmdb.readDbCacheWith Tv.Tmdb.writeDbCacheWith Tmdb.CachedSearch.fromJson Tmdb.CachedSearch.toJson Tv.Tmdb.CachedSearch.fromJson Tv.Tmdb.CachedSearch.toJson Tmdb.maxScore Tmdb.popularityWinner Tmdb.pickBest Tv.Tmdb.maxScore Tv.Tmdb.popularityWinner
+test
+update
+compile cli bin/unidork-import
+test
+delete.type Tmdb.MovieDetails Tmdb.Credits Tmdb.CrewMember Tmdb.Genre Tmdb.Country Tmdb.Studio Tmdb.Collection Tmdb.ExternalIds Tmdb.ReleaseInfo
+delete.term Tmdb.MovieDetails.id Tmdb.MovieDetails.id.set Tmdb.MovieDetails.id.modify Tmdb.MovieDetails.title Tmdb.MovieDetails.title.set Tmdb.MovieDetails.title.modify Tmdb.MovieDetails.originalTitle Tmdb.MovieDetails.originalTitle.set Tmdb.MovieDetails.originalTitle.modify Tmdb.MovieDetails.overview Tmdb.MovieDetails.overview.set Tmdb.MovieDetails.overview.modify Tmdb.MovieDetails.tagline Tmdb.MovieDetails.tagline.set Tmdb.MovieDetails.tagline.modify Tmdb.MovieDetails.releaseDate Tmdb.MovieDetails.releaseDate.set Tmdb.MovieDetails.releaseDate.modify Tmdb.MovieDetails.runtime Tmdb.MovieDetails.runtime.set Tmdb.MovieDetails.runtime.modify Tmdb.MovieDetails.voteAverage Tmdb.MovieDetails.voteAverage.set Tmdb.MovieDetails.voteAverage.modify Tmdb.MovieDetails.voteCount Tmdb.MovieDetails.voteCount.set Tmdb.MovieDetails.voteCount.modify Tmdb.MovieDetails.genres Tmdb.MovieDetails.genres.set Tmdb.MovieDetails.genres.modify Tmdb.MovieDetails.productionCountries Tmdb.MovieDetails.productionCountries.set Tmdb.MovieDetails.productionCountries.modify Tmdb.MovieDetails.productionCompanies Tmdb.MovieDetails.productionCompanies.set Tmdb.MovieDetails.productionCompanies.modify Tmdb.MovieDetails.collection Tmdb.MovieDetails.collection.set Tmdb.MovieDetails.collection.modify Tmdb.MovieDetails.posterPath Tmdb.MovieDetails.posterPath.set Tmdb.MovieDetails.posterPath.modify Tmdb.MovieDetails.backdropPath Tmdb.MovieDetails.backdropPath.set Tmdb.MovieDetails.backdropPath.modify Tmdb.MovieDetails.credits Tmdb.MovieDetails.credits.set Tmdb.MovieDetails.credits.modify Tmdb.MovieDetails.releaseDates Tmdb.MovieDetails.releaseDates.set Tmdb.MovieDetails.releaseDates.modify Tmdb.MovieDetails.externalIds Tmdb.MovieDetails.externalIds.set Tmdb.MovieDetails.externalIds.modify Tmdb.Credits.cast Tmdb.Credits.cast.set Tmdb.Credits.cast.modify Tmdb.Credits.crew Tmdb.Credits.crew.set Tmdb.Credits.crew.modify Tmdb.CrewMember.id Tmdb.CrewMember.id.set Tmdb.CrewMember.id.modify Tmdb.CrewMember.name Tmdb.CrewMember.name.set Tmdb.CrewMember.name.modify Tmdb.CrewMember.job Tmdb.CrewMember.job.set Tmdb.CrewMember.job.modify Tmdb.CrewMember.department Tmdb.CrewMember.department.set Tmdb.CrewMember.department.modify Tmdb.Genre.id Tmdb.Genre.id.set Tmdb.Genre.id.modify Tmdb.Genre.name Tmdb.Genre.name.set Tmdb.Genre.name.modify Tmdb.Country.code Tmdb.Country.code.set Tmdb.Country.code.modify Tmdb.Country.name Tmdb.Country.name.set Tmdb.Country.name.modify Tmdb.Studio.id Tmdb.Studio.id.set Tmdb.Studio.id.modify Tmdb.Studio.name Tmdb.Studio.name.set Tmdb.Studio.name.modify Tmdb.Collection.id Tmdb.Collection.id.set Tmdb.Collection.id.modify Tmdb.Collection.name Tmdb.Collection.name.set Tmdb.Collection.name.modify Tmdb.ExternalIds.imdbId Tmdb.ExternalIds.imdbId.set Tmdb.ExternalIds.imdbId.modify Tmdb.ReleaseInfo.country Tmdb.ReleaseInfo.country.set Tmdb.ReleaseInfo.country.modify Tmdb.ReleaseInfo.certification Tmdb.ReleaseInfo.certification.set Tmdb.ReleaseInfo.certification.modify
+delete.term Tmdb.readToken Tmdb.tokenPath Tmdb.detailsFromResult Rename.buildNfo Rename.maxCast Rename.imageBaseUrl Tmdb.MovieDetails.fromJson Tmdb.MovieDetails.castList Tmdb.MovieDetails.directors Tmdb.MovieDetails.writers Tmdb.MovieDetails.imdb Tmdb.MovieDetails.mpaa Tmdb.Credits.fromJson Tmdb.CrewMember.fromJson Tmdb.Genre.fromJson Tmdb.Country.fromJson Tmdb.Studio.fromJson Tmdb.Collection.fromJson Tmdb.ExternalIds.fromJson Tmdb.releaseDatesParser Tmdb.releaseInfoEntry
+dependents Tmdb.MovieDetails.fromJson
+dependents Rename.buildNfo
+dependents Tmdb.detailsFromResult
+dependents Tmdb.readToken
+find Confidence
+find Context
