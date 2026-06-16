@@ -130,6 +130,6 @@ Unison (`@unison/base`, `@unison/json`, `@unison/xml`, `@unison/http`, `@runaror
 
 The compiled binary (`bin/unidork-import.uc`) is *not* the live UCM namespace. After editing definitions, test via `run <thunk>` against the namespace, then `compile cli ./bin/unidork-import` and `direnv reload` to update the binary. Editing the namespace and testing via `unidork` silently tests stale code.
 
-## License
+## License 
 
 [AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html).

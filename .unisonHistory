@@ -1,3 +1,4 @@
+edit.namespace .
 compile cli bin/unidork-import
 edit.namespace .
 update
@@ -97,4 +98,3 @@ test
 update
 compile cli bin/unidork-import
 test
-delete.type Tmdb.MovieDetails Tmdb.Credits Tmdb.CrewMember Tmdb.Genre Tmdb.Country Tmdb.Studio Tmdb.Collection Tmdb.ExternalIds Tmdb.ReleaseInfo
