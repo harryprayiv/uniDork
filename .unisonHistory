@@ -1,4 +1,22 @@
 edit.namespace .
+push @harryprayiv/uniDork
+update
+compile cli bin/unidork-import
+edit.namespace .
+quit
+edit.namespace .
+push @harryprayiv/uniDork
+update
+quit
+push @harryprayiv/uniDork
+edit unisonConfig
+edit ~/.unisonConfig
+pull @unison/cloud-start/releases/latest
+switch uniDork
+project uniDork
+3
+projects
+edit.namespace .
 compile cli bin/unidork-import
 edit.namespace .
 update
@@ -80,21 +98,3 @@ update
 edit.namespace .
 compile cli bin/unidork-import
 update
-view Stage.fileStat
-compile cli bin/unidork-import
-edit.namespace .
-find getFileSize
-compile cli bin/unidork-import
-test
-update
-view Move.moveChunk
-view Move.moveBatch
-view Move.moveOne
-compile cli bin/unidork-import
-delete.type Tmdb.CachedSearch Tv.Tmdb.CachedSearch
-delete.term Tmdb.CachedSearch.folder Tmdb.CachedSearch.folder.set Tmdb.CachedSearch.folder.modify Tmdb.CachedSearch.response Tmdb.CachedSearch.response.set Tmdb.CachedSearch.response.modify Tmdb.CachedSearch.error Tmdb.CachedSearch.error.set Tmdb.CachedSearch.error.modify Tv.Tmdb.CachedSearch.key Tv.Tmdb.CachedSearch.key.set Tv.Tmdb.CachedSearch.key.modify Tv.Tmdb.CachedSearch.response Tv.Tmdb.CachedSearch.response.set Tv.Tmdb.CachedSearch.response.modify Tv.Tmdb.CachedSearch.error Tv.Tmdb.CachedSearch.error.set Tv.Tmdb.CachedSearch.error.modify
-delete.term Tmdb.readDbCacheWith Tmdb.writeDbCacheWith Tv.Tmdb.readDbCacheWith Tv.Tmdb.writeDbCacheWith Tmdb.CachedSearch.fromJson Tmdb.CachedSearch.toJson Tv.Tmdb.CachedSearch.fromJson Tv.Tmdb.CachedSearch.toJson Tmdb.maxScore Tmdb.popularityWinner Tmdb.pickBest Tv.Tmdb.maxScore Tv.Tmdb.popularityWinner
-test
-update
-compile cli bin/unidork-import
-test
