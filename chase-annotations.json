@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "modules": {
+
+    "uniDork": {
+
+      "decisions": [
+        {
+          "name": "ContentAddressedIdentityIsBytesNotLabels",
+          "what": "A file's identity is (crc32, size_bytes); the CRC32 is also embedded in folder/file names (~XXXXXXXX) and re-derived from the on-disk bytes at every stage. Names are derived data, never the source of truth.",
+          "why": [
+            "The whole point of the project: the same title ripped twice is two distinct rows, a renamed or relocated folder is still the same row. Identity survives every rename because it is a hash of the video bytes, not a path.",
+            "files has UNIQUE (crc32, size_bytes); ON CONFLICT upserts. That pair is the primary identity everywhere downstream (associations.file_id, probe_cache, move verification).",
+            "Folder-embedded CRC (parseFolderName reading ~XXXXXXXX) is a CONVENIENCE for fast skip and human inspection, NOT trusted: processOne re-probes and corrects a folder whose claimed CRC disagrees with the bytes.",
+            "Consequence: every CRC comparison in the pipeline is uppercase (runRhashCrc32 uppercases+trims); any code that introduces a lowercase or untrimmed CRC will silently fail to match."
+          ],
+          "affects": ["Stage.runRhashCrc32", "Stage.upsertFileSql", "Move.verifyFile", "uniDork.processOne", "Nfo.parseFolderName"]
+        },
+        {
+          "name": "StageAndMediaKindPartitionOneFilesTable",
+          "what": "One files table is partitioned by two columns: stage (staging -> buffer -> library) and media_kind (movie | episode). The resolvers select on these, they are not separate tables.",
+          "why": [
+            "Movies and TV share the same files table, the same identity model, and the same three-directory discipline; only the two partition columns separate them.",
+            "resolve matches media_kind='movie' AND stage<>'buffer' (selectUnresolvedSql); tv-resolve matches media_kind='episode' AND stage='staging' (selectUnresolvedTvSql).",
+            "stage='buffer' is deliberately EXCLUDED from movie resolve: once rename has written a folder into the buffer, its identity comes from the NFO rename wrote, not from a fresh TMDB match. Re-resolving a buffered file would fight the rename that already happened.",
+            "rename selects stage='staging' (selectRenamableSql / selectEpisodeRenamableSql), move flips rows to stage='library'. The lifecycle is encoded in this column, not in code flow."
+          ],
+          "affects": ["Resolve.selectUnresolvedSql", "Tv.Resolve.selectUnresolvedTvSql", "Rename.selectRenamableSql", "Tv.Rename.selectEpisodeRenamableSql"]
+        },
+        {
+          "name": "MoveBlastRadiusIsOneFolderUnderRoot",
+          "what": "move/tv-move only ever WRITE under the configured library root and only ever DELETE from the buffer; every destination is guarded by enforceUnderRoot before any filesystem mutation.",
+          "why": [
+            "This is the single most dangerous verb in the system: it relocates real media and deletes the source. The safety property is mechanical, not careful coding: enforceUnderRoot rejects any destination not prefixed by libraryRoot + '/'.",
+            "move additionally aborts if the destination folder already exists, so it can never overwrite an existing library folder. The blast radius of one movie move is exactly: one folder added to library, one removed from buffer.",
+            "tv-move is a deliberately WIDER blast radius (it merges into an existing show folder via mergeTree), but still never overwrites an existing episode file and still only writes under tvLibrary.",
+            "The library root comes from UNIDORK_PATH_LIBRARY / UNIDORK_PATH_TV_LIBRARY (set from nix/config.nix). Those env vars are the ONLY thing controlling where move writes; this is why the README tells you to echo them before the first production move."
+          ],
+          "affects": ["Move.moveFolder", "Move.transferFolder", "Move.enforceUnderRoot", "Tv.Move.moveShow", "Tv.Move.transferShow"]
+        },
+        {
+          "name": "IdentityVerifiedBySizeNotByRehash",
+          "what": "At promotion, a file's stored CRC is trusted as long as the on-disk size equals the stored size_bytes. There is no re-hash at move time; on size mismatch (or missing row) the update falls back to a name-based path update.",
+          "why": [
+            "Re-running rhash on every file at promotion would double the I/O cost of the slowest part of the pipeline for files that have not changed since probe. Size equality is a cheap proxy: a file whose byte count is unchanged has overwhelmingly not had its CRC change.",
+            "verifyFile / verifyEpisode return (path, diskOk, identOpt) where diskOk is purely the size comparison. updateMovieFile / updateEpisode then branch: verified -> update files row by (crc, size); unverified -> update by old path string, and print a WARN.",
+            "The honest hole: a file corrupted or swapped in place at exactly the same byte length would pass verification with a stale CRC. This is accepted as vanishingly unlikely against the I/O savings. See open issue NoRematchGateAtPromotion for the related trust of the NFO id."
+          ],
+          "affects": ["Move.verifyFile", "Move.updateMovieFile", "Tv.Move.verifyEpisode", "Tv.Move.updateEpisode"]
+        },
+        {
+          "name": "AtomicRenameOrRsyncPartialThenCommit",
+          "what": "Same-filesystem transfers use an atomic mv -T; cross-filesystem transfers rsync into a .unidork-partial staging dir under the library root, then mv-commit into place, then delete the source. Crashed partials are swept on the next run.",
+          "why": [
+            "A cross-device move is not atomic: a crash mid-copy would leave a half-written folder in the live library. Staging the copy under .unidork-partial and only mv-committing the completed copy makes the visible-in-library step atomic even across filesystems.",
+            "sameDevice compares stat %d (device numbers); a stat FAILURE returns false, which routes to the SAFER rsync-partial path rather than risking an atomic rename that would actually be a cross-device copy.",
+            "sweepPartial removes the whole .unidork-partial tree at the start of a non-dry-run move, on the theory that any partial present is the debris of a previous crash, never a concurrent transfer (the pipeline is single-writer).",
+            "On a cross-device abort the SOURCE is left intact (delete only happens after a successful commit), so a failed move never loses data."
+          ],
+          "affects": ["Move.transferFolder", "Move.sweepPartial", "Move.partialRoot", "Tv.Move.transferShow"]
+        },
+        {
+          "name": "RuntimeNormalizedClusteringForEditions",
+          "what": "Versions clusters a tmdb_id's copies into editions by normalizing each copy's runtime to a reference frame rate (24000/1001) and grouping copies whose normalized seconds are within 1.5% of each other.",
+          "why": [
+            "The naive approach (group by raw duration) would split a PAL 25fps transfer and a 23.976fps transfer of the SAME cut into two editions because PAL speedup shortens the runtime by ~4%. normalizedSeconds multiplies durationSec by fps/referenceFps to cancel the speedup.",
+            "relativeClose uses a RELATIVE tolerance (d/hi <= sameCutTolerance = 1.5e-2), not an absolute second count, so the tolerance scales with film length: a 3-hour film tolerates more absolute drift than a 90-minute one.",
+            "The 1.5% threshold is tuned to merge frame-rate and minor-trim differences while still separating a genuine Director's/Extended cut (which differ by minutes, well outside 1.5%). See open issue DuplicatesNotRankedForUser for what clustering does NOT yet do."
+          ],
+          "affects": ["Versions.normalizedSeconds", "Versions.clusterByCut", "Versions.relativeClose", "Versions.referenceFps"]
+        },
+        {
+          "name": "DatabaseAndMetadataAreAbilitiesInterpretedAtRunBoundary",
+          "what": "Per-file logic (resolveOne, runStep, etc.) is written against abilities (MovieCatalog/ResolveCatalog/MetaApi/TvCatalog/TvMetaApi/RenameCatalog/TvMoveCatalog). The real Postgres/HTTP handlers are installed only at the runWith / run boundary; the per-file functions never touch a connection directly.",
+          "why": [
+            "This is what makes resolveOne and friends unit-testable with scripted pure handlers. The Resolve.resolveOne.* and Tv.Resolve.resolveOne.* tests install handlers that return canned TMDB responses and RECORD whether recordMatch was called, with zero database or network.",
+            "The effect rows in the signature (e.g. {MetaApi, ResolveCatalog}) are the contract: any handler satisfying them can drive the logic. The production handler (metaGo/catalogGo inside runWith) wires the ability to prepared statements; the test handler wires it to a tuple accumulator.",
+            "Consequence: reading a resolveOne body tells you the decision logic but NOT what hits the DB. The actual writes live in the handler arms of runWith, and the dry-run gate (see DryRunGatesWritesNotMetadata) lives in resolveOne but is enforced by simply not calling the ability."
+          ],
+          "affects": ["Resolve.resolveOne", "Resolve.runWith", "Tv.Resolve.resolveOne", "Tv.Resolve.runWith", "Rename.runStep"]
+        },
+        {
+          "name": "DryRunGatesFilesystemAndAssociationsNotProbeOrCache",
+          "what": "--dry-run suppresses filesystem operations and association/match writes, but probe rows, TMDB caches, and subtitle-search caches are STILL written during a dry run.",
+          "why": [
+            "A dry run is meant to preview file movement and matching decisions safely, not to be a pure read. Probing and caching are idempotent, side-effect-free-on-the-library work whose results are valuable to keep even from a preview run.",
+            "resolveOne / Tv.Resolve.resolveOne gate recordMatch/recordEpisodeMatch on dryRun (the 'if dryRun then () else record...' pattern), but the surrounding runWith still fetches and caches TMDB details/search/season payloads regardless.",
+            "move/rename gate the actual mv/rsync/removeFile and the files-row promotion on dryRun, emitting WouldRename/WouldRemoveDuplicate outcomes instead.",
+            "Consequence: a dry run is NOT free of DB writes. It will populate probe_cache, tmdb_search_cache, tmdb_details_cache, etc. This is intentional but surprising; do not treat --dry-run as read-only."
+          ],
+          "affects": ["Move.run", "Rename.runNew", "Resolve.resolveOne", "Tv.Resolve.resolveOne", "Tv.Rename.applyTv"]
+        }
+      ],
+
+      "openIssues": [
+        {
+          "name": "RelangDecisionComputedButNeverApplied",
+          "what": "Relang.decide produces a default-audio-track decision (SwitchTo / AlreadyCorrect / OriginalNotPresent / ...), but nothing in the pipeline remuxes or re-flags the file to apply it.",
+          "why": [
+            "decide -> selectTrack -> bestOf is a complete, tested analysis: it picks the original-language, non-commentary, highest-channel/best-codec track and reports whether the current default is wrong. The result is a Decision value that is computed and then dropped.",
+            "There is no ffmpeg remux step and no mkvpropedit call anywhere that consumes a SwitchTo. The README lists this under 'What's next' as the first item.",
+            "Wiring it requires deciding WHEN to apply (at rename into buffer? at promotion?) and a mux/flag step that mutates the container, which crosses the line from metadata-only into byte-mutating territory and needs its own safety story."
+          ],
+          "blocking": ["actually correcting default audio tracks for foreign-language media"],
+          "affects": ["Relang.decide", "Relang.selectTrack", "Relang.bestOf"]
+        },
+        {
+          "name": "NoSubtitleMuxingAndNoTvSubtitleFetchAtAll",
+          "what": "Movie subtitles are fetched from subdl and written as language-tagged SIDECAR files only; they are never muxed into the MKV, and the TV pipeline fetches no subtitles whatsoever.",
+          "why": [
+            "fetchAndSaveByImdb/saveOneLanguage download and write '<base>.<lang>.<ext>' next to the video. maybeFetchSubsM is called only from the MOVIE rename path (executeOne); the TV rename path (executeEpisode) has no equivalent call.",
+            "Muxing into the container would require an ffmpeg remux step that does not exist (same missing capability as the Relang apply).",
+            "Consequence: Kodi/Jellyfin will pick up the sidecars for movies, but episodic TV gets no subtitles at all, and no media gets embedded subs. README documents both gaps honestly under 'What's next'."
+          ],
+          "blocking": ["embedded subtitle tracks", "any TV subtitle support"],
+          "affects": ["Subs.fetchAndSaveByImdb", "Subs.saveOneLanguage", "Rename.maybeFetchSubsM"]
+        },
+        {
+          "name": "DuplicatesGroupedIntoEditionsButNotRankedForUserDecision",
+          "what": "Exact byte-duplicates (same CRC tag + matching size at the target) are removed at rename, and distinct rips of one tmdb_id are clustered into editions by runtime, but multiple DISTINCT rips of the same cut are never ranked by quality and surfaced for a keep/discard decision.",
+          "why": [
+            "executeOne removes a source that is byte-identical to something already at the target (DuplicateRemoved). Versions.analyze clusters by cut and even computes qualityScore and picks a per-edition default. But that is as far as it goes.",
+            "qualityScore exists (resolution/depth/bitrate/codec/channels weighting) and analyze marks an is_default member, yet nothing presents 'you have a 1080p x264 and a 2160p x265 of the same cut, keep which?' to the user or auto-prunes the loser.",
+            "The editions/versions tables capture the grouping; the missing piece is a surfacing/pruning verb. README lists this under 'What's next' as duplicate management."
+          ],
+          "blocking": ["automated or assisted pruning of redundant quality variants"],
+          "affects": ["Versions.analyze", "Versions.qualityScore", "Rename.executeOne"]
+        },
+        {
+          "name": "NoRematchGateBeforePromotion",
+          "what": "move trusts the tmdb id written into the buffer NFO by rename and does not re-verify the match against TMDB before promoting into the library.",
+          "why": [
+            "moveFolder parses the buffer NFO, reads its tmdb id, and promotes. If rename associated the wrong title, move faithfully promotes the wrong title; the only verification at this stage is byte-identity (size), not correctness of the MATCH.",
+            "This is by design for now: the buffer is the human review step, and re-matching at promotion would re-incur TMDB calls and could disagree with a deliberate manual correction in the buffer.",
+            "README flags an optional re-match gate under 'What's next'. If added, it would re-run the resolver against the buffer NFO id and refuse/flag on disagreement."
+          ],
+          "blocking": ["catching a mis-association before it reaches the library"],
+          "affects": ["Move.moveFolder", "Move.updateMovieFile"]
+        },
+        {
+          "name": "BatchTvResolveNeverPromptsAndAutoRefusesAmbiguousShows",
+          "what": "The TvInteract ability and batchInteract handler exist, but Tv.Resolve.resolveOne never calls chooseShow; ambiguous shows are resolved purely by pickBestShow's popularity tiebreak, and a no-confident-match becomes a silent NoShowMatch refusal.",
+          "why": [
+            "batchInteract is a handler that auto-answers chooseShow with None, i.e. 'never pick interactively'. The interactive picker is plumbed as an ability but resolveShowPick decides via scoreShow + pickBestShow and surfaces NoShowMatch when nothing scores high enough.",
+            "So in batch mode an ambiguous show is refused rather than queued for a human, and there is no --interactive path wired into the TV resolver run (unlike the movie/interactive show selection mentioned for the broader project).",
+            "Wiring an interactive handler would mean swapping batchInteract for one that prompts, and threading a flag through Tv.Resolve.run / runWith."
+          ],
+          "blocking": ["human disambiguation of ambiguous TV show matches in batch runs"],
+          "affects": ["Tv.Resolve.resolveOne", "Tv.Resolve.batchInteract", "Tv.Resolve.resolveShowPick"]
+        }
+      ],
+
+      "invariants": {
+
+        "Config.fromEnv": [
+          "reads UNIDORK_* env vars with HARDCODED fallbacks baked into the source (db host localhost, port 5434, user postgres, name dork; specific NAS paths under /home/bismuth). nix/config.nix is expected to set these env vars; the literals here are last-resort defaults, not the production config.",
+          "performs IO (getEnv) and never fails: every missing var resolves to its fallback.",
+          "the movie/tv format strings are also fallback literals here; production format strings come from UNIDORK_FORMAT_MOVIE / UNIDORK_FORMAT_TV."
+        ],
+
+        "Config.getEnvOr": [
+          "empty OR whitespace-only env values are treated as UNSET and resolve to the fallback (Text.trim then size==0 check), not returned as empty strings.",
+          "a getEnv that throws (Left) also resolves to the fallback; no exception escapes."
+        ],
+
+        "Move.removeFolderTree": [
+          "shells out to `rm -rf --`; this is the one place the system recursively deletes a tree.",
+          "refuses to run on '', '/', or any non-absolute path (must startWith '/'), returning Left rather than executing. This guard is the backstop against a catastrophic rm.",
+          "a nonzero rm exit is returned as Left with the captured stderr, not raised."
+        ],
+
+        "Move.commitFolder": [
+          "shells `mv -T -- src dst`; -T forces dst to be treated as a name, not a directory to move INTO. This is the point of no return for a same-filesystem promotion.",
+          "nonzero exit -> Left with stderr; success -> Right (). Does not itself check enforceUnderRoot; the caller must have done that."
+        ],
+
+        "Move.transferFolder": [
+          "branches on sameDev: same device -> atomic commitFolder; cross device -> rsync to partialRoot, then commitFolder, then removeFolderTree on the source.",
+          "on a cross-device ABORT (rsync or commit fails) the source is LEFT INTACT and false is returned; only a fully successful commit triggers source deletion.",
+          "source-cleanup failure after a successful commit is a WARN, not a failure: the file is already safely in the library, so a leftover source is logged and tolerated (returns true)."
+        ],
+
+        "Move.verifyFile": [
+          "verified == (file exists in files table by path) AND (on-disk size == stored size_bytes). It does NOT re-hash; a size match means the stored CRC is trusted as-is (see decision IdentityVerifiedBySizeNotByRehash).",
+          "a missing files row or a stat failure yields (path, false, ...) and routes the caller to a name-based update with a WARN."
+        ],
+
+        "Move.moveFolder": [
+          "aborts (prints, does nothing) if the destination is not under the library root OR already exists; it can never overwrite an existing library folder.",
+          "on a real (non-dry) run it transfers then DELETES the source folder from the buffer; on dry-run it prints the plan and touches nothing.",
+          "runs under the MovieMoveCatalog ability: the files-row path update is an ability call interpreted at the run boundary, not a direct DB write here."
+        ],
+
+        "Move.run": [
+          "processes buffer folders in chunks of moveChunkSize (25), opening a fresh prepared-statement set per chunk inside its own singleIO connection; a crash in one chunk does not corrupt the connection used by others.",
+          "calls sweepPartial(libraryRoot) once before any real transfer to clear crashed-partial debris (skipped on dry-run).",
+          "a single-folder name argument is validated against '', '.', '..' and refused if invalid; the no-argument form promotes every buffer subdirectory."
+        ],
+
+        "Move.sameDevice": [
+          "compares `stat %d` device numbers of the two paths; equal device -> true.",
+          "if EITHER stat fails it returns false, deliberately choosing the safer cross-device (rsync-partial) path over risking a non-atomic rename."
+        ],
+
+        "Stage.runRhashCrc32": [
+          "shells `rhash --crc32 -p %C`; the output is uppercased AND trimmed before returning. The ENTIRE pipeline compares CRCs in uppercase, so any CRC that bypasses this normalization will silently fail to match.",
+          "nonzero exit -> Left; no exception escapes."
+        ],
+
+        "Stage.probeWithCrc": [
+          "hashes FIRST (runRhashCrc32) and short-circuits on hash failure before ever invoking ffprobe; a file that cannot be hashed is never probed.",
+          "performs two subprocess executions (rhash then ffprobe) per call."
+        ],
+
+        "Stage.partitionWork": [
+          "drops items whose probe_cache row is fresh (mtime >= cached mtime AND size matches), so already-probed unchanged files are skipped without re-probing.",
+          "an item that cannot be stat'd is KEPT (size 0) rather than dropped, so a transiently unreadable file is retried rather than silently skipped.",
+          "the surviving work is returned sorted by size."
+        ],
+
+        "Stage.upsertFileSql": [
+          "ON CONFLICT (crc32, size_bytes) the hint_* columns use COALESCE(EXCLUDED, existing): a re-probe that finds no NFO hint will NOT erase a hint recorded by an earlier pass. stage and probe payload, by contrast, are overwritten wholesale.",
+          "this is why re-running probe after a hint was set is safe; the hint is sticky."
+        ],
+
+        "Stage.upsertFileWith": [
+          "wraps the bind/execute in catch and DISCARDS failures: a per-file DB error silently drops that row and the batch continues. There is no per-row error surfaced to the caller.",
+          "runs under Postgres only; the connection is supplied by the chunk runner."
+        ],
+
+        "Stage.ProbeResult.fromJson": [
+          "accepts BOTH the current 'audios' array and a LEGACY single 'audio' object (falls back to wrapping it in a one-element list); missing 'subtitles' decodes to [].",
+          "this dual shape is what lets old cached probe_json rows still decode after the multi-audio schema change."
+        ],
+
+        "Stage.bitDepthFrom": [
+          "prefers bits_per_raw_sample when present; otherwise INFERS depth from the pixel format string (p10/10le/10be -> 10, p12/... -> 12, else 8).",
+          "the inference is a substring scan on pix_fmt, so an unusual pix_fmt naming could mis-infer; absent any signal it defaults to 8."
+        ],
+
+        "Stage.forkChunk": [
+          "forks one concurrent probe per item in the chunk and then reads all promises; probing is parallel within a chunk.",
+          "per-file probe failures are LOGGED (FAIL line) and collected as Left, never fatal; the chunk completes regardless of individual failures."
+        ],
+
+        "Resolve.resolveOne": [
+          "match priority: an NFO tmdb id hint wins outright at confidence 100 with source 'nfo_id'; otherwise title/year (from hint or parsed from the name) is searched, candidates scored, and ties broken by runtime proximity (pickBestWithRuntime).",
+          "the dry-run gate lives HERE: on dryRun it computes the same outcome but does not call recordMatch (verified by the dryRunNoWrite test).",
+          "no DB or HTTP directly; everything goes through the MetaApi/ResolveCatalog abilities (see decision DatabaseAndMetadataAreAbilitiesInterpretedAtRunBoundary)."
+        ],
+
+        "Tmdb.runtimeWinner": [
+          "used to break a scoring tie by fetching each tied candidate's TMDB runtime and keeping only those within 15 minutes (tolerance) of the probed runtime; returns Some only if EXACTLY ONE candidate falls in range.",
+          "issues a movieDetails MetaApi call per tied candidate, so a tie among many candidates costs many detail fetches.",
+          "a candidate whose TMDB runtime is 0 (unknown) is excluded from the in-range set rather than treated as matching."
+        ],
+
+        "Tmdb.scoreCandidate": [
+          "additive score: id match +50, exact normalized-title match +30 (else token-overlap >=75% +20, >=50% +10), exact year +20 (off-by-one +10). A perfect match tops out at 100; the resolver's tiedAtBest threshold is 40.",
+          "title comparison runs through Tmdb.normalize (lowercase, unicode-punctuation folding, leading-article stripping), so 'The Matrix' and 'matrix' compare equal."
+        ],
+
+        "kernel.score.resolveTie": [
+          "a single candidate wins automatically; with several, the popularity winner is taken ONLY if its popularity exceeds the runner-up's by the popularityRatio (3x) factor, otherwise the tie is declared unresolvable (None).",
+          "this is a deliberate refusal: an ambiguous tie returns None rather than guessing, so the file goes unresolved instead of mis-associated."
+        ],
+
+        "Tv.Parse.refFromToken": [
+          "parses an episode token in several shapes: SxxEyy, multi-ep SxxEyyEzz / SxxEyy-Ezz / SxxEyy-zz, and the alternate NxM form (1x02). Up to 3 episode numbers per ref; each <= 999.",
+          "season 0 is the 'specials' bucket: S00Exx keeps season 0, and notably S04E00 (and any all-zero episode list) collapses to season 0 as well, treating a zero episode as a special rather than a real S04 episode.",
+          "rejects look-alikes that are NOT episode refs: se7en, sample, soundtrack, S01 (no episode), S01E (empty), S01E02v2 (trailing junk), and resolution tokens 1920x1080 / 1280x720 (the NxM guard requires season <= 99)."
+        ],
+
+        "Tv.Resolve.resolveOne": [
+          "show-match priority: direct NFO tmdb id (nfo_id, conf 100) or {tmdb-...} folder tag (folder_tag, 100); else imdb id from hint or {imdb-...} folder tag resolved via DB then TMDB find (imdb_find, 95); else title/year search scored by scoreShow (title_year).",
+          "REFUSES the whole file (TvEpisodeMissing, no write) if ANY requested episode number is absent from the fetched TMDB season; it will not partially associate.",
+          "dry-run gate is here: recordEpisodeMatch is skipped on dryRun.",
+          "the episode ref comes from the filename first (parseEpisodeName) and falls back to season-from-folders + bare episode number (refFromFolders)."
+        ],
+
+        "Tv.Resolve.batchInteract": [
+          "a TvInteract handler that ALWAYS answers chooseShow with None; installing it means ambiguous shows are never prompted and instead fall through to scoring/refusal (see open issue BatchTvResolveNeverPromptsAndAutoRefusesAmbiguousShows)."
+        ],
+
+        "Tv.Move.mergeTree": [
+          "recursively merges src into an EXISTING destination tree: directories recurse, files are moved, but an existing video file at the destination is SKIPPED (printed 'skip (exists)'), never overwritten.",
+          "this is the wider-blast-radius path that distinguishes tv-move from movie move; it can touch an already-populated show folder but cannot clobber an episode already there.",
+          "removes the now-emptied source folder (rmdirFolder) at the end."
+        ],
+
+        "Rename.executeOne": [
+          "if a CRC-tagged entry already exists at the target AND its size matches, the source is treated as a verified byte-duplicate and REMOVED (DuplicateRemoved); a CRC-tagged entry whose size does NOT match is a Conflict (left in place).",
+          "writes the NFO and renames the video INTO the buffer (not the library); on success it also fetches sidecar subtitles, records promoteToBuffer, refreshes probe_cache for the new path, and deletes the old path's probe_cache row.",
+          "dry-run yields WouldRename / WouldRemoveDuplicate and performs no filesystem mutation."
+        ],
+
+        "kernel.cache.Cached.fromJson": [
+          "decodes the cache 'key' field but FALLS BACK to a legacy 'folder' field when 'key' is absent, so old cache rows written under the previous schema still decode (covered by the legacyKey test)."
+        ],
+
+        "Db.upsertMovieSql": [
+          "ON CONFLICT (folder_checksum) the actual_runtime_sec column uses COALESCE(EXCLUDED, existing): an upsert that lacks a freshly-probed runtime will NOT null out a runtime recorded earlier. Most other columns are overwritten from EXCLUDED.",
+          "keyed on folder_checksum, not on the (crc, size) file identity; this is the LIBRARY catalogue row, distinct from the files row."
+        ],
+
+        "Versions.clusterByCut": [
+          "clusters by normalized seconds (frame-rate canceled) with a 1.5% relative tolerance, so a PAL 25fps copy and a 23.976fps copy of the same cut land in ONE cluster while a genuine extended cut splits off (verified by palSameCut and clusterSeparatesRealCut tests).",
+          "input is sorted by normalized seconds first, then a single forward pass groups adjacent copies against the cluster anchor."
+        ],
+
+        "Versions.normalizedSeconds": [
+          "= durationSec * fps / referenceFps, canceling frame-rate speedup against the 24000/1001 reference; a copy with fps 0 (unknown) falls back to raw durationSec rather than dividing.",
+          "this is the value clustering compares, NOT the raw probed duration."
+        ],
+
+        "Versions.qualityScore": [
+          "a single packed Nat ranking copies by, in descending weight: resolution rank, bit depth, bitrate (Mbps), video codec rank, audio channels, audio codec rank. Higher is better; used to pick the default member of an edition.",
+          "the score is computed but, beyond choosing a per-edition default, is not yet used to prune or surface redundant rips (see open issue DuplicatesGroupedIntoEditionsButNotRankedForUserDecision)."
+        ],
+
+        "Tv.Tmdb.scoreShow": [
+          "additive like the movie scorer but with a higher exact-title weight (+40 vs +30): id match +50, exact normalized name +40 (else overlap >=75% +20, >=50% +10), exact year +20 (off-by-one +10).",
+          "compares both name and original_name through Tmdb.normalize and takes the better overlap."
+        ],
+
+        "Tv.Stage.collectVideos": [
+          "recurses subdirectories only up to maxDepth (4) and SKIPS extras/sample directories (isExtrasDir) and sample-named files (isSampleName), so featurettes/trailers/proof dirs never enter the episode pipeline.",
+          "the depth bound is a guard against pathological nesting, not a correctness requirement."
+        ],
+
+        "Tv.Stage.episodeHints": [
+          "derives (title, year, showId, imdbId, season, episode) hints from the filename first, then the show folder, then the immediate folder's tvshow.nfo, then the top folder's tvshow.nfo; the tmdb id and imdb id are read from NFO/scan, season+episode from the parsed ref.",
+          "imdb scanning is skipped entirely once a tmdb show id is found (the showId branch short-circuits the imdbId branch), so the cheaper NFO id wins over a folder imdb scan."
+        ]
+
+      }
+    }
+  }
+}

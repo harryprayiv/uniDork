@@ -1,0 +1,1864 @@
+%codebase uniDork/main
+%root (whole branch)
+%defs 680
+
+# chase-unison bundle: a structural skeleton of a Unison codebase,
+# one entry per definition, deduplicated by content hash.
+#   name : signature   ~hash     term; ~hash is the content address
+#   type[Tag] name     ~hash     type, followed by its declaration
+#     fields: a, b, c            record fields (generated accessors elided)
+#   > aka: other.name            another name for the same hash
+#   ! ...                        behavioral invariant (from annotations)
+#   > consumed by: ...           downstream dependent (from annotations)
+# %decision / %open_issue blocks at the end are architectural notes.
+# Lines from annotations appear only when an annotations file is supplied.
+
+type[Data] Actor   ~49khbgj7ca
+  type Actor = { name : Text, role : Text }
+  fields: name, role
+
+Actor.fromJson : '{unison_json_1_3_5.Decoder} Actor   ~5dt69ogslj
+
+Actor.toJson : Actor -> Json   ~dte8it22m9
+
+type[Data] Audio   ~m97r9blas5
+  type Audio = { codec : Text, language : Text, channels : Nat }
+  fields: channels, codec, language
+
+Audio.fromJson : '{unison_json_1_3_5.Decoder} Audio   ~l3e08gqgud
+
+Audio.toJson : Audio -> Json   ~kb76aht8ed
+
+type[Data] Config   ~adl6bagm88
+  type Config = { db : Db, cache : Cache, paths : Paths, tuning : Tuning }
+  fields: cache, db, paths, tuning
+
+type[Data] Config.Cache   ~2g0e5dt9pl
+  type Cache = Config.Cache.Cache Text Text
+  fields: ffprobeDir, stageDir
+
+type[Data] Config.Db   ~anefo4oe6k
+  type Db = Config.Db.Db Text Text Text Text
+  fields: host, name, port, user
+
+type[Data] Config.Paths   ~t43pif2i7r
+  type Paths
+    = Config.Paths.Paths Text Text Text Text Text Text Text Text Text Text Text
+  fields: buffer, intake, library, libraryConfig, movieFormat, subToken, tmdbToken, tvBuffer, tvFormat, tvIntake, tvLibrary
+
+type[Data] Config.Tuning   ~p24srlef1h
+  type Tuning = Config.Tuning.Tuning Nat [Text]
+  fields: probeJobs, subLangs
+
+Config.fromEnv : '{IO} Config   ~gmcoc20cda
+  ! reads UNIDORK_* env vars with HARDCODED fallbacks baked into the source (db host localhost, port 5434, user postgres, name dork; specific NAS paths under /home/bismuth). nix/config.nix is expected to set these env vars; the literals here are last-resort defaults, not the production config.
+  ! performs IO (getEnv) and never fails: every missing var resolves to its fallback.
+  ! the movie/tv format strings are also fallback literals here; production format strings come from UNIDORK_FORMAT_MOVIE / UNIDORK_FORMAT_TV.
+
+Config.getEnvOr : Text -> Text ->{IO} Text   ~cg0o7c2dpo
+  ! empty OR whitespace-only env values are treated as UNSET and resolve to the fallback (Text.trim then size==0 check), not returned as empty strings.
+  ! a getEnv that throws (Left) also resolves to the fallback; no exception escapes.
+
+Config.getLangsOr : Text -> [Text] ->{IO} [Text]   ~hpen8b9jbh
+
+Config.getNatOr : Text -> Nat ->{IO} Nat   ~kcsjlcquoa
+
+Config.nonEmpty : Text -> Optional Text   ~vitkc3nt2n
+
+Config.readSubToken : Config ->{IO, Exception} Text   ~knihjulnnt
+
+Config.readTmdbToken : Config ->{IO, Exception} Text   ~8puklppav0
+
+Config.toClientConfig : Config -> PostgresClientConfig   ~1u5tg0uvd5
+
+Db.associationsDdl : Text   ~nk61h2aq9c
+
+Db.cacheDdl : [Text]   ~1936bl6ho4
+
+Db.childDdl : [Text]   ~jfoehav0rr
+
+Db.createSchema : Config ->{IO, Exception} ()   ~7vk21v9mi7
+
+Db.deleteChildSql : Text -> Command a (Text ->{g, g1} a)   ~q4l8cj3k7r
+
+Db.dropDdl : [Text]   ~5heoa91vs5
+
+Db.editionsDdl : Text   ~hcbpqgd0e5
+
+Db.filesDdl : Text   ~gnko3euir3
+
+Db.foreach_ : (a ->{g} b) -> [a] ->{g} ()   ~kvoac07pev
+
+Db.indexDdl : [Text]   ~89mbog2hjv
+
+Db.insertActorSql : Command b (Text ->{g6, g7} Int ->{g4, g5} Text ->{g2, g3} Text ->{g, g1} b)   ~51sf1563ls
+
+Db.insertAudioSql : Command b (Text ->{g8, g9} Int ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} b)   ~3ri2dt7t2n
+
+Db.insertCountrySql : Command b (Text ->{g1} Text ->{g} b)   ~03t3poo5qo
+
+Db.insertCreditSql : Command b (Text ->{g1} Text ->{g} b)   ~8a3t209sge
+
+Db.insertDirectorSql : Command b (Text ->{g1} Text ->{g} b)   ~svjteq5k15
+
+Db.insertGenreSql : Command b (Text ->{g1} Text ->{g} b)   ~ua6geqtav7
+
+Db.insertPairSql : Text -> Text -> Command b (Text ->{g2, g3} Text ->{g, g1} b)   ~u3908n2jov
+
+Db.insertStudioSql : Command b (Text ->{g1} Text ->{g} b)   ~gfoqtq1c3t
+
+Db.insertSubSql : Command b (Text ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~2fi9ri4j8t
+
+Db.insertTagSql : Command b (Text ->{g1} Text ->{g} b)   ~4b8fd4kgsp
+
+Db.insertVideoSql : Command b (Text ->{g8, g9} Text ->{g6, g7} Float ->{g4, g5} Int ->{g2, g3} Int ->{g, g1} b)   ~8bcbhrarph
+
+Db.libraryMoviesDdl : Text   ~e4v1l9mutk
+
+Db.migrate : Config ->{IO, Exception} ()   ~4vobtt08is
+
+Db.pf : Float -> [Optional Text]   ~oa7op0rdqb
+
+Db.pi : Int -> [Optional Text]   ~8vdnlpjnl0
+
+Db.pobi : Optional Int -> [Optional Text]   ~qjqsvpp3on
+
+Db.poi : Optional Int -> [Optional Text]   ~0mk5vg2311
+
+Db.pot : Optional Text -> [Optional Text]   ~g2qsfc1jmb
+
+Db.probeCacheDdl : Text   ~hfi7mtfhm7
+
+Db.pt : Text -> [Optional Text]   ~niif2o0bu5
+
+Db.resetSchema : Config ->{IO, Exception} ()   ~aih5moruko
+
+Db.runDDL : Command [Optional Text] [Optional Text] ->{Postgres} ()   ~d7n55b812g
+
+Db.runDDLList : [Text] ->{Postgres} ()   ~v5kb0lc8o9
+
+Db.selectImportedCrcSql : postgres.Query a (Text ->{g, g1} a) Text   ~4g27jokd97
+
+Db.tmdbMoviesDdl : Text   ~1r23vn9hjc
+
+Db.upsertMovieSql : Command b (Text ->{g54, g55} Optional Text ->{g52, g53} Optional Int ->{g50, g51} Optional Text ->{g48, g49} Optional Text ->{g46, g47} Optional Text ->{g44, g45} Text ->{g42, g43} Text ->{g40, g41} Text ->{g38, g39} Optional Text ->{g36, g37} Optional Int ->{g34, g35} Float ->{g32, g33} Int ->{g30, g31} Text ->{g28, g29} Optional Int ->{g26, g27} Text ->{g24, g25} Text ->{g22, g23} Optional Text ->{g20, g21} Optional Text ->{g18, g19} Optional Text ->{g16, g17} Optional Int ->{g14, g15} Optional Text ->{g12, g13} Optional Text ->{g10, g11} Optional Text ->{g8, g9} Optional Text ->{g6, g7} Optional Int ->{g4, g5} Optional Int ->{g2, g3} Optional Int ->{g, g1} b)   ~ngp89m32oa
+  ! ON CONFLICT (folder_checksum) the actual_runtime_sec column uses COALESCE(EXCLUDED, existing): an upsert that lacks a freshly-probed runtime will NOT null out a runtime recorded earlier. Most other columns are overwritten from EXCLUDED.
+  ! keyed on folder_checksum, not on the (crc, size) file identity; this is the LIBRARY catalogue row, distinct from the files row.
+
+Db.upsertWith : PreparedCommand r20 a20 -> PreparedCommand r19 a19 -> PreparedCommand r18 a18 -> PreparedCommand r17 a17 -> PreparedCommand r16 a16 -> PreparedCommand r15 a15 -> PreparedCommand r14 a14 -> PreparedCommand r13 a13 -> PreparedCommand r12 a12 -> PreparedCommand r11 a11 -> PreparedCommand r10 a10 -> PreparedCommand r9 a9 -> PreparedCommand r8 a8 -> PreparedCommand r7 a7 -> PreparedCommand r6 a6 -> PreparedCommand r5 a5 -> PreparedCommand r4 a4 -> PreparedCommand r3 a3 -> PreparedCommand r2 a2 -> PreparedCommand r1 a1 -> PreparedCommand r a -> Optional Text -> Optional Nat -> Optional Nat -> Movie ->{IO, Exception, Postgres} ()   ~n7c7scmqb8
+
+Db.versionsDdl : Text   ~poj2kjc0ek
+
+Db.withIndex : [a] -> [(Nat, a)]   ~9i4imah10g
+  > aka: Versions.withIndex
+
+type[Data] FileInfo   ~hgmk94lq8p
+  type FileInfo = { streams : StreamDetails }
+  fields: streams
+
+FileInfo.fromJson : '{unison_json_1_3_5.Decoder} FileInfo   ~n1fnua98ke
+
+FileInfo.toJson : FileInfo -> Json   ~6f67t6g7ak
+
+type[Data] FolderMeta   ~jehku5serf
+  type FolderMeta
+    = { rawSize : Optional Text,
+        resolution : Optional Text,
+        videoCodec : Optional Text,
+        bitDepth : Optional Nat,
+        runtimeMin : Optional Nat,
+        checksum : Optional Text }
+  fields: bitDepth, checksum, rawSize, resolution, runtimeMin, videoCodec
+
+FolderMeta.fromJson : '{unison_json_1_3_5.Decoder} FolderMeta   ~r6u7omuv99
+
+FolderMeta.toJson : FolderMeta -> Json   ~vmp2osiec7
+
+List.chunk : Nat -> [a] -> [[a]]   ~gnpvpr1j85
+
+List.distinctText : [Text] -> [Text]   ~svr81l04j4
+
+type[Data] Move.FileIdentity   ~qoov0qbhlk
+  type FileIdentity = Move.FileIdentity.FileIdentity Int Text Int Text
+  fields: crc32, fileId, originalName, sizeBytes
+
+Move.commitFolder : Text -> Text ->{IO} Either Text ()   ~clohiqd1do
+  ! shells `mv -T -- src dst`; -T forces dst to be treated as a name, not a directory to move INTO. This is the point of no return for a same-filesystem promotion.
+  ! nonzero exit -> Left with stderr; success -> Right (). Does not itself check enforceUnderRoot; the caller must have done that.
+
+Move.deviceOf : Text ->{IO} Optional Text   ~2vep5tame8
+
+Move.enforceUnderRoot : Text -> Text -> Boolean   ~l6o7arkjhl
+
+Move.ensureDir : Text ->{IO, Exception} ()   ~s43mfq5q11
+
+Move.epochSeconds : '{IO} Nat   ~0mf11a9g96
+
+Move.folderVideoBytes : FilePath ->{IO, Exception} Nat   ~24pj2tf08l
+
+Move.loadIdentity : PreparedQuery r a (((Int, Text), Int), Text) -> Text ->{Postgres} Optional FileIdentity   ~8104lk71i8
+
+Move.moveChunkSize : Nat   ~q113fknr5u
+
+Move.moveFolder : Boolean -> Text -> FilePath ->{IO, MovieMoveCatalog, Exception} ()   ~aau8q91ffs
+  ! aborts (prints, does nothing) if the destination is not under the library root OR already exists; it can never overwrite an existing library folder.
+  ! on a real (non-dry) run it transfers then DELETES the source folder from the buffer; on dry-run it prints the plan and touches nothing.
+  ! runs under the MovieMoveCatalog ability: the files-row path update is an ability call interpreted at the run boundary, not a direct DB write here.
+
+Move.partialRoot : Text -> Text   ~2va75luao3
+
+Move.planOne : Text -> Optional a -> FilePath ->{IO, Exception} ()   ~dgq1rebcfa
+
+Move.printProgress : Nat -> Nat -> Nat -> mutable.Ref g (Nat, Nat) ->{g, IO, Exception} ()   ~pkshru0r1r
+
+Move.removeFolderTree : Text ->{IO} Either Text ()   ~hkp4ikr7ho
+  ! shells out to `rm -rf --`; this is the one place the system recursively deletes a tree.
+  ! refuses to run on '', '/', or any non-absolute path (must startWith '/'), returning Left rather than executing. This guard is the backstop against a catastrophic rm.
+  ! a nonzero rm exit is returned as Left with the captured stderr, not raised.
+
+Move.rmdirFolder : Text ->{IO} ()   ~ht3pscpian
+
+Move.rowToIdentity : (((Int, Text), Int), Text) -> FileIdentity   ~h79f8ctm92
+
+Move.rsyncFolder : Text -> Text ->{IO} Either Text ()   ~lh57b8sisj
+
+Move.run : Config -> Optional Text -> Boolean ->{IO, Exception} ()   ~62hif2osdt
+  ! processes buffer folders in chunks of moveChunkSize (25), opening a fresh prepared-statement set per chunk inside its own singleIO connection; a crash in one chunk does not corrupt the connection used by others.
+  ! calls sweepPartial(libraryRoot) once before any real transfer to clear crashed-partial debris (skipped on dry-run).
+  ! a single-folder name argument is validated against '', '.', '..' and refused if invalid; the no-argument form promotes every buffer subdirectory.
+
+Move.sameDevice : Text -> Text ->{IO} Boolean   ~phl4vdn43c
+  ! compares `stat %d` device numbers of the two paths; equal device -> true.
+  ! if EITHER stat fails it returns false, deliberately choosing the safer cross-device (rsync-partial) path over risking a non-atomic rename.
+
+Move.selectFileByPathSql : postgres.Query a (Text ->{g, g1} a) (((Int, Text), Int), Text)   ~9c3o518g4i
+
+Move.sweepPartial : Text ->{IO, Exception} ()   ~hqr529bm0s
+
+Move.transferFolder : Boolean -> Text -> Text -> Text ->{IO, Exception} Boolean   ~tvetsc0t9r
+  ! branches on sameDev: same device -> atomic commitFolder; cross device -> rsync to partialRoot, then commitFolder, then removeFolderTree on the source.
+  ! on a cross-device ABORT (rsync or commit fails) the source is LEFT INTACT and false is returned; only a fully successful commit triggers source deletion.
+  ! source-cleanup failure after a successful commit is a WARN, not a failure: the file is already safely in the library, so a leftover source is logged and tolerated (returns true).
+
+Move.updateFilePathSql : Command a (Text ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} a)   ~reqgc43nrl
+
+Move.updateMovieFile : Text -> Text -> Text -> Boolean -> Optional FileIdentity ->{IO, MovieMoveCatalog, Exception} ()   ~n4qqos6hf7
+
+Move.verifyFile : Text ->{IO, MovieMoveCatalog, Exception} (Text, Boolean, Optional FileIdentity)   ~8mmodrjaqp
+  ! verified == (file exists in files table by path) AND (on-disk size == stored size_bytes). It does NOT re-hash; a size match means the stored CRC is trusted as-is (see decision IdentityVerifiedBySizeNotByRehash).
+  ! a missing files row or a stat failure yields (path, false, ...) and routes the caller to a name-based update with a WARN.
+
+type[Data] Movie   ~i31jp0qlep
+  type Movie
+    = { id : MovieId,
+        title : Title,
+        collection : Optional Text,
+        runtime : Optional Nat,
+        scoring : Scoring,
+        plot : Text,
+        tagline : Text,
+        taxonomy : Taxonomy,
+        fileInfo : FileInfo,
+        videoFilePath : Optional Text,
+        checksum : Optional Text,
+        actors : [Actor],
+        folderPath : Optional Text,
+        nfoPath : Optional Text,
+        fileSizeBytes : Optional Nat,
+        folderMeta : FolderMeta }
+  fields: actors, checksum, collection, fileInfo, fileSizeBytes, folderMeta, folderPath, id, nfoPath, plot, runtime, scoring, tagline, taxonomy, title, videoFilePath
+
+Movie.fromJson : '{unison_json_1_3_5.Decoder} Movie   ~7dgc4n4ajb
+
+Movie.fromNdjsonLine : Text -> Either Failure Movie   ~eb9r98ruuq
+
+Movie.roundtrip.test : [test.Result]   ~cj3fk3fott
+
+Movie.toJson : Movie -> Json   ~6ipvjrnbrd
+
+Movie.toNdjsonLine : Movie -> Text   ~eh9nso0uld
+
+type[Data] MovieId   ~ra9q5rk9lq
+  type MovieId
+    = { kodi : Text,
+        imdb : Optional Text,
+        tmdb : Optional Text,
+        tvdb : Optional Text }
+  fields: imdb, kodi, tmdb, tvdb
+
+MovieId.fromJson : '{unison_json_1_3_5.Decoder} MovieId   ~e3co3cccgt
+
+MovieId.toJson : MovieId -> Json   ~p38hb7e76h
+
+Nfo.actorBlock : (Text, Text) -> [Text]   ~a5u6cs5c7s
+
+Nfo.allText : Soup ->{Throw XMLError} Text   ~mpf6g2epuu
+
+Nfo.aspectRatio : Nat -> Nat -> Text   ~ssia1qldie
+
+Nfo.aspectRatio.test : [test.Result]   ~m1a7u45mcf
+
+Nfo.audioBlock : AudioInfo -> [Text]   ~g2ehc8l8bh
+
+Nfo.containsText : Text -> Text -> Boolean   ~s50ujbvt3n
+
+Nfo.countryLine : Text -> Text   ~r7m97n8g0c
+
+Nfo.descendantAttr : Text -> Text -> Soup -> Optional Text   ~2rak43v0tk
+
+Nfo.directorLine : Text -> Text   ~menkld0u82
+
+Nfo.extractImdbId : Movie -> Optional Text   ~so57rlhdk8
+
+Nfo.extractTitle : Movie -> Optional Text   ~tdloh0blpa
+
+Nfo.extractTmdbId : Movie -> Optional Nat   ~56ran8k45f
+
+Nfo.extractYear : Movie -> Optional Nat   ~f2cg854sav
+
+Nfo.fileinfoBlock : ProbeResult -> [Text]   ~7uocufkurb
+
+Nfo.firstPresent : [Text] -> Text -> Optional Text   ~iuflgfo3eu
+
+Nfo.floatOr : Float -> Text -> Float   ~j8i8j0bpqd
+
+Nfo.generate : Tmdb.Result -> Details -> ProbeResult -> Text   ~9ev56ppvd7
+
+Nfo.genreLine : Text -> Text   ~n8j5532j5p
+
+Nfo.natOr : Nat -> Text -> Nat   ~is0c5glbgt
+
+Nfo.optText : Text -> Soup -> Optional Text   ~90kvm197jb
+
+Nfo.padLeft : Nat -> Text -> Text -> Text   ~d69q4pqufc
+
+Nfo.parse : Text -> Either Text Movie   ~dq2pgr4ht7
+
+Nfo.parse.test : [test.Result]   ~ucaduhrqle
+
+Nfo.parseActor : Soup ->{Throw XMLError} Actor   ~o5aclpg6j4
+
+Nfo.parseActors : Soup -> [Actor]   ~vhmhgqp1hn
+
+Nfo.parseAudio : Soup ->{Throw XMLError} Audio   ~30ov05mrja
+
+Nfo.parseCollection : Soup -> Optional Text   ~b5pp79qhur
+
+Nfo.parseFileInfo : Soup ->{Throw XMLError} FileInfo   ~ca7stfmbe6
+
+Nfo.parseFolderName : Text -> FolderMeta   ~q9ecep2cba
+
+Nfo.parseFolderName.test : [test.Result]   ~aca1tevvjc
+
+Nfo.parseMovie : Soup ->{Throw XMLError} Movie   ~osippugv29
+
+Nfo.parseMovieId : Soup ->{Throw XMLError} MovieId   ~v8radu78fs
+
+Nfo.parseRatingAndVotes : Soup -> (Float, Nat)   ~kl7tmp4upi
+
+Nfo.parseScoring : Soup ->{Throw XMLError} Scoring   ~iobue2hcc7
+
+Nfo.parseStreamDetails : Soup ->{Throw XMLError} StreamDetails   ~bl3c9g1ccl
+
+Nfo.parseSubtitle : Soup ->{Throw XMLError} Subtitle   ~0moum5ll41
+
+Nfo.parseTaxonomy : Soup -> Taxonomy   ~pufk0j19a3
+
+Nfo.parseTitle : Soup ->{Throw XMLError} Title   ~pb9esgibm4
+
+Nfo.parseVideo : Soup ->{Throw XMLError} Video   ~4v72akuo3m
+
+Nfo.processFolder : FilePath ->{IO, Exception} Either FilePath Movie   ~3uum837bf6
+
+Nfo.runtimeFromContent : Text -> Optional Nat   ~tcfgqfqc7p
+
+Nfo.sizeStrFromContent : Text -> Optional Text   ~nhv0gafl2e
+
+Nfo.sortTitle : Text -> Text -> Text   ~5pnje0fi0s
+
+Nfo.sortTitle.test : [test.Result]   ~cstfpfla8e
+
+Nfo.studioLine : Text -> Text   ~t1fd9t7s6c
+
+Nfo.subtitleBlock : SubtitleInfo -> [Text]   ~3k6gqdttd7
+
+Nfo.tagLine : Text -> Text   ~889bgoum32
+
+Nfo.textOr : Text -> Text -> Soup -> Text   ~4msc724mtq
+
+Nfo.texts : Text -> Soup -> [Text]   ~sg88cvlhvh
+
+Nfo.tryReadFolder : FilePath ->{IO, Exception} Optional Movie   ~m2374i2uio
+
+Nfo.uniqueIdOfType : Text -> Soup -> Optional Text   ~sln3onojtg
+
+Nfo.writerLine : Text -> Text   ~ne3gdj7hdm
+
+type[Data] Probe.AudioTrack   ~poesjhgi20
+  type AudioTrack
+    = Probe.AudioTrack.AudioTrack
+        Nat Text (Optional Text) (Optional Text) Nat Text Boolean Boolean Boolean
+  fields: channelLayout, channels, codec, index, isComment, isDefault, isVisualImpaired, language, title
+
+Probe.AudioTrack.fromJson : '{unison_json_1_3_5.Decoder} AudioTrack   ~m7oulhtg5e
+
+type[Data] Probe.Format   ~og0lmaj011
+  type Format = Probe.Format.Format Float (Optional Nat) (Optional Nat)
+  fields: bitRate, duration, sizeBytes
+
+Probe.Format.fromJson : '{unison_json_1_3_5.Decoder} Format   ~4i81tgo7ss
+
+type[Data] Probe.Result   ~1pen9442ig
+  type Probe.Result = { format : Format }
+  fields: format
+
+Probe.optNatStringAt : Text ->{unison_json_1_3_5.Decoder} Optional Nat   ~7svir1kq08
+
+Probe.parseFloat : Text -> Float   ~cl9m3jf41j
+
+Progress.report : Text -> Nat -> Nat -> Nat -> mutable.Ref g (Nat, Nat) ->{g, IO, Exception} ()   ~4og9hkt5p9
+
+README : Doc   ~db95ublt5g
+
+type[Data] Relang.Decision   ~n8d29hurdh
+  type Decision
+    = Relang.Decision.AlreadyCorrect Nat
+    | Relang.Decision.NoCurrentDefault Nat
+    | Relang.Decision.OriginalNotPresent Text
+    | Relang.Decision.UnsupportedLanguage Text
+    | Relang.Decision.SwitchTo Nat Nat
+
+Relang.Decision.toJson : Decision -> Json   ~2e9q0i9md8
+
+Relang.bestOf : [AudioTrack] -> Optional AudioTrack   ~7on2b30k26
+
+Relang.betterThan : AudioTrack -> AudioTrack -> Boolean   ~c3k4dcgubn
+
+Relang.codecRank : Text -> Nat   ~7bq2kd2ll0
+
+Relang.containsAnySubstring : [Text] -> Text -> Boolean   ~ngqh00i4mg
+
+Relang.currentDefault : [AudioTrack] -> Optional Nat   ~dq09hfqai8
+
+Relang.decide : Text -> [AudioTrack] -> Decision   ~585qgsi4s2
+
+Relang.isCommentaryOrDescriptive : AudioTrack -> Boolean   ~kvhv85hnas
+
+Relang.losslessCodecs : [Text]   ~159iu35op7
+
+Relang.lossyCodecs : [Text]   ~24mu9dorug
+
+Relang.selectTrack : Text -> [AudioTrack] -> Optional AudioTrack   ~rn5bpuk3cf
+
+Relang.splitMany : [Char] -> Text -> [Text]   ~f9k9aninrk
+
+Relang.titleAliases : Text -> [Text]   ~5aui2senpl
+
+Relang.titleMatches : Text -> AudioTrack -> Boolean   ~jt17shnulu
+
+Relang.titleSeparators : [Char]   ~kgomg7lmoc
+
+Relang.titleSuggestsCommentary : Text -> Boolean   ~ajci0qn2b0
+
+Relang.toIso6392 : Text -> Optional Text   ~evm1i2o0jd
+
+ReleaseNotes : Doc   ~vo4aua62d2
+
+type[Data] Rename.FormatPart   ~jskk2pj0pi
+  type FormatPart = Rename.FormatPart.Literal Text | Rename.FormatPart.Token Text
+
+type[Data] Rename.MovieRecord   ~rlr35hclj9
+  type MovieRecord
+    = Rename.MovieRecord.MovieRecord Nat (Optional Text) Text (Optional Nat)
+  fields: imdbId, title, tmdbId, year
+
+type[Data] Rename.Outcome   ~q1hqrqa747
+  type Rename.Outcome
+    = NoVideo Text
+    | NoProbe Text
+    | AlreadyDone Text
+    | Renamed Text Text
+    | NoMatch Text Text
+    | Conflict Text Text
+    | RenameError Text Text
+    | DuplicateRemoved Text Text
+    | WouldRename Text Text
+    | WouldRemoveDuplicate Text Text
+
+type[Data] Rename.RenameRow   ~f6btv663e6
+  type RenameRow
+    = Rename.RenameRow.RenameRow
+        Text Text Text Nat (Optional Text) Text (Optional Nat) Text
+  fields: crc32, detailsJson, imdbId, originalPath, probeJson, title, tmdbId, year
+
+Rename.acTag : Text -> Text   ~6s1hre070f
+
+Rename.anySizeMatch : FilePath -> Nat -> [Text] ->{IO} Boolean   ~28vs7e5u7f
+
+Rename.basenameNoExt : Text -> Text   ~03ko07fevm
+
+Rename.channelsTag : Nat -> Text   ~sp4bjnq21h
+
+Rename.channelsTag.test : [test.Result]   ~td8ftdjaf0
+
+Rename.collapseSpaces : Text -> Text   ~gvqtifptf9
+
+Rename.crcTaggedEntries : FilePath -> Text ->{IO, Exception} [Text]   ~c095abguma
+
+Rename.deleteProbeCacheSql : Command a (Text ->{g, g1} a)   ~r2gb64f2kl
+
+Rename.effectiveBitRate : Optional Nat -> Nat -> Float -> Nat   ~kkohp1631r
+
+Rename.escapeXml : Text -> Text   ~3tqqeqctg8
+
+Rename.executeOne : Boolean -> Text -> [FormatPart] -> [FormatPart] -> Optional Text -> [Text] -> RenameRow ->{IO, Exception, RenameCatalog} Rename.Outcome   ~uc8bv29vdf
+  ! if a CRC-tagged entry already exists at the target AND its size matches, the source is treated as a verified byte-duplicate and REMOVED (DuplicateRemoved); a CRC-tagged entry whose size does NOT match is a Conflict (left in place).
+  ! writes the NFO and renames the video INTO the buffer (not the library); on success it also fetches sidecar subtitles, records promoteToBuffer, refreshes probe_cache for the new path, and deletes the old path's probe_cache row.
+  ! dry-run yields WouldRename / WouldRemoveDuplicate and performs no filesystem mutation.
+
+Rename.fileExt : Text -> Text   ~6pnnrd87hc
+
+Rename.gigabytes : Nat -> Text   ~arcf4824na
+
+Rename.gigabytes.test : [test.Result]   ~sg280m48mn
+
+Rename.isLikelyGroupToken : Text -> Boolean   ~5evodrfoac
+
+Rename.logSubOutcomes : [SaveOutcome] ->{IO, Exception} ()   ~coik5pu04g
+
+Rename.looseVideos : FilePath ->{IO, Exception} [FilePath]   ~d4o805jptm
+
+Rename.maybeFetchSubsM : Optional Text -> [Text] -> MovieRecord -> FilePath -> Text ->{IO, Exception} ()   ~k6jt6rbsk3
+
+Rename.mbps : Nat -> Text   ~4kvvhqgh8i
+
+Rename.mbps.test : [test.Result]   ~p8gdm2m1e9
+
+Rename.minimalNfoM : MovieRecord -> Text -> Text   ~dn61c5t05k
+
+Rename.minutes : Float -> Nat   ~6bikmuahap
+
+Rename.nfoBase : Text -> Text   ~mnsf4gecsn
+
+Rename.parentDir : FilePath -> FilePath   ~irnldrq24a
+
+Rename.parseFormat : Text -> [FormatPart]   ~ic897ut0kc
+
+Rename.parseFormat.test : [test.Result]   ~s2i8kp3893
+
+Rename.parseSegment : Text -> [FormatPart]   ~6gbg2cb92j
+
+Rename.pathExists : FilePath ->{IO, Exception} Boolean   ~hs73gh8qcc
+
+Rename.priorProposedWith : PreparedQuery r a b -> Text ->{Postgres} Optional b   ~hlrl2nffci
+  > aka: Rename.findPriorTargetForCrcWith
+
+Rename.promoteToBufferSql : Command a (Text ->{g10, g11} Text ->{g8, g9} Text ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} a)   ~i79o3n2s6v
+
+Rename.renderName : [FormatPart] -> MovieRecord -> ProbeResult -> Text   ~sbqms0r7al
+
+Rename.resolutionStr : Nat -> Nat -> Text   ~n3qctr3r05
+
+Rename.resolveTokenM : MovieRecord -> ProbeResult -> Text -> Text   ~qdmd11lmqc
+
+Rename.resultFromDetails : Details -> Tmdb.Result   ~kl1s5o3hn2
+
+Rename.rowToRenameRow : (((((((Text, Text), Text), Int), Optional Text), Text), Optional Int), Text) -> RenameRow   ~58lsopef00
+
+Rename.runNew : Config -> Text -> Text -> Boolean -> '{IO, Exception} ()   ~u7j0qt9ba7
+
+Rename.runStep : Boolean -> Text -> [FormatPart] -> [FormatPart] -> Optional Text -> [Text] -> RenameRow ->{IO, Exception, RenameCatalog} ()   ~jaeoon2i1r
+
+Rename.sanitize : Text -> Text   ~mi4u73aj3h
+
+Rename.selectProposedSql : postgres.Query b (Text ->{g, g1} b) Text   ~vus25aq1uo
+
+Rename.selectRenamableSql : postgres.Query r r (((((((Text, Text), Text), Int), Optional Text), Text), Optional Int), Text)   ~q82mmvhhs2
+
+Rename.shrink : Text -> Text -> Text -> Text   ~0371q24i64
+
+Rename.tighten : Text -> Text   ~gbm358neq5
+
+Rename.tighten.test : [test.Result]   ~cvsgsd6455
+
+Rename.titleYearM : MovieRecord -> Text   ~bfoqsk5ub2
+
+Rename.toMovieRecord : RenameRow -> MovieRecord   ~o1jvvumlpb
+
+Rename.truncSec : Float -> Nat   ~3lugem8j6e
+  > aka: Rename.durationSeconds
+
+Rename.vcTag : Text -> Text   ~ei4f6a3q7e
+
+Rename.vcTag.test : [test.Result]   ~uksin1agh6
+
+Rename.vfTag : Nat -> Nat -> Text   ~ns6b9eo405
+
+Rename.vfTag.test : [test.Result]   ~vb8e8vsqm5
+
+type[Data] Resolve.FileRow   ~tod0kfldi9
+  type Resolve.FileRow
+    = { fileId : Int,
+        originalName : Text,
+        durationSec : Float,
+        hintTitle : Optional Text,
+        hintYear : Optional Nat,
+        hintTmdbId : Optional Nat }
+  fields: durationSec, fileId, hintTitle, hintTmdbId, hintYear, originalName
+
+type[Data] Resolve.Outcome   ~vks4jqr3k9
+  type Resolve.Outcome
+    = NoHint Int
+    | NoTmdbMatch Int
+    | ResolvedById Int Nat
+    | ResolvedBySearch Int Nat Nat
+    | SearchError Int Text
+
+Resolve.deleteOtherAssociationsSql : Command a (Int ->{g2, g3} Int ->{g, g1} a)   ~f62qd2jra6
+
+Resolve.ensureMovie : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Nat ->{IO, Postgres} Boolean   ~3ulqaqlsha
+
+Resolve.optIntToNat : Optional Int -> Optional Nat   ~8hooqmm21n
+
+Resolve.printOutcome : Resolve.Outcome ->{IO, Exception} ()   ~0m4aim4bp0
+
+Resolve.resolveOne : Boolean -> Text -> Resolve.FileRow ->{MetaApi, ResolveCatalog} Resolve.Outcome   ~2phkssaoqm
+  ! match priority: an NFO tmdb id hint wins outright at confidence 100 with source 'nfo_id'; otherwise title/year (from hint or parsed from the name) is searched, candidates scored, and ties broken by runtime proximity (pickBestWithRuntime).
+  ! the dry-run gate lives HERE: on dryRun it computes the same outcome but does not call recordMatch (verified by the dryRunNoWrite test).
+  ! no DB or HTTP directly; everything goes through the MetaApi/ResolveCatalog abilities (see decision DatabaseAndMetadataAreAbilitiesInterpretedAtRunBoundary).
+
+Resolve.resolveOne.dryRunNoWrite.test : [test.Result]   ~8vm0ipe07n
+
+Resolve.resolveOne.nfoId.test : [test.Result]   ~d5lt3i9jbr
+
+Resolve.resolveOne.noHint.test : [test.Result]   ~87rp8qlrt3
+
+Resolve.resolveOne.search.test : [test.Result]   ~1q2utirha5
+
+Resolve.rowToFile : (((((Int, Text), Float), Optional Text), Optional Int), Optional Int) -> Resolve.FileRow   ~eokr3ff1n9
+
+Resolve.runWith : Boolean -> Config ->{IO, Exception} ()   ~vtlvvatqa3
+
+Resolve.selectUnresolvedSql : postgres.Query r r (((((Int, Text), Float), Optional Text), Optional Int), Optional Int)   ~p4aaavtbkm
+
+Resolve.upsertAssociationSql : Command b (Int ->{g6, g7} Int ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~alb899or1d
+
+Resolve.writeMatch : PreparedCommand r1 a1 -> PreparedCommand r a -> Int -> Nat -> Nat -> Text ->{Postgres} ()   ~03hu3ulvil
+
+type[Data] Scoring   ~njhkbur9uh
+  type Scoring
+    = { year : Optional Nat, rating : Float, votes : Nat, mpaa : Text }
+  fields: mpaa, rating, votes, year
+
+Scoring.fromJson : '{unison_json_1_3_5.Decoder} Scoring   ~qdn424piil
+
+Scoring.toJson : Scoring -> Json   ~nch0c0gutr
+
+type[Data] Stage.AudioInfo   ~5b375ps7eo
+  type AudioInfo = Stage.AudioInfo.AudioInfo Text Nat Text Text
+  fields: channelLayout, channels, codec, language
+
+Stage.AudioInfo.fromJson : '{unison_json_1_3_5.Decoder} AudioInfo   ~965jq8pdmm
+
+Stage.AudioInfo.toJson : AudioInfo -> Json   ~08i10bfn3s
+
+type[Data] Stage.ProbeResult   ~g7lei427i6
+  type ProbeResult
+    = Stage.ProbeResult.ProbeResult
+        Text Text Nat Float VideoInfo [AudioInfo] [SubtitleInfo]
+  fields: audios, crc32, durationSec, sizeBytes, subtitles, video, videoPath
+
+Stage.ProbeResult.fromJson : '{unison_json_1_3_5.Decoder} ProbeResult   ~q4jrni7tvb
+  ! accepts BOTH the current 'audios' array and a LEGACY single 'audio' object (falls back to wrapping it in a one-element list); missing 'subtitles' decodes to [].
+  ! this dual shape is what lets old cached probe_json rows still decode after the multi-audio schema change.
+
+Stage.ProbeResult.primaryAudio : ProbeResult -> Optional AudioInfo   ~p4v3k4igr1
+
+Stage.ProbeResult.toJson : ProbeResult -> Json   ~9stik8dt0k
+
+type[Data] Stage.RawFormat   ~lh8oua9p0t
+  type RawFormat = Stage.RawFormat.RawFormat Nat Float
+  fields: durationSec, sizeBytes
+
+Stage.RawFormat.fromJson : '{unison_json_1_3_5.Decoder} RawFormat   ~d2jr0vlhbq
+
+type[Data] Stage.RawProbe   ~fnp17mrlh5
+  type RawProbe = Stage.RawProbe.RawProbe [RawStream] RawFormat
+  fields: format, streams
+
+Stage.RawProbe.fromJson : '{unison_json_1_3_5.Decoder} RawProbe   ~p8mc3eh3da
+
+type[Data] Stage.RawStream   ~i23li16869
+  type RawStream
+    = Stage.RawStream.RawStream
+        Text Text Nat Nat Text (Optional Nat) (Optional Nat) Nat Text Text Text
+  fields: avgFrameRate, bitRate, bitsPerRawSample, channelLayout, channels, codecName, codecType, height, language, pixFmt, width
+
+Stage.RawStream.fromJson : '{unison_json_1_3_5.Decoder} RawStream   ~evncjfi8la
+
+type[Data] Stage.SubtitleInfo   ~p07hon46ga
+  type SubtitleInfo = Stage.SubtitleInfo.SubtitleInfo Text Text
+  fields: codec, language
+
+Stage.SubtitleInfo.fromJson : '{unison_json_1_3_5.Decoder} SubtitleInfo   ~vomqn3krjd
+
+Stage.SubtitleInfo.toJson : SubtitleInfo -> Json   ~0sq3dmvt3k
+
+type[Data] Stage.VideoInfo   ~t9sp47p8em
+  type VideoInfo
+    = Stage.VideoInfo.VideoInfo Text Nat Nat Nat Text (Optional Nat) Float
+  fields: bitDepth, bitRate, codec, fps, height, pixFmt, width
+
+Stage.VideoInfo.fromJson : '{unison_json_1_3_5.Decoder} VideoInfo   ~m4b97o5itr
+
+Stage.VideoInfo.toJson : VideoInfo -> Json   ~rp5qic2lqi
+
+Stage.bitDepthFrom : Optional Nat -> Text -> Nat   ~3vihkgi127
+  ! prefers bits_per_raw_sample when present; otherwise INFERS depth from the pixel format string (p10/10le/10be -> 10, p12/... -> 12, else 8).
+  ! the inference is a substring scan on pix_fmt, so an unusual pix_fmt naming could mis-infer; absent any signal it defaults to 8.
+
+Stage.bitDepthFrom.test : [test.Result]   ~s1lc9es079
+
+Stage.collectWork : FilePath ->{IO, Exception} [(Optional Text, Text)]   ~4301vl7mak
+
+Stage.drainHandle : Handle ->{IO, Exception} Text   ~nsfv4rt3ca
+
+Stage.emptyRawFormat : RawFormat   ~ck1a0cieoq
+
+Stage.exampleFfprobeJson : Text   ~1rbo4llbiv
+
+Stage.ffprobeArgs : Text -> [Text]   ~iivt24m561
+
+Stage.fileStat : Text ->{IO} Optional (Int, Nat)   ~ggkl0vcup3
+
+Stage.forkChunk : [(a, Text)] ->{IO, Exception} [(a, Text, Either Text ProbeResult)]   ~ahl4lsmqih
+  ! forks one concurrent probe per item in the chunk and then reads all promises; probing is parallel within a chunk.
+  ! per-file probe failures are LOGGED (FAIL line) and collected as Left, never fatal; the chunk completes regardless of individual failures.
+
+Stage.forkProbe : (a, Text) ->{IO} concurrent.Promise (a, Text, Either Text ProbeResult)   ~6nkv0kj1kb
+
+Stage.fromRaw : Text -> Text -> RawProbe -> ProbeResult   ~705ksrhd6c
+
+Stage.fromRaw.test : [test.Result]   ~f0utsigcfl
+
+Stage.fromRawTracks.test : [test.Result]   ~u355l198t3
+
+Stage.insertBySize : (Nat, a) -> [(Nat, a)] -> [(Nat, a)]   ~ilbfu9f7re
+
+Stage.isFileCachedWith : PreparedQuery r a Int -> Text -> Int -> Int ->{Postgres} Boolean   ~vm2633fm8k
+
+Stage.nfoHint : Text ->{IO, Exception} (Optional Text, Optional Nat, Optional Nat)   ~bptngnh4c3
+
+Stage.parseNatString : Optional Text -> Optional Nat   ~48gj9ok8cd
+
+Stage.partitionWork : PreparedQuery r a1 Int -> [(a, Text)] ->{IO, Postgres} [(Nat, (a, Text))]   ~a9nuag2jch
+  ! drops items whose probe_cache row is fresh (mtime >= cached mtime AND size matches), so already-probed unchanged files are skipped without re-probing.
+  ! an item that cannot be stat'd is KEPT (size 0) rather than dropped, so a transiently unreadable file is retried rather than silently skipped.
+  ! the surviving work is returned sorted by size.
+
+Stage.probeCacheFreshSql : postgres.Query a (Text ->{g4, g5} Int ->{g2, g3} Int ->{g, g1} a) Int   ~q4bo7nh1bv
+
+Stage.probeJsonRoundtrip.test : [test.Result]   ~7ehqjs3m15
+
+Stage.probeViaFfprobe : Text -> Text ->{IO, Exception} Either Text ProbeResult   ~8s5m3oslbn
+
+Stage.probeWithCrc : Text ->{IO, Exception} Either Text ProbeResult   ~f94hgru00b
+  ! hashes FIRST (runRhashCrc32) and short-circuits on hash failure before ever invoking ffprobe; a file that cannot be hashed is never probed.
+  ! performs two subprocess executions (rhash then ffprobe) per call.
+
+Stage.readWith : PreparedQuery r a Text -> Text ->{Postgres} Optional ProbeResult   ~2f8ni24nai
+
+Stage.runChunk : Text -> PreparedCommand r1 a2 -> PreparedCommand r a1 -> [(a, Text)] ->{IO, Exception, Postgres} ()   ~kub7fv99ck
+
+Stage.runFfprobe : Text ->{IO} Either Text Text   ~ch6ijrqakn
+
+Stage.runProbeAt : Config -> Text -> Text ->{IO, Exception} ()   ~bgefklql3q
+
+Stage.runProbeStage : Config ->{IO, Exception} ()   ~b2mc0ksf7f
+
+Stage.runRhashCrc32 : Text ->{IO} Either Text Text   ~vv633a2oq1
+  ! shells `rhash --crc32 -p %C`; the output is uppercased AND trimmed before returning. The ENTIRE pipeline compares CRCs in uppercase, so any CRC that bypasses this normalization will silently fail to match.
+  ! nonzero exit -> Left; no exception escapes.
+
+Stage.sortBySize : [(Nat, a)] -> [(Nat, a)]   ~mm5at9mdpg
+
+Stage.statField : Text -> Text ->{IO} Optional Text   ~3q6onoll56
+
+Stage.tagLanguage : '{unison_json_1_3_5.Decoder} Text   ~e6pr340m9l
+
+Stage.upsertFileSql : Command b (Text ->{g26, g27} Int ->{g24, g25} Text ->{g22, g23} Text ->{g20, g21} Float ->{g18, g19} Text ->{g16, g17} Int ->{g14, g15} Int ->{g12, g13} Int ->{g10, g11} Text ->{g8, g9} Optional Text ->{g6, g7} Optional Int ->{g4, g5} Optional Int ->{g2, g3} Text ->{g, g1} b)   ~3reitprm9f
+  ! ON CONFLICT (crc32, size_bytes) the hint_* columns use COALESCE(EXCLUDED, existing): a re-probe that finds no NFO hint will NOT erase a hint recorded by an earlier pass. stage and probe payload, by contrast, are overwritten wholesale.
+  ! this is why re-running probe after a hint was set is safe; the hint is sticky.
+
+Stage.upsertFileWith : PreparedCommand r a -> Text -> Text -> (Optional Text, Optional Nat, Optional Nat) -> Text -> ProbeResult ->{Postgres} ()   ~nv0j8ehdad
+  ! wraps the bind/execute in catch and DISCARDS failures: a per-file DB error silently drops that row and the batch continues. There is no per-row error surfaced to the caller.
+  ! runs under Postgres only; the connection is supplied by the chunk runner.
+
+Stage.upsertProbeCacheSql : Command b (Text ->{g8, g9} Int ->{g6, g7} Int ->{g4, g5} Text ->{g2, g3} Int ->{g, g1} b)   ~tdn8h5b98t
+
+Stage.upsertProbeCacheWith : PreparedCommand r a -> Text -> Int -> ProbeResult ->{Postgres} ()   ~pkljb32dh8
+
+type[Data] StreamDetails   ~kc413mefi2
+  type StreamDetails
+    = { video : Video, audios : [Audio], subtitles : [Subtitle] }
+  fields: audios, subtitles, video
+
+StreamDetails.fromJson : '{unison_json_1_3_5.Decoder} StreamDetails   ~b47un2s2g7
+
+StreamDetails.toJson : StreamDetails -> Json   ~0k4ofkp31d
+
+type[Data] Subs.MovieResult   ~la1ihtniup
+  type MovieResult
+    = Subs.MovieResult.MovieResult
+        (Optional Text) (Optional Nat) (Optional Nat) Text Text (Optional Nat)
+  fields: imdbId, kind, name, sdId, tmdbId, year
+
+Subs.MovieResult.fromJson : '{unison_json_1_3_5.Decoder} MovieResult   ~prav8r6hcl
+
+type[Data] Subs.SaveOutcome   ~l4tocmq6o2
+  type SaveOutcome
+    = Subs.SaveOutcome.NotFound Text
+    | Subs.SaveOutcome.Saved Text Text
+    | Subs.SaveOutcome.Errored Text Text
+
+type[Data] Subs.SearchResponse   ~2c81b2a26h
+  type Subs.SearchResponse
+    = { ok : Boolean,
+        error : Optional Text,
+        results : [MovieResult],
+        subtitles : [SubtitleItem] }
+  fields: error, ok, results, subtitles
+
+Subs.SearchResponse.fromJson : '{unison_json_1_3_5.Decoder} Subs.SearchResponse   ~ngamro7gmb
+
+type[Data] Subs.SubtitleItem   ~tsk5k2gnef
+  type SubtitleItem
+    = Subs.SubtitleItem.SubtitleItem
+        Text
+        Text
+        Text
+        (Optional Text)
+        (Optional Boolean)
+        (Optional Boolean)
+        (Optional Nat)
+        (Optional Nat)
+        [UnpackFile]
+  fields: episode, fileName, fullSeason, hearingImpaired, language, releaseName, season, unpackFiles, urlPath
+
+Subs.SubtitleItem.downloadURI : SubtitleItem -> URI   ~fspqosuk8n
+
+Subs.SubtitleItem.fromJson : '{unison_json_1_3_5.Decoder} SubtitleItem   ~lklea3tlms
+
+type[Data] Subs.UnpackFile   ~hj2as3trps
+  type UnpackFile
+    = Subs.UnpackFile.UnpackFile Text Text Text Text Text Boolean Nat Text
+  fields: fileNId, format, hearingImpaired, language, name, releaseName, size, urlPath
+
+Subs.UnpackFile.downloadURI : UnpackFile -> URI   ~d3emiene1e
+
+Subs.UnpackFile.fromJson : '{unison_json_1_3_5.Decoder} UnpackFile   ~3pkn99hodc
+
+Subs.allUnpackFiles : Subs.SearchResponse -> [UnpackFile]   ~f86f1g2k36
+
+Subs.apiAuthority : Authority   ~uvtn30htdh
+
+Subs.downloadAuthority : Authority   ~8id0vcm7ft
+
+Subs.downloadURI : Text -> URI   ~h8d15dhr82
+
+Subs.downloadUnpackRaw : UnpackFile ->{IO} Either Text Text   ~9etareb286
+
+Subs.exampleSearchJson : Text   ~jf1h85oj2m
+
+Subs.exampleUnpackedJson : Text   ~2flqm95k5r
+
+Subs.fetchAndSaveByImdb : Text -> Text -> FilePath -> Text -> [Text] ->{IO} [SaveOutcome]   ~n1p72aosbp
+
+Subs.fetchAndSaveByTmdb : Text -> Nat -> FilePath -> Text -> [Text] ->{IO} [SaveOutcome]   ~9p92ts03d3
+
+Subs.imdbSearchURI : Text -> Text -> Text -> URI   ~cjkiup0chp
+
+Subs.isFullSeason : SubtitleItem -> Boolean   ~h9kun40uqm
+
+Subs.isHi : SubtitleItem -> Boolean   ~n1srpecf9f
+
+Subs.languageMatches : Text -> SubtitleItem -> Boolean   ~l3r1r4r1tu
+
+Subs.languagesParam : [Text] -> Text   ~jrcont4fdt
+
+Subs.languagesParam.test : [test.Result]   ~f8t5l8hj20
+
+Subs.normLang : Text -> Text   ~psp3r1pem0
+
+Subs.parseMovieFields.test : [test.Result]   ~v73fcir3ta
+
+Subs.parseShape.test : [test.Result]   ~l850csnm6d
+
+Subs.parseUnpacked.test : [test.Result]   ~fds0q1fjlg
+
+Subs.pickBestDropsFullSeason.test : [test.Result]   ~qbqodsup7c
+
+Subs.pickBestEmpty.test : [test.Result]   ~hq3gimhgut
+
+Subs.pickBestFallsBackToHi.test : [test.Result]   ~0pgsce5vo1
+
+Subs.pickBestForMovie : Text -> [SubtitleItem] -> Optional SubtitleItem   ~u76akmtvjq
+
+Subs.pickBestLanguageFallback.test : [test.Result]   ~4bhs785d8i
+
+Subs.pickBestPrefersNonHi.test : [test.Result]   ~9lr3crmo22
+
+Subs.pickUnpackFallsBackToHi.test : [test.Result]   ~ivuvl6i62n
+
+Subs.pickUnpackForLanguage : Text -> [UnpackFile] -> Optional UnpackFile   ~hbs97qdqnf
+
+Subs.pickUnpackPicksEachLanguage.test : [test.Result]   ~4j6ksb7jso
+
+Subs.pickUnpackPrefersNonHi.test : [test.Result]   ~a10fh67q25
+
+Subs.saveOneLanguage : FilePath -> Text -> [UnpackFile] -> Text ->{IO} SaveOutcome   ~lovtavp3e0
+
+Subs.searchByImdb : Text -> Text -> Text ->{IO} Either Text Subs.SearchResponse   ~p32o94qout
+
+Subs.searchByTmdb : Text -> Nat -> Text ->{IO} Either Text Subs.SearchResponse   ~tt4vcgr761
+
+Subs.searchRequestImdb : Text -> Text -> Text -> HttpRequest   ~ii9ualvai8
+
+Subs.searchRequestTmdb : Text -> Nat -> Text -> HttpRequest   ~mv7nt08im2
+
+Subs.tmdbSearchURI : Text -> Nat -> Text -> URI   ~tqh2l6n4ka
+
+Subs.unpackIsHi : UnpackFile -> Boolean   ~gqq6poorqg
+
+Subs.unpackIsSrt : UnpackFile -> Boolean   ~u2ggnkfm6u
+
+Subs.unpackLanguageMatches : Text -> UnpackFile -> Boolean   ~kht64ntlcq
+
+type[Data] Subtitle   ~kv617q3a2l
+  type Subtitle = { language : Text }
+  fields: language
+
+Subtitle.fromJson : '{unison_json_1_3_5.Decoder} Subtitle   ~ckle3gqf83
+
+Subtitle.toJson : Subtitle -> Json   ~gufd5v3ojr
+
+type[Data] Taxonomy   ~295vkrl2sg
+  type Taxonomy
+    = { genres : [Text],
+        tags : [Text],
+        countries : [Text],
+        studios : [Text],
+        directors : [Text],
+        credits : [Text] }
+  fields: countries, credits, directors, genres, studios, tags
+
+Taxonomy.fromJson : '{unison_json_1_3_5.Decoder} Taxonomy   ~k6hi0975r7
+
+Taxonomy.toJson : Taxonomy -> Json   ~009li9shfl
+
+type[Data] Title   ~b5jki7t9t0
+  type Title = { display : Text, original : Text, sort : Text }
+  fields: display, original, sort
+
+Title.fromJson : '{unison_json_1_3_5.Decoder} Title   ~27fgqa29nh
+
+Title.toJson : Title -> Json   ~rn0kgsrtp2
+
+type[Data] Tmdb.CastMember   ~hh867h6bid
+  type CastMember = Tmdb.CastMember.CastMember Nat Text Text Nat
+  fields: character, id, name, order
+
+Tmdb.CastMember.fromJson : '{unison_json_1_3_5.Decoder} CastMember   ~15vu3mq4sm
+
+type[Data] Tmdb.Details   ~klrjnoc264
+  type Details
+    = Tmdb.Details.Details
+        Nat
+        (Optional Text)
+        Nat
+        Text
+        Text
+        Text
+        Text
+        Text
+        Text
+        Float
+        Nat
+        [Text]
+        [Text]
+        [Text]
+        (Optional Text)
+        Text
+        [Text]
+        [Text]
+        [(Text, Text)]
+        [Text]
+  fields: cast, collection, directors, genres, imdbId, mpaa, originalLanguage, originalTitle, overview, productionCountries, productionStudios, releaseDate, runtime, tagline, tags, title, tmdbId, voteAverage, voteCount, writers
+
+Tmdb.Details.fromJson : '{unison_json_1_3_5.Decoder} Details   ~qih3uu2emg
+
+type[Data] Tmdb.ParsedRelease   ~a2vfh6fths
+  type ParsedRelease
+    = Tmdb.ParsedRelease.ParsedRelease Text Text Nat (Optional Nat)
+  fields: nfoTmdbId, rawName, title, year
+
+type[Data] Tmdb.Result   ~2fb7d981km
+  type Tmdb.Result
+    = { tmdbId : Nat,
+        title : Text,
+        originalTitle : Text,
+        originalLanguage : Text,
+        releaseDate : Text,
+        popularity : Float,
+        overview : Text }
+  fields: originalLanguage, originalTitle, overview, popularity, releaseDate, title, tmdbId
+
+Tmdb.Result.fromJson : '{unison_json_1_3_5.Decoder} Tmdb.Result   ~883o439010
+
+Tmdb.Result.toJson : Tmdb.Result -> Json   ~aipibm2cfd
+
+type[Data] Tmdb.SearchResponse   ~0ump08dge9
+  type Tmdb.SearchResponse = { results : [Tmdb.Result] }
+  fields: results
+
+Tmdb.SearchResponse.fromJson : '{unison_json_1_3_5.Decoder} Tmdb.SearchResponse   ~tp11gu8p3i
+
+Tmdb.SearchResponse.toJson : Tmdb.SearchResponse -> Json   ~7o1b5l2f1u
+
+Tmdb.apiAuthority : Authority   ~2o6ah6vv9l
+
+Tmdb.cachedDetailsWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Nat ->{IO, Postgres} Either Text Details   ~1bj0u3d55c
+
+Tmdb.cachedSearchWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Text -> Nat ->{IO, Postgres} Either Text Tmdb.SearchResponse   ~11ha874jqh
+
+Tmdb.castMemberFromJson : '{unison_json_1_3_5.Decoder} (Text, Text)   ~cfc8ctah5l
+
+Tmdb.cleanTitle : Text -> Text   ~d4lu68vie1
+
+Tmdb.countryReleaseFromJson : '{unison_json_1_3_5.Decoder} (Text, [Text])   ~28rrl16p57
+
+Tmdb.crewMemberFromJson : '{unison_json_1_3_5.Decoder} (Text, Text, Text)   ~031eq0herf
+
+Tmdb.detailsRaw : Text -> Nat ->{IO} Either Text Text   ~5j222ajl1o
+  > aka: Tmdb.fetchDetailsBody
+
+Tmdb.detailsRequest : Text -> Nat -> HttpRequest   ~2ttr9e1ti8
+
+Tmdb.detailsURI : Nat -> URI   ~a623ibtngq
+
+Tmdb.findEnclosedYear : Text -> Text -> Text -> Optional (Text, Nat)   ~mge3loaknp
+
+Tmdb.findEnclosedYearAny : Text -> Optional (Text, Nat)   ~evn3n1kjdf
+
+Tmdb.findYearIndex : [Text] -> Optional Nat   ~8a68bros8r
+
+Tmdb.isQualityToken : Text -> Boolean   ~6pmqavb7lt
+
+Tmdb.isoCountryFromJson : '{unison_json_1_3_5.Decoder} Text   ~d2m85br9in
+
+Tmdb.namedObjectFromJson : '{unison_json_1_3_5.Decoder} Text   ~6rgc8nviho
+
+Tmdb.normalize : Text -> Text   ~lbmb6ndkeh
+
+Tmdb.normalize.unicode.test : [test.Result]   ~nfcuiba1pk
+
+Tmdb.nth : Nat -> [a] -> Optional a   ~2eqogn2mbq
+  > aka: Versions.nth
+
+Tmdb.parseReleaseName : Text -> Optional ParsedRelease   ~uq1c90aibj
+
+Tmdb.pickBestWithRuntime : Optional Nat -> [(Tmdb.Result, Nat)] ->{MetaApi} Optional (Tmdb.Result, Nat)   ~0r4h01utbu
+
+Tmdb.qualityTokens : [Text]   ~u467jklmrk
+
+Tmdb.readDetailsBodyWith : PreparedQuery r a b -> Nat ->{Postgres} Optional b   ~msbpupoe22
+  > aka: Tv.Tmdb.readShowBodyWith
+
+Tmdb.releaseYear : Text -> Optional Nat   ~9hlu0drhel
+
+Tmdb.runtimeWinner : Nat -> [(Tmdb.Result, a)] ->{MetaApi} Optional (Tmdb.Result, a)   ~661grk0vnb
+  ! used to break a scoring tie by fetching each tied candidate's TMDB runtime and keeping only those within 15 minutes (tolerance) of the probed runtime; returns Some only if EXACTLY ONE candidate falls in range.
+  ! issues a movieDetails MetaApi call per tied candidate, so a tie among many candidates costs many detail fetches.
+  ! a candidate whose TMDB runtime is 0 (unknown) is excluded from the in-range set rather than treated as matching.
+
+Tmdb.scoreCandidate : ParsedRelease -> Tmdb.Result -> Nat   ~b04geofrov
+  ! additive score: id match +50, exact normalized-title match +30 (else token-overlap >=75% +20, >=50% +10), exact year +20 (off-by-one +10). A perfect match tops out at 100; the resolver's tiedAtBest threshold is 40.
+  ! title comparison runs through Tmdb.normalize (lowercase, unicode-punctuation folding, leading-article stripping), so 'The Matrix' and 'matrix' compare equal.
+
+Tmdb.search : Text -> Text -> Nat ->{IO} Either Text Tmdb.SearchResponse   ~slrpdp1bv2
+
+Tmdb.searchRequest : Text -> Text -> Nat -> HttpRequest   ~25r3rrtqlj
+
+Tmdb.searchURI : Text -> Nat -> URI   ~9h3vdptkbv
+
+Tmdb.selectDetailsSql : postgres.Query a (Int ->{g, g1} a) Text   ~bnr35jaq82
+
+Tmdb.selectSearchSql : postgres.Query a (Text ->{g2, g3} Int ->{g, g1} a) Text   ~k39cna5j80
+
+Tmdb.singleCertFromJson : '{unison_json_1_3_5.Decoder} Text   ~aa5f08lh75
+
+Tmdb.tokenAsYear : Text -> Optional Nat   ~ehci4bllms
+
+Tmdb.tokenOverlapPercent : Text -> Text -> Nat   ~b623k5o3vf
+
+Tmdb.tokenOverlapPercent.test : [test.Result]   ~ha2do18krs
+
+Tmdb.tokenize : Text -> [Text]   ~45jdscreqj
+
+Tmdb.upsertDetailsSql : Command b (Int ->{g28, g29} Optional Text ->{g26, g27} Optional Text ->{g24, g25} Text ->{g22, g23} Text ->{g20, g21} Text ->{g18, g19} Optional Int ->{g16, g17} Optional Int ->{g14, g15} Text ->{g12, g13} Text ->{g10, g11} Text ->{g8, g9} Float ->{g6, g7} Int ->{g4, g5} Optional Text ->{g2, g3} Text ->{g, g1} b)   ~ujgui9lsq4
+
+Tmdb.upsertSearchSql : Command b (Text ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~723q72c2jv
+
+Tmdb.writeDetailsBodyWith : PreparedCommand r a -> Nat -> Text ->{Postgres} ()   ~afa0clihrv
+
+Tv.Db.alterFilesDdl : [Text]   ~53t9d43dfr
+
+Tv.Db.cacheDdl : [Text]   ~h18dbsemat
+
+Tv.Db.createSchema : Config ->{IO, Exception} ()   ~oul9chlfhl
+
+Tv.Db.dropDdl : [Text]   ~fce2ntqmp3
+
+Tv.Db.episodeAssociationsDdl : Text   ~s8bfm9gqo0
+
+Tv.Db.episodesDdl : Text   ~rfa2f4l951
+
+Tv.Db.indexDdl : [Text]   ~8hubae7ilm
+
+Tv.Db.resetTvSchema : Config ->{IO, Exception} ()   ~648fv97rr8
+
+Tv.Db.showsDdl : Text   ~j695u72iif
+
+Tv.Move.collectVideoFiles : FilePath ->{IO, Exception} [Text]   ~tsvacil15m
+
+Tv.Move.mergeTree : Text -> Text ->{IO, Exception} ()   ~kaf747vtiq
+  ! recursively merges src into an EXISTING destination tree: directories recurse, files are moved, but an existing video file at the destination is SKIPPED (printed 'skip (exists)'), never overwritten.
+  ! this is the wider-blast-radius path that distinguishes tv-move from movie move; it can touch an already-populated show folder but cannot clobber an episode already there.
+  ! removes the now-emptied source folder (rmdirFolder) at the end.
+
+Tv.Move.moveShow : Boolean -> Text -> FilePath ->{IO, Exception, TvMoveCatalog} ()   ~q5jhk1n26c
+
+Tv.Move.rebasePath : Text -> Text -> Text -> Text   ~j319bmvnmj
+
+Tv.Move.run : Config -> Optional Text -> Boolean ->{IO, Exception} ()   ~ita6h9bio2
+
+Tv.Move.transferShow : Boolean -> Boolean -> Text -> Text -> Text ->{IO, Exception} Boolean   ~kf8ii23aoc
+
+Tv.Move.updateEpisode : Text -> Text -> Text -> Boolean -> Optional FileIdentity ->{IO, Exception, TvMoveCatalog} ()   ~mq3mqrpr2f
+
+Tv.Move.updatePathSql : Command a (Text -> Text -> Text -> a)   ~73bh4v7720
+
+Tv.Move.verifyEpisode : Text ->{IO, Exception, TvMoveCatalog} (Text, Boolean, Optional FileIdentity)   ~bda78kfcoq
+
+Tv.Nfo.episodeBlock : Text -> Nat -> Nat -> Text -> Optional EpisodeDetails -> Boolean -> Text -> ProbeResult -> [Text]   ~0rhqhoqbej
+
+Tv.Nfo.extractImdbId : Text -> Optional Text   ~n338tado5g
+
+Tv.Nfo.extractImdbId.test : [test.Result]   ~d50kun2uqc
+
+Tv.Nfo.generateShowNfo : ShowDetails -> Text   ~9lgotj9gl8
+
+Tv.Nfo.minimalShowNfo : Nat -> Text -> Text   ~20iictflqi
+
+Tv.Nfo.parseShowId : Soup ->{Throw XMLError} Optional Nat   ~ubtghfaarg
+
+Tv.Nfo.readShowTmdbId : FilePath ->{IO, Exception} Optional Nat   ~5mjcp3rg61
+
+Tv.Nfo.scanFolderForImdb : FilePath ->{IO, Exception} Optional Text   ~fbjoenhts4
+
+type[Data] Tv.Parse.EpisodeRef   ~fsiko5mgqe
+  type EpisodeRef = Tv.Parse.EpisodeRef.EpisodeRef Nat [Nat]
+  fields: episodes, season
+
+type[Data] Tv.Parse.ParsedEpisode   ~tntl22tb0o
+  type ParsedEpisode
+    = Tv.Parse.ParsedEpisode.ParsedEpisode Text (Optional Text) EpisodeRef
+  fields: rawName, ref, titlePrefix
+
+Tv.Parse.bareEpisode : Optional Nat -> Text -> Optional Nat   ~gqbc7e3vgf
+
+Tv.Parse.braceTagValue : Text -> Text -> Optional Text   ~l5d5h7upmn
+
+Tv.Parse.cleanShowQuery : Text -> (Text, Optional Nat)   ~4okbma5a0k
+
+Tv.Parse.cleanShowQuery.test : [test.Result]   ~g559ja9h19
+
+Tv.Parse.concatEpisode : Nat -> Text -> Optional Nat   ~nscfb1cnna
+
+Tv.Parse.cutTitle : Text -> Text   ~17l6n2jm31
+
+Tv.Parse.digitsOnly : Text -> Boolean   ~6ulh2neikb
+
+Tv.Parse.dropTrailingNoise : [Text] -> [Text]   ~k2f419ghvm
+
+Tv.Parse.epSegment : Text -> Optional [Nat]   ~m4nkmgblho
+
+Tv.Parse.episodeAfterMarker : [Text] -> Optional Nat   ~j6m9j22c94
+
+Tv.Parse.folderImdbTag : Text -> Optional Text   ~ssh4e6plc0
+
+Tv.Parse.folderTag.test : [test.Result]   ~68at0lac5p
+
+Tv.Parse.folderTmdbTag : Text -> Optional Nat   ~ju8dpuj1kq
+
+Tv.Parse.foldersOfPath : Text -> [Text]   ~bmv4n2ll5g
+
+Tv.Parse.imdbTagFromFolders : [Text] -> Optional Text   ~iaa09r02u9
+
+Tv.Parse.isCutToken : Text -> Boolean   ~2e792sfgss
+
+Tv.Parse.isSeasonOnly : Text -> Boolean   ~22g6493rfs
+
+Tv.Parse.natSegment : Text -> Optional Nat   ~2d00mg37hb
+
+Tv.Parse.parseEpisodeName : Text -> Optional ParsedEpisode   ~a5f6soo4lc
+
+Tv.Parse.parseEpisodeName.test : [test.Result]   ~cc79f5kkmn
+
+Tv.Parse.parseShowFolder : Text -> Optional (Text, Optional Nat)   ~h7a918536d
+
+Tv.Parse.parseShowFolder.test : [test.Result]   ~qm10uirno5
+
+Tv.Parse.plainEpisode : Text -> Optional Nat   ~k1pir1otn3
+
+Tv.Parse.refFromFolders : [Text] -> Text -> Optional EpisodeRef   ~0uruqfbfna
+
+Tv.Parse.refFromFolders.test : [test.Result]   ~vpf23tlj0r
+
+Tv.Parse.refFromToken : Text -> Optional EpisodeRef   ~8jlflhi9i6
+  ! parses an episode token in several shapes: SxxEyy, multi-ep SxxEyyEzz / SxxEyy-Ezz / SxxEyy-zz, and the alternate NxM form (1x02). Up to 3 episode numbers per ref; each <= 999.
+  ! season 0 is the 'specials' bucket: S00Exx keeps season 0, and notably S04E00 (and any all-zero episode list) collapses to season 0 as well, treating a zero episode as a special rather than a real S04 episode.
+  ! rejects look-alikes that are NOT episode refs: se7en, sample, soundtrack, S01 (no episode), S01E (empty), S01E02v2 (trailing junk), and resolution tokens 1920x1080 / 1280x720 (the NxM guard requires season <= 99).
+
+Tv.Parse.refFromToken.test : [test.Result]   ~r5mq4mn4a3
+
+Tv.Parse.sTokenSeason : Text -> Optional Nat   ~e8qqn2fmb7
+
+Tv.Parse.seasonFromFolders : [Text] -> Optional Nat   ~1di8p5vusv
+
+Tv.Parse.seasonNat : Text -> Optional Nat   ~uqks36lggm
+
+Tv.Parse.seasonOfFolder : Text -> Optional Nat   ~790m828rme
+
+Tv.Parse.titleCutToken : Text -> Boolean   ~lvvi4bve6m
+
+Tv.Parse.titleTokens : [Text] -> [Text]   ~922fu15ofq
+
+Tv.Parse.tmdbTagFromFolders : [Text] -> Optional Nat   ~1curiq0mi1
+
+type[Data] Tv.Rename.EpisodeJob   ~71mdt3ugum
+  type EpisodeJob
+    = Tv.Rename.EpisodeJob.EpisodeJob
+        Int Text Text Text Nat Text (Optional Nat) Nat [(Nat, Text)]
+  fields: crc32, episodes, fileId, firstAirYear, originalPath, probeJson, season, showId, showName
+
+type[Data] Tv.Rename.TvRenameOutcome   ~a99jjq5e2q
+  type TvRenameOutcome
+    = Tv.Rename.TvRenameOutcome.EpNoVideo Text
+    | Tv.Rename.TvRenameOutcome.EpRenamed Text Text
+    | Tv.Rename.TvRenameOutcome.EpDuplicateRemoved Text Text
+    | Tv.Rename.TvRenameOutcome.EpConflict Text Text
+    | Tv.Rename.TvRenameOutcome.EpOutsideRoot Text Text
+    | Tv.Rename.TvRenameOutcome.EpBadProbe Text Text
+    | Tv.Rename.TvRenameOutcome.EpError Text Text
+    | Tv.Rename.TvRenameOutcome.EpWouldRename Text Text
+    | Tv.Rename.TvRenameOutcome.EpWouldRemoveDuplicate Text Text
+
+Tv.Rename.applyTv : Config -> Boolean -> '{IO, Exception} ()   ~fekf46p83g
+
+Tv.Rename.episodeNfoFor : Optional Season -> EpisodeJob -> ProbeResult -> Text   ~vq437miesd
+
+Tv.Rename.executeEpisode : Boolean -> PreparedQuery r1 a1 Text -> PreparedQuery r a Text -> Text -> Text -> [FormatPart] -> [FormatPart] -> [FormatPart] -> EpisodeJob ->{IO, Exception, Postgres, RenameCatalog} TvRenameOutcome   ~uvj3i877u3
+
+Tv.Rename.groupJobs : [( ((((((((Int, Text), Text), Text), Int), Text), Optional Int), Int), Int), Text)] -> [EpisodeJob]   ~up4c3jv3gj
+
+Tv.Rename.printTvOutcome : TvRenameOutcome ->{IO, Exception} ()   ~62c1jppcgv
+
+Tv.Rename.renderEpisode : [FormatPart] -> EpisodeJob -> ProbeResult -> Text   ~etsm060nrl
+
+Tv.Rename.resolveEpisodeToken : EpisodeJob -> ProbeResult -> Text -> Text   ~d2v9rgelh5
+
+Tv.Rename.selectEpisodeRenamableSql : postgres.Query r r ( ((((((((Int, Text), Text), Text), Int), Text), Optional Int), Int), Int), Text)   ~glpclj4e32
+
+Tv.Rename.splitTvFormat : Text -> Optional ([FormatPart], [FormatPart], [FormatPart])   ~84himriend
+
+type[Data] Tv.Resolve.FileRow   ~23cc7e8c8v
+  type Tv.Resolve.FileRow
+    = { fileId : Int,
+        originalName : Text,
+        hintTitle : Optional Text,
+        hintYear : Optional Nat,
+        hintShowTmdbId : Optional Nat,
+        hintImdbId : Optional Text,
+        originalPath : Text }
+  fields: fileId, hintImdbId, hintShowTmdbId, hintTitle, hintYear, originalName, originalPath
+
+type[Data] Tv.Resolve.Outcome   ~5hs65i0qb7
+  type Tv.Resolve.Outcome
+    = NoEpisodeRef Int Text
+    | NoShowMatch Int Text
+    | NoShowHint Int
+    | TvDetailsFailed Int Nat Text
+    | TvEpisodeMissing Int Nat Nat [Nat]
+    | TvResolved Int Nat Nat [Nat] Nat Text
+    | TvSeasonFailed Int Nat Nat Text
+
+Tv.Resolve.batchInteract : '{g, TvInteract} a ->{g} a   ~38a9grmlah
+  ! a TvInteract handler that ALWAYS answers chooseShow with None; installing it means ambiguous shows are never prompted and instead fall through to scoring/refusal (see open issue BatchTvResolveNeverPromptsAndAutoRefusesAmbiguousShows).
+
+Tv.Resolve.deleteFileAssocSql : Command a (Int ->{g, g1} a)   ~dauvo68qnc
+
+Tv.Resolve.identify : Config ->{IO, Exception} ()   ~h5o1cfq65l
+
+Tv.Resolve.printOutcome : Tv.Resolve.Outcome ->{IO, Exception} ()   ~m3d11q78il
+
+Tv.Resolve.resolveOne : Boolean -> Text -> Tv.Resolve.FileRow ->{TvMetaApi, TvCatalog} Tv.Resolve.Outcome   ~gn6pkv77dc
+  ! show-match priority: direct NFO tmdb id (nfo_id, conf 100) or {tmdb-...} folder tag (folder_tag, 100); else imdb id from hint or {imdb-...} folder tag resolved via DB then TMDB find (imdb_find, 95); else title/year search scored by scoreShow (title_year).
+  ! REFUSES the whole file (TvEpisodeMissing, no write) if ANY requested episode number is absent from the fetched TMDB season; it will not partially associate.
+  ! dry-run gate is here: recordEpisodeMatch is skipped on dryRun.
+  ! the episode ref comes from the filename first (parseEpisodeName) and falls back to season-from-folders + bare episode number (refFromFolders).
+
+Tv.Resolve.resolveOne.dryRunNoWrite.test : [test.Result]   ~mp88nkja3b
+
+Tv.Resolve.resolveOne.folderFallback.test : [test.Result]   ~478tlpj4cn
+
+Tv.Resolve.resolveOne.folderTag.test : [test.Result]   ~1s0svksehn
+
+Tv.Resolve.resolveOne.missingEp.test : [test.Result]   ~4naq81mpe3
+
+Tv.Resolve.resolveOne.nfoId.test : [test.Result]   ~su3iidfheu
+
+Tv.Resolve.resolveOne.noRef.test : [test.Result]   ~1ufab1gpc4
+
+Tv.Resolve.resolveShowPick : Text -> [Text] -> Optional Text -> Tv.Resolve.FileRow -> Int ->{TvMetaApi, TvCatalog} Either Tv.Resolve.Outcome (Nat, Nat, Text)   ~4n4964gmoq
+
+Tv.Resolve.rowToFile : ( (((((Int, Text), Optional Text), Optional Int), Optional Int), Optional Text), Text) -> Tv.Resolve.FileRow   ~4cvjbimd8j
+
+Tv.Resolve.run : Config ->{IO, Exception} ()   ~j5ihg1u5hf
+
+Tv.Resolve.runWith : Boolean -> Config ->{IO, Exception} ()   ~jlo7lkiur5
+
+Tv.Resolve.selectUnresolvedTvSql : postgres.Query r r ( ( ((((Int, Text), Optional Text), Optional Int), Optional Int), Optional Text), Text)   ~123mlqdbaa
+
+Tv.Resolve.upsertEpAssocSql : Command b (Int -> Int -> Int -> Int -> Int -> Text -> b)   ~gutlihlsdq
+
+Tv.Resolve.writeMatch : PreparedCommand r1 a1 -> PreparedCommand r a -> Int -> Nat -> Nat -> [Nat] -> Nat -> Text ->{Postgres} ()   ~rg9hlag11l
+
+Tv.Stage.collectVideos : FilePath -> Nat ->{IO, Exception} [Text]   ~bal6v07sgc
+  ! recurses subdirectories only up to maxDepth (4) and SKIPS extras/sample directories (isExtrasDir) and sample-named files (isSampleName), so featurettes/trailers/proof dirs never enter the episode pipeline.
+  ! the depth bound is a guard against pathological nesting, not a correctness requirement.
+
+Tv.Stage.episodeHints : Text -> Text ->{IO, Exception} ( Optional Text, Optional Nat, Optional Nat, Optional Text, Optional Nat, Optional Nat)   ~9hr9rn5ofj
+  ! derives (title, year, showId, imdbId, season, episode) hints from the filename first, then the show folder, then the immediate folder's tvshow.nfo, then the top folder's tvshow.nfo; the tmdb id and imdb id are read from NFO/scan, season+episode from the parsed ref.
+  ! imdb scanning is skipped entirely once a tmdb show id is found (the showId branch short-circuits the imdbId branch), so the cheaper NFO id wins over a folder imdb scan.
+
+Tv.Stage.isExtrasDir : Text -> Boolean   ~ifjkuvd61j
+
+Tv.Stage.isSampleName : Text -> Boolean   ~9br7ifmq5m
+
+Tv.Stage.maxDepth : Nat   ~vcfbbslncd
+
+Tv.Stage.relFolders : Text -> Text -> [Text]   ~cd2pbmr8me
+
+Tv.Stage.relFolders.test : [test.Result]   ~hmo13j8hms
+
+Tv.Stage.runChunk : Text -> Text -> PreparedCommand r1 a1 -> PreparedCommand r a -> [((), Text)] ->{IO, Exception, Postgres} ()   ~op3r6u5f9c
+
+Tv.Stage.runProbeAtTv : Config -> Text -> Text ->{IO, Exception} ()   ~o5g781028k
+
+Tv.Stage.runProbeTv : Config ->{IO, Exception} ()   ~od2a2rch1u
+
+Tv.Stage.upsertFileSql : Command b (Text -> Int -> Text -> Text -> Float -> Text -> Int -> Int -> Int -> Text -> Optional Text -> Optional Int -> Optional Int -> Optional Text -> Optional Int -> Optional Int -> Text -> Text -> b)   ~343oi66dsv
+
+Tv.Stage.upsertFileWith : PreparedCommand r a -> Text -> Text -> ( Optional Text, Optional Nat, Optional Nat, Optional Text, Optional Nat, Optional Nat) -> Text -> ProbeResult ->{Postgres} ()   ~698lc2bqfh
+
+type[Data] Tv.Tmdb.EpisodeDetails   ~9rvs8a580m
+  type EpisodeDetails
+    = Tv.Tmdb.EpisodeDetails.EpisodeDetails
+        Nat Nat Nat Text Text (Optional Nat) Text Float Nat
+  fields: airDate, episode, episodeId, overview, runtimeMin, season, title, voteAverage, voteCount
+
+Tv.Tmdb.EpisodeDetails.fromJson : '{unison_json_1_3_5.Decoder} EpisodeDetails   ~u6h7dajk77
+
+type[Data] Tv.Tmdb.SearchResponse   ~tboqi8in2a
+  type Tv.Tmdb.SearchResponse = { results : [ShowResult] }
+  fields: results
+
+Tv.Tmdb.SearchResponse.fromJson : '{unison_json_1_3_5.Decoder} Tv.Tmdb.SearchResponse   ~m55v315ae3
+
+Tv.Tmdb.SearchResponse.toJson : Tv.Tmdb.SearchResponse -> Json   ~a7b6ru0qe4
+
+type[Data] Tv.Tmdb.Season   ~ntsvup0ia0
+  type Season = Tv.Tmdb.Season.Season Nat [EpisodeDetails]
+  fields: episodes, season
+
+Tv.Tmdb.Season.fromJson : '{unison_json_1_3_5.Decoder} Season   ~hjlbvjqv6d
+
+Tv.Tmdb.Season.parse.test : [test.Result]   ~lm94uco474
+
+type[Data] Tv.Tmdb.ShowDetails   ~uo46d3vshf
+  type ShowDetails
+    = Tv.Tmdb.ShowDetails.ShowDetails
+        Nat
+        Text
+        Text
+        Text
+        Text
+        Text
+        Text
+        Nat
+        [Text]
+        Text
+        (Optional Text)
+        (Optional Nat)
+        Float
+        Nat
+        [Text]
+        [CastMember]
+  fields: cast, firstAirDate, genres, imdbId, name, networks, numberOfSeasons, originalLanguage, originalName, overview, rating, status, tmdbId, tvdbId, voteAverage, voteCount
+
+Tv.Tmdb.ShowDetails.fromJson : '{unison_json_1_3_5.Decoder} ShowDetails   ~d94up6ofgu
+
+type[Data] Tv.Tmdb.ShowResult   ~0qn37cv1hr
+  type ShowResult
+    = Tv.Tmdb.ShowResult.ShowResult Nat Text Text Text Text Float Text
+  fields: firstAirDate, name, originalLanguage, originalName, overview, popularity, tmdbId
+
+Tv.Tmdb.ShowResult.fromJson : '{unison_json_1_3_5.Decoder} ShowResult   ~9cfpaindch
+
+Tv.Tmdb.ShowResult.toJson : ShowResult -> Json   ~a18skjmp5e
+
+Tv.Tmdb.authedGet : Text -> URI -> HttpRequest   ~25pum02g7b
+
+Tv.Tmdb.cachedSearchWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Text -> Optional Nat ->{IO, Postgres} Either Text Tv.Tmdb.SearchResponse   ~5lnriagnmr
+
+Tv.Tmdb.cachedSeasonWith : PreparedQuery r2 a2 Text -> PreparedCommand r1 a1 -> PreparedCommand r a -> Text -> Nat -> Nat ->{IO, Postgres} Either Text Season   ~h5pnq6bjke
+
+Tv.Tmdb.cachedShowDetailsWith : PreparedQuery r1 a1 Text -> PreparedCommand r a -> Text -> Nat ->{IO, Postgres} Either Text ShowDetails   ~7vbgk9raie
+
+Tv.Tmdb.contentRatingFromJson : '{unison_json_1_3_5.Decoder} (Text, Text)   ~q73ugi0b7a
+
+Tv.Tmdb.detailsRaw : Text -> Nat ->{IO} Either Text Text   ~8e8e9v4hrq
+
+Tv.Tmdb.detailsURI : Nat -> URI   ~su4qg63t1c
+
+Tv.Tmdb.episodeFor : Season -> Nat -> Optional EpisodeDetails   ~iuf2sj42ll
+
+Tv.Tmdb.exampleSeasonJson : Text   ~t1jqpg0mb1
+
+Tv.Tmdb.findByImdbURI : Text -> URI   ~2gj067r373
+
+Tv.Tmdb.findShowByImdb : Text -> Text ->{IO} Either Text Nat   ~pm4igdub6f
+
+Tv.Tmdb.findShowResultFromJson : '{unison_json_1_3_5.Decoder} Either Text Nat   ~fgch77tahj
+
+Tv.Tmdb.pickBestShow : [(ShowResult, Nat)] -> Optional (ShowResult, Nat)   ~27amro5385
+
+Tv.Tmdb.readSeasonBodyWith : PreparedQuery r a b -> Nat -> Nat ->{Postgres} Optional b   ~l75790eikc
+
+Tv.Tmdb.scoreShow : Text -> Optional Nat -> Optional Nat -> ShowResult -> Nat   ~1m439v9a16
+  ! additive like the movie scorer but with a higher exact-title weight (+40 vs +30): id match +50, exact normalized name +40 (else overlap >=75% +20, >=50% +10), exact year +20 (off-by-one +10).
+  ! compares both name and original_name through Tmdb.normalize and takes the better overlap.
+
+Tv.Tmdb.search : Text -> Text -> Optional Nat ->{IO} Either Text Tv.Tmdb.SearchResponse   ~emj6q3abms
+
+Tv.Tmdb.searchURI : Text -> Optional Nat -> URI   ~04vhuiptu5
+
+Tv.Tmdb.seasonRaw : Text -> Nat -> Nat ->{IO} Either Text Text   ~9fnqbd3g18
+
+Tv.Tmdb.seasonURI : Nat -> Nat -> URI   ~bq3bsct1u6
+
+Tv.Tmdb.selectSearchSql : postgres.Query a (Text ->{g2, g3} Int ->{g, g1} a) Text   ~q7ohqkqbib
+
+Tv.Tmdb.selectSeasonSql : postgres.Query a (Int ->{g2, g3} Int ->{g, g1} a) Text   ~6a2h1uu6ru
+
+Tv.Tmdb.selectShowByImdbSql : postgres.Query a (Text -> a) Int   ~7p1jk8g1vo
+
+Tv.Tmdb.selectShowSql : postgres.Query a (Int ->{g, g1} a) Text   ~n7ldlh3a6q
+
+Tv.Tmdb.upsertEpisodeSql : Command b (Int ->{g10, g11} Int ->{g8, g9} Int ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Optional Int ->{g, g1} b)   ~g2blfrifbj
+
+Tv.Tmdb.upsertSearchSql : Command b (Text ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~ehms6rth29
+
+Tv.Tmdb.upsertSeasonSql : Command b (Int ->{g4, g5} Int ->{g2, g3} Text ->{g, g1} b)   ~61mkvasqbh
+
+Tv.Tmdb.upsertShowSql : Command b (Int ->{g18, g19} Optional Text ->{g16, g17} Optional Text ->{g14, g15} Text ->{g12, g13} Text ->{g10, g11} Text ->{g8, g9} Optional Int ->{g6, g7} Text ->{g4, g5} Text ->{g2, g3} Text ->{g, g1} b)   ~cpae8lj8lm
+
+Tv.Tmdb.writeEpisodesWith : PreparedCommand r a -> Nat -> Season ->{Postgres} ()   ~qei8bda3f9
+
+Tv.Tmdb.writeShowBodyWith : PreparedCommand r a -> Nat -> Text ->{Postgres} ()   ~gtgmj2k1lo
+
+Tv.Tmdb.yearKey : Optional Nat -> Int   ~u6h6tq7c7h
+
+Tv.initDb : '{IO, Exception} ()   ~mm2cfusop2
+
+type[Ability] TvInteract   ~rbekscgqe0
+  ability TvInteract where
+    chooseShow : Int -> [(Nat, Text, Optional Nat)] ->{TvInteract} Optional Nat
+
+type[Data] Versions.Assigned   ~ettp1tj847
+  type Assigned = Versions.Assigned.Assigned MediaFacts Nat Text Boolean
+  fields: facts, isDefault, score, versionLabel
+
+type[Data] Versions.Edition   ~bk07gt5f32
+  type Edition = Versions.Edition.Edition Text Text Nat Boolean [Assigned]
+  fields: editionKey, isStandard, label, members, runtimeSec
+
+type[Data] Versions.LibRow   ~jje9i3tt9m
+  type LibRow = Versions.LibRow.LibRow Text Text Nat Text Text
+  fields: folderChecksum, probeJson, rawName, sizeBytes, tmdbId
+
+type[Data] Versions.MediaFacts   ~avf98dodq7
+  type MediaFacts
+    = Versions.MediaFacts.MediaFacts
+        Text Text Nat Float Float Nat Nat Nat Text (Optional Nat) Text Nat Text
+  fields: audioChannels, audioCodec, bitDepth, crc32, durationSec, folderChecksum, fps, height, rawName, sizeBytes, videoBitRate, videoCodec, width
+
+Versions.analyze : Optional Nat -> [MediaFacts] -> [Edition]   ~ib5v1e3ntd
+
+Versions.assignMember : Optional Text -> MediaFacts -> Assigned   ~csllsdbd2b
+
+Versions.bestByScore : [MediaFacts] -> Optional MediaFacts   ~9jjl37hrue
+
+Versions.canonicalMinFor : PreparedQuery r a Int -> Text ->{Postgres} Optional Nat   ~u2iuqp3fpg
+  > aka: Tv.Tmdb.lookupShowByImdb
+
+Versions.canonicalMinSql : postgres.Query a (Text ->{g, g1} a) Int   ~oijhf5n3c8
+
+Versions.clearAllSql : Command a a   ~cl2r10s2pa
+
+Versions.clusterByCut : [MediaFacts] -> [[MediaFacts]]   ~jmj7icgijv
+  ! clusters by normalized seconds (frame-rate canceled) with a 1.5% relative tolerance, so a PAL 25fps copy and a 23.976fps copy of the same cut land in ONE cluster while a genuine extended cut splits off (verified by palSameCut and clusterSeparatesRealCut tests).
+  ! input is sorted by normalized seconds first, then a single forward pass groups adjacent copies against the cluster anchor.
+
+Versions.clusterRuntimeSec : [MediaFacts] -> Float   ~3sou1da85t
+
+Versions.clusterSeparatesRealCut.test : [test.Result]   ~914i8cicsf
+
+Versions.cutTokens : [(Text, Text)]   ~id8hfu4kgu
+
+Versions.defaultIsBestOfStandard.test : [test.Result]   ~grrso3mck7
+
+Versions.editionLabel : [MediaFacts] -> Boolean -> Float -> Float -> Text   ~aj8l5npadr
+
+Versions.editionTokenLabel : [MediaFacts] -> Optional Text   ~4k2t1is5ej
+
+Versions.factsForRow : LibRow -> Optional (Text, MediaFacts)   ~3vuqi4h5j9
+
+Versions.factsFromProbe : Text -> Text -> ProbeResult -> MediaFacts   ~hisjv222sf
+
+Versions.factsFromProbe.test : [test.Result]   ~msho7v0u9m
+
+Versions.fallbackStandardIndex : [[MediaFacts]] -> Optional Nat   ~rjg2e81bm0
+
+Versions.groupByTmdb : [(Text, MediaFacts)] -> [(Text, [MediaFacts])]   ~9bjjn4ek91
+
+Versions.groupByTmdb.test : [test.Result]   ~ff2hq16f2h
+
+Versions.insertEditionSql : postgres.Query a (Text ->{g8, g9} Text ->{g6, g7} Text ->{g4, g5} Int ->{g2, g3} Boolean ->{g, g1} a) Int   ~8964k2olr6
+
+Versions.insertVersionSql : Command b (Int ->{g10, g11} Text ->{g8, g9} Text ->{g6, g7} Int ->{g4, g5} Text ->{g2, g3} Boolean ->{g, g1} b)   ~51oudhnkt8
+
+Versions.normalizedSeconds : MediaFacts -> Float   ~om86u3vvcg
+  ! = durationSec * fps / referenceFps, canceling frame-rate speedup against the 24000/1001 reference; a copy with fps 0 (unknown) falls back to raw durationSec rather than dividing.
+  ! this is the value clustering compares, NOT the raw probed duration.
+
+Versions.palSameCut.test : [test.Result]   ~e9k8qluqr4
+
+Versions.parseFrameRate : Text -> Float   ~lgjp87s7em
+
+Versions.parseFrameRate.test : [test.Result]   ~nopag7qqks
+
+Versions.pickStandardIndex : Optional Nat -> [Float] -> Optional Nat   ~5iob0sdf2b
+
+Versions.qualityOrdering.test : [test.Result]   ~a0tmd4gec1
+
+Versions.qualityScore : MediaFacts -> Nat   ~q9810kucc6
+  ! a single packed Nat ranking copies by, in descending weight: resolution rank, bit depth, bitrate (Mbps), video codec rank, audio channels, audio codec rank. Higher is better; used to pick the default member of an edition.
+  ! the score is computed but, beyond choosing a per-edition default, is not yet used to prune or surface redundant rips (see open issue DuplicatesGroupedIntoEditionsButNotRankedForUserDecision).
+
+Versions.referenceFps : Float   ~tkl2463kgb
+
+Versions.relativeClose : Float -> Float -> Boolean   ~si0mtkevks
+
+Versions.resolutionRank : Nat -> Nat -> Nat   ~u9t6cahj3f
+
+Versions.rowToLib : ((((Text, Text), Int), Text), Text) -> LibRow   ~frl8hq4rq5
+
+Versions.run : Config ->{IO, Exception} ()   ~ct8bgp7aq5
+
+Versions.sameCutTolerance : Float   ~4c1sfal6q3
+
+Versions.selectLibFilesSql : postgres.Query r r ((((Text, Text), Int), Text), Text)   ~92nshk5poc
+
+Versions.standardPicksClosest.test : [test.Result]   ~hj6bn2r8ep
+
+Versions.testFacts : Text -> Float -> Float -> Nat -> Nat -> Nat -> Text -> Text -> MediaFacts   ~ljuks966oa
+
+Versions.toMinutes : Float -> Nat   ~lbddoku2tg
+
+Versions.upsertGroup : Text -> MediaFacts -> [(Text, [MediaFacts])] -> [(Text, [MediaFacts])]   ~thv0b9pavr
+
+Versions.versionLabel : MediaFacts -> Text   ~ght5s1802m
+
+Versions.videoCodecRank : Text -> Nat   ~5htd27jo8o
+
+Versions.writeEdition : PreparedQuery rE aE Int -> PreparedCommand rV aV -> Text -> Edition ->{Postgres} ()   ~nkher4dcuj
+
+type[Data] Video   ~t3bumop2up
+  type Video = { codec : Text, aspect : Float, width : Nat, height : Nat }
+  fields: aspect, codec, height, width
+
+Video.fromJson : '{unison_json_1_3_5.Decoder} Video   ~g04phn78n6
+
+Video.toJson : Video -> Json   ~1nev5g9g4k
+
+type[Ability] api.MetaApi   ~m5amhkki2r
+  ability MetaApi where
+    api.MetaApi.movieDetails : Nat ->{MetaApi} Either Text Details
+    api.MetaApi.searchMovies :
+      Text -> Nat ->{MetaApi} Either Text Tmdb.SearchResponse
+
+type[Ability] api.TvMetaApi   ~kml3no7o2q
+  ability TvMetaApi where
+    api.TvMetaApi.findShowByImdbApi : Text ->{TvMetaApi} Either Text Nat
+    api.TvMetaApi.searchShows :
+      Text -> Optional Nat ->{TvMetaApi} Either Text Tv.Tmdb.SearchResponse
+    api.TvMetaApi.seasonFor : Nat -> Nat ->{TvMetaApi} Either Text Season
+    api.TvMetaApi.showDetails : Nat ->{TvMetaApi} Either Text ShowDetails
+
+classifyPiece : Text -> FolderMeta -> FolderMeta   ~l2m092n0c5
+
+cli : '{IO, Exception} ()   ~bus619da48
+
+type[Ability] db.MovieCatalog   ~bulcmevs05
+  ability MovieCatalog where
+    db.MovieCatalog.identityFor : Text ->{MovieCatalog} Optional FileIdentity
+    db.MovieCatalog.recordAssociation :
+      Int -> Nat -> Int -> Text ->{MovieCatalog} ()
+    db.MovieCatalog.recordBufferFile :
+      Text -> Text -> ProbeResult ->{MovieCatalog} ()
+    db.MovieCatalog.saveLibraryMovie :
+      Optional Text -> Optional Nat -> Optional Nat -> Movie ->{MovieCatalog} ()
+    db.MovieCatalog.updateLibraryPath :
+      Text -> Text -> Text -> Int ->{MovieCatalog} ()
+
+type[Ability] db.MovieMoveCatalog   ~1nmsgovgsl
+  ability MovieMoveCatalog where
+    db.MovieMoveCatalog.identityForFile :
+      Text ->{MovieMoveCatalog} Optional FileIdentity
+    db.MovieMoveCatalog.updateFilePathById :
+      Text -> Text -> Text -> Int ->{MovieMoveCatalog} ()
+    db.MovieMoveCatalog.updateFilePathByName :
+      Text -> Text -> Text ->{MovieMoveCatalog} ()
+
+type[Ability] db.RenameCatalog   ~tpqrt6jvql
+  ability RenameCatalog where
+    db.RenameCatalog.deleteProbeCache : Text ->{RenameCatalog} ()
+    db.RenameCatalog.priorTargetForCrc : Text ->{RenameCatalog} Optional Text
+    db.RenameCatalog.promoteToBuffer :
+      Text -> Text -> Text -> Text -> Text -> Int ->{RenameCatalog} ()
+    db.RenameCatalog.upsertProbeCache :
+      Text -> Int -> ProbeResult ->{RenameCatalog} ()
+
+type[Ability] db.ResolveCatalog   ~vf1ibjb2gh
+  ability ResolveCatalog where
+    db.ResolveCatalog.recordMatch :
+      Int -> Nat -> Nat -> Text ->{ResolveCatalog} ()
+
+type[Ability] db.TvCatalog   ~uqp0aevdm5
+  ability TvCatalog where
+    db.TvCatalog.lookupShowByImdbDb : Text ->{TvCatalog} Optional Nat
+    db.TvCatalog.recordEpisodeMatch :
+      Int -> Nat -> Nat -> [Nat] -> Nat -> Text ->{TvCatalog} ()
+
+type[Ability] db.TvMoveCatalog   ~db5rc2oqja
+  ability TvMoveCatalog where
+    db.TvMoveCatalog.identityForEpisode :
+      Text ->{TvMoveCatalog} Optional FileIdentity
+    db.TvMoveCatalog.updateEpisodePathById :
+      Text -> Text -> Text -> Int ->{TvMoveCatalog} ()
+    db.TvMoveCatalog.updateEpisodePathByName :
+      Text -> Text -> Text ->{TvMoveCatalog} ()
+
+emptyFolderMeta : FolderMeta   ~cd49r5a0t5
+
+exampleMovie : Movie   ~ugs7fv28ob
+
+filePathBasename : FilePath -> Text   ~ljjn9q769v
+
+filePathText : FilePath -> Text   ~clab8d2gig
+
+findFirstNfo : [Text] -> Optional Text   ~7hkl3bv9ej
+
+findFirstVideo : [Text] -> Optional Text   ~l9v74mekdf
+
+initDb : '{IO, Exception} ()   ~dl4s2dfagr
+
+isNfo : Text -> Boolean   ~j09d4isjmp
+
+isVideo : Text -> Boolean   ~kbopqh6n7u
+
+type[Data] kernel.cache.Cached   ~hjebjqdt7h
+  type Cached a = kernel.cache.Cached.Cached Text (Optional a) (Optional Text)
+  fields: cacheError, cacheKey, cachedValue
+
+kernel.cache.Cached.fromJson : '{g, unison_json_1_3_5.Decoder} t -> '{g, unison_json_1_3_5.Decoder} Cached t   ~jc9vrbps8t
+  ! decodes the cache 'key' field but FALLS BACK to a legacy 'folder' field when 'key' is absent, so old cache rows written under the previous schema still decode (covered by the legacyKey test).
+
+kernel.cache.Cached.legacyKey.test : [test.Result]   ~khrn8267gv
+
+kernel.cache.Cached.roundtrip.test : [test.Result]   ~m61pq5lp2c
+
+kernel.cache.Cached.toJson : (i ->{g} Json) -> Cached i ->{g} Json   ~hf6imd75gt
+
+kernel.cache.readCachedWith : PreparedQuery r a Text -> '{g, unison_json_1_3_5.Decoder} t -> Text -> Int ->{g, Postgres} Optional (Either Text t)   ~5p4njbdslq
+
+kernel.cache.writeCachedWith : PreparedCommand r a1 -> (i ->{g} Json) -> Text -> Int -> Either a i ->{g, Postgres} ()   ~mv1ejhbu91
+
+kernel.proc.execute : Text -> [Text] ->{IO, Exception} (Nat, Text, Text)   ~c2sncikplf
+
+kernel.score.pickBest : (i ->{g} Float) -> [(i, Nat)] ->{g} Optional (i, Nat)   ~dkcs9pah7m
+
+kernel.score.pickBest.test : [test.Result]   ~83gk5vl9em
+
+kernel.score.popularityRatio : Float   ~8g9740qdms
+
+kernel.score.popularityWinner : (i ->{g} Float) -> [(i, a)] ->{g} Optional ((i, a), Float)   ~bvgu5rs41u
+
+kernel.score.resolveTie : (i ->{g} Float) -> [(i, a)] ->{g} Optional (i, a)   ~p2ml1nocia
+  ! a single candidate wins automatically; with several, the popularity winner is taken ONLY if its popularity exceeds the runner-up's by the popularityRatio (3x) factor, otherwise the tie is declared unresolvable (None).
+  ! this is a deliberate refusal: an ambiguous tie returns None rather than guessing, so the file goes unresolved instead of mis-associated.
+
+kernel.score.scoreThreshold : Nat   ~du7dphs6nq
+
+kernel.score.tiedAtBest : [(a, Nat)] -> Optional (Nat, [(a, Nat)])   ~rpp0j5j4ea
+
+mig : '{IO, Exception} ()   ~9r69rq8ghk
+
+parseConfigLine : Text -> Optional FilePath   ~42r9dr7380
+
+parseNatBefore : Text -> Text -> Optional Nat   ~9on5jiijuf
+
+pathJoin : FilePath -> Text -> FilePath   ~nthkao31jq
+
+primaryAudio : Movie -> Optional Audio   ~eoidhkdesl
+
+resetDb : '{IO, Exception} ()   ~19her0312j
+
+sampleNfo : Text   ~8eeek4870o
+
+silentBranches : '{Each, Throw XMLError} a -> [a]   ~tbg86b9bdt
+
+subDemo : '{IO, Exception} ()   ~9re2nkvm7n
+
+testDetails : Details   ~puhon90qj6
+
+testSeasonOneEp : Season   ~kflrj63eoj
+
+testShowDetails : ShowDetails   ~mqprj7las2
+
+textAfter : Text -> Text -> Optional Text   ~u0dnge8252
+
+textBetween : Text -> Text -> Text -> Optional Text   ~tkiejfkiss
+
+toJsonOpt : (a ->{g} Json) -> Optional a ->{g} Json   ~07225supes
+
+tryXml : '{Throw XMLError} a -> Optional a   ~tf3kgdkq44
+
+uniDork.alreadyImported : PreparedQuery r a Text -> Text ->{Postgres} Boolean   ~n2o18b8kkr
+
+uniDork.batchSize : Nat   ~la4ok5756a
+
+uniDork.batchedMain : Config -> Boolean -> Text ->{IO, Exception} ()   ~ndnkor34js
+
+uniDork.batchedRun : Config ->{IO, Exception} ()   ~mdfg66tc41
+
+uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]   ~qagsrv8lia
+
+uniDork.hasFlag : flag -> [flag] -> Boolean   ~89a011jsp6
+
+uniDork.nonFlags : [Text] -> [Text]   ~qn54p8b4p0
+
+uniDork.processBatch : Config -> Boolean -> Nat -> Nat -> Nat -> mutable.Ref {IO} (Nat, Nat) -> [(FilePath, Nat)] ->{IO, Exception} ()   ~74jvgapfe3
+
+uniDork.processOne : Config -> Boolean -> PreparedQuery rI aI Text -> PreparedCommand rF aF -> PreparedCommand r20 a20 -> PreparedCommand r19 a19 -> PreparedCommand r18 a18 -> PreparedCommand r17 a17 -> PreparedCommand r16 a16 -> PreparedCommand r15 a15 -> PreparedCommand r14 a14 -> PreparedCommand r13 a13 -> PreparedCommand r12 a12 -> PreparedCommand r11 a11 -> PreparedCommand r10 a10 -> PreparedCommand r9 a9 -> PreparedCommand r8 a8 -> PreparedCommand r7 a7 -> PreparedCommand r6 a6 -> PreparedCommand r5 a5 -> PreparedCommand r4 a4 -> PreparedCommand r3 a3 -> PreparedCommand r2 a2 -> PreparedCommand r1 a1 -> PreparedCommand r a -> FilePath ->{IO, Exception, Postgres} ()   ~c48trq9kbt
+
+uniDork.renameNewCombined : Config -> Text -> Boolean -> '{IO, Exception} ()   ~pb1ororelr
+
+uniDork.runBatchSafe : Config -> Boolean -> Nat -> Nat -> Nat -> Nat -> Nat -> mutable.Ref {IO} (Nat, Nat) -> [(FilePath, Nat)] ->{IO, Exception} ()   ~l3l67d0hsv
+
+versionsRun : '{IO, Exception} ()   ~jm7vf6724k
+
+videoExtensions : [Text]   ~ise6o37smj
+
+%decision ContentAddressedIdentityIsBytesNotLabels
+  what:    A file's identity is (crc32, size_bytes); the CRC32 is also embedded in folder/file names (~XXXXXXXX) and re-derived from the on-disk bytes at every stage. Names are derived data, never the source of truth.
+  why:     The whole point of the project: the same title ripped twice is two distinct rows, a renamed or relocated folder is still the same row. Identity survives every rename because it is a hash of the video bytes, not a path. files has UNIQUE (crc32, size_bytes); ON CONFLICT upserts. That pair is the primary identity everywhere downstream (associations.file_id, probe_cache, move verification). Folder-embedded CRC (parseFolderName reading ~XXXXXXXX) is a CONVENIENCE for fast skip and human inspection, NOT trusted: processOne re-probes and corrects a folder whose claimed CRC disagrees with the bytes. Consequence: every CRC comparison in the pipeline is uppercase (runRhashCrc32 uppercases+trims); any code that introduces a lowercase or untrimmed CRC will silently fail to match.
+  affects: Stage.runRhashCrc32, Stage.upsertFileSql, Move.verifyFile, uniDork.processOne, Nfo.parseFolderName
+
+%decision StageAndMediaKindPartitionOneFilesTable
+  what:    One files table is partitioned by two columns: stage (staging -> buffer -> library) and media_kind (movie | episode). The resolvers select on these, they are not separate tables.
+  why:     Movies and TV share the same files table, the same identity model, and the same three-directory discipline; only the two partition columns separate them. resolve matches media_kind='movie' AND stage<>'buffer' (selectUnresolvedSql); tv-resolve matches media_kind='episode' AND stage='staging' (selectUnresolvedTvSql). stage='buffer' is deliberately EXCLUDED from movie resolve: once rename has written a folder into the buffer, its identity comes from the NFO rename wrote, not from a fresh TMDB match. Re-resolving a buffered file would fight the rename that already happened. rename selects stage='staging' (selectRenamableSql / selectEpisodeRenamableSql), move flips rows to stage='library'. The lifecycle is encoded in this column, not in code flow.
+  affects: Resolve.selectUnresolvedSql, Tv.Resolve.selectUnresolvedTvSql, Rename.selectRenamableSql, Tv.Rename.selectEpisodeRenamableSql
+
+%decision MoveBlastRadiusIsOneFolderUnderRoot
+  what:    move/tv-move only ever WRITE under the configured library root and only ever DELETE from the buffer; every destination is guarded by enforceUnderRoot before any filesystem mutation.
+  why:     This is the single most dangerous verb in the system: it relocates real media and deletes the source. The safety property is mechanical, not careful coding: enforceUnderRoot rejects any destination not prefixed by libraryRoot + '/'. move additionally aborts if the destination folder already exists, so it can never overwrite an existing library folder. The blast radius of one movie move is exactly: one folder added to library, one removed from buffer. tv-move is a deliberately WIDER blast radius (it merges into an existing show folder via mergeTree), but still never overwrites an existing episode file and still only writes under tvLibrary. The library root comes from UNIDORK_PATH_LIBRARY / UNIDORK_PATH_TV_LIBRARY (set from nix/config.nix). Those env vars are the ONLY thing controlling where move writes; this is why the README tells you to echo them before the first production move.
+  affects: Move.moveFolder, Move.transferFolder, Move.enforceUnderRoot, Tv.Move.moveShow, Tv.Move.transferShow
+
+%decision IdentityVerifiedBySizeNotByRehash
+  what:    At promotion, a file's stored CRC is trusted as long as the on-disk size equals the stored size_bytes. There is no re-hash at move time; on size mismatch (or missing row) the update falls back to a name-based path update.
+  why:     Re-running rhash on every file at promotion would double the I/O cost of the slowest part of the pipeline for files that have not changed since probe. Size equality is a cheap proxy: a file whose byte count is unchanged has overwhelmingly not had its CRC change. verifyFile / verifyEpisode return (path, diskOk, identOpt) where diskOk is purely the size comparison. updateMovieFile / updateEpisode then branch: verified -> update files row by (crc, size); unverified -> update by old path string, and print a WARN. The honest hole: a file corrupted or swapped in place at exactly the same byte length would pass verification with a stale CRC. This is accepted as vanishingly unlikely against the I/O savings. See open issue NoRematchGateAtPromotion for the related trust of the NFO id.
+  affects: Move.verifyFile, Move.updateMovieFile, Tv.Move.verifyEpisode, Tv.Move.updateEpisode
+
+%decision AtomicRenameOrRsyncPartialThenCommit
+  what:    Same-filesystem transfers use an atomic mv -T; cross-filesystem transfers rsync into a .unidork-partial staging dir under the library root, then mv-commit into place, then delete the source. Crashed partials are swept on the next run.
+  why:     A cross-device move is not atomic: a crash mid-copy would leave a half-written folder in the live library. Staging the copy under .unidork-partial and only mv-committing the completed copy makes the visible-in-library step atomic even across filesystems. sameDevice compares stat %d (device numbers); a stat FAILURE returns false, which routes to the SAFER rsync-partial path rather than risking an atomic rename that would actually be a cross-device copy. sweepPartial removes the whole .unidork-partial tree at the start of a non-dry-run move, on the theory that any partial present is the debris of a previous crash, never a concurrent transfer (the pipeline is single-writer). On a cross-device abort the SOURCE is left intact (delete only happens after a successful commit), so a failed move never loses data.
+  affects: Move.transferFolder, Move.sweepPartial, Move.partialRoot, Tv.Move.transferShow
+
+%decision RuntimeNormalizedClusteringForEditions
+  what:    Versions clusters a tmdb_id's copies into editions by normalizing each copy's runtime to a reference frame rate (24000/1001) and grouping copies whose normalized seconds are within 1.5% of each other.
+  why:     The naive approach (group by raw duration) would split a PAL 25fps transfer and a 23.976fps transfer of the SAME cut into two editions because PAL speedup shortens the runtime by ~4%. normalizedSeconds multiplies durationSec by fps/referenceFps to cancel the speedup. relativeClose uses a RELATIVE tolerance (d/hi <= sameCutTolerance = 1.5e-2), not an absolute second count, so the tolerance scales with film length: a 3-hour film tolerates more absolute drift than a 90-minute one. The 1.5% threshold is tuned to merge frame-rate and minor-trim differences while still separating a genuine Director's/Extended cut (which differ by minutes, well outside 1.5%). See open issue DuplicatesNotRankedForUser for what clustering does NOT yet do.
+  affects: Versions.normalizedSeconds, Versions.clusterByCut, Versions.relativeClose, Versions.referenceFps
+
+%decision DatabaseAndMetadataAreAbilitiesInterpretedAtRunBoundary
+  what:    Per-file logic (resolveOne, runStep, etc.) is written against abilities (MovieCatalog/ResolveCatalog/MetaApi/TvCatalog/TvMetaApi/RenameCatalog/TvMoveCatalog). The real Postgres/HTTP handlers are installed only at the runWith / run boundary; the per-file functions never touch a connection directly.
+  why:     This is what makes resolveOne and friends unit-testable with scripted pure handlers. The Resolve.resolveOne.* and Tv.Resolve.resolveOne.* tests install handlers that return canned TMDB responses and RECORD whether recordMatch was called, with zero database or network. The effect rows in the signature (e.g. {MetaApi, ResolveCatalog}) are the contract: any handler satisfying them can drive the logic. The production handler (metaGo/catalogGo inside runWith) wires the ability to prepared statements; the test handler wires it to a tuple accumulator. Consequence: reading a resolveOne body tells you the decision logic but NOT what hits the DB. The actual writes live in the handler arms of runWith, and the dry-run gate (see DryRunGatesWritesNotMetadata) lives in resolveOne but is enforced by simply not calling the ability.
+  affects: Resolve.resolveOne, Resolve.runWith, Tv.Resolve.resolveOne, Tv.Resolve.runWith, Rename.runStep
+
+%decision DryRunGatesFilesystemAndAssociationsNotProbeOrCache
+  what:    --dry-run suppresses filesystem operations and association/match writes, but probe rows, TMDB caches, and subtitle-search caches are STILL written during a dry run.
+  why:     A dry run is meant to preview file movement and matching decisions safely, not to be a pure read. Probing and caching are idempotent, side-effect-free-on-the-library work whose results are valuable to keep even from a preview run. resolveOne / Tv.Resolve.resolveOne gate recordMatch/recordEpisodeMatch on dryRun (the 'if dryRun then () else record...' pattern), but the surrounding runWith still fetches and caches TMDB details/search/season payloads regardless. move/rename gate the actual mv/rsync/removeFile and the files-row promotion on dryRun, emitting WouldRename/WouldRemoveDuplicate outcomes instead. Consequence: a dry run is NOT free of DB writes. It will populate probe_cache, tmdb_search_cache, tmdb_details_cache, etc. This is intentional but surprising; do not treat --dry-run as read-only.
+  affects: Move.run, Rename.runNew, Resolve.resolveOne, Tv.Resolve.resolveOne, Tv.Rename.applyTv
+
+%open_issue RelangDecisionComputedButNeverApplied
+  what:     Relang.decide produces a default-audio-track decision (SwitchTo / AlreadyCorrect / OriginalNotPresent / ...), but nothing in the pipeline remuxes or re-flags the file to apply it.
+  why:      decide -> selectTrack -> bestOf is a complete, tested analysis: it picks the original-language, non-commentary, highest-channel/best-codec track and reports whether the current default is wrong. The result is a Decision value that is computed and then dropped. There is no ffmpeg remux step and no mkvpropedit call anywhere that consumes a SwitchTo. The README lists this under 'What's next' as the first item. Wiring it requires deciding WHEN to apply (at rename into buffer? at promotion?) and a mux/flag step that mutates the container, which crosses the line from metadata-only into byte-mutating territory and needs its own safety story.
+  blocking: actually correcting default audio tracks for foreign-language media
+  affects:  Relang.decide, Relang.selectTrack, Relang.bestOf
+
+%open_issue NoSubtitleMuxingAndNoTvSubtitleFetchAtAll
+  what:     Movie subtitles are fetched from subdl and written as language-tagged SIDECAR files only; they are never muxed into the MKV, and the TV pipeline fetches no subtitles whatsoever.
+  why:      fetchAndSaveByImdb/saveOneLanguage download and write '<base>.<lang>.<ext>' next to the video. maybeFetchSubsM is called only from the MOVIE rename path (executeOne); the TV rename path (executeEpisode) has no equivalent call. Muxing into the container would require an ffmpeg remux step that does not exist (same missing capability as the Relang apply). Consequence: Kodi/Jellyfin will pick up the sidecars for movies, but episodic TV gets no subtitles at all, and no media gets embedded subs. README documents both gaps honestly under 'What's next'.
+  blocking: embedded subtitle tracks, any TV subtitle support
+  affects:  Subs.fetchAndSaveByImdb, Subs.saveOneLanguage, Rename.maybeFetchSubsM
+
+%open_issue DuplicatesGroupedIntoEditionsButNotRankedForUserDecision
+  what:     Exact byte-duplicates (same CRC tag + matching size at the target) are removed at rename, and distinct rips of one tmdb_id are clustered into editions by runtime, but multiple DISTINCT rips of the same cut are never ranked by quality and surfaced for a keep/discard decision.
+  why:      executeOne removes a source that is byte-identical to something already at the target (DuplicateRemoved). Versions.analyze clusters by cut and even computes qualityScore and picks a per-edition default. But that is as far as it goes. qualityScore exists (resolution/depth/bitrate/codec/channels weighting) and analyze marks an is_default member, yet nothing presents 'you have a 1080p x264 and a 2160p x265 of the same cut, keep which?' to the user or auto-prunes the loser. The editions/versions tables capture the grouping; the missing piece is a surfacing/pruning verb. README lists this under 'What's next' as duplicate management.
+  blocking: automated or assisted pruning of redundant quality variants
+  affects:  Versions.analyze, Versions.qualityScore, Rename.executeOne
+
+%open_issue NoRematchGateBeforePromotion
+  what:     move trusts the tmdb id written into the buffer NFO by rename and does not re-verify the match against TMDB before promoting into the library.
+  why:      moveFolder parses the buffer NFO, reads its tmdb id, and promotes. If rename associated the wrong title, move faithfully promotes the wrong title; the only verification at this stage is byte-identity (size), not correctness of the MATCH. This is by design for now: the buffer is the human review step, and re-matching at promotion would re-incur TMDB calls and could disagree with a deliberate manual correction in the buffer. README flags an optional re-match gate under 'What's next'. If added, it would re-run the resolver against the buffer NFO id and refuse/flag on disagreement.
+  blocking: catching a mis-association before it reaches the library
+  affects:  Move.moveFolder, Move.updateMovieFile
+
+%open_issue BatchTvResolveNeverPromptsAndAutoRefusesAmbiguousShows
+  what:     The TvInteract ability and batchInteract handler exist, but Tv.Resolve.resolveOne never calls chooseShow; ambiguous shows are resolved purely by pickBestShow's popularity tiebreak, and a no-confident-match becomes a silent NoShowMatch refusal.
+  why:      batchInteract is a handler that auto-answers chooseShow with None, i.e. 'never pick interactively'. The interactive picker is plumbed as an ability but resolveShowPick decides via scoreShow + pickBestShow and surfaces NoShowMatch when nothing scores high enough. So in batch mode an ambiguous show is refused rather than queued for a human, and there is no --interactive path wired into the TV resolver run (unlike the movie/interactive show selection mentioned for the broader project). Wiring an interactive handler would mean swapping batchInteract for one that prompts, and threading a flag through Tv.Resolve.run / runWith.
+  blocking: human disambiguation of ambiguous TV show matches in batch runs
+  affects:  Tv.Resolve.resolveOne, Tv.Resolve.batchInteract, Tv.Resolve.resolveShowPick
+

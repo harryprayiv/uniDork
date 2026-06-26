@@ -1,3 +1,61 @@
+compile cli bin/unidork-import
+update
+push @harryprayiv/uniDork
+update
+edit.namespace .
+quit
+edit.namespace .
+unsafe.force-push @harryprayiv/uniDork/main
+push.force @harryprayiv/uniDork/main
+push @harryprayiv/uniDork
+undo
+push @harryprayiv/uniDork
+ls Versions
+undo
+edit.namespace .
+push @harryprayiv/uniDork
+update
+run versionsRun
+compile cli bin/unidork-import
+edit.namespace .
+push @harryprayiv/uniDork
+compile cli bin/unidork-import
+update
+edit.namespace .
+update
+push @harryprayiv/uniDork
+compile cli bin/unidork-import
+run versionsRun
+update
+run versionsRun
+edit.namespace .
+compile cli bin/unidork-import
+run initDb
+run Tv.initDb
+run versionsRun
+compile cli bin/unidork-import
+push @harryprayiv/uniDork
+update
+compile cli bin/unidork-import
+update
+run Tv.initDb
+run initDb
+compile cli bin/unidork-import
+edit.namespace .
+compile cli bin/unidork-import
+push @harryprayiv/uniDork
+update
+push @harryprayiv/uniDork
+edit.namespace .
+update
+push @harryprayiv/uniDork
+compile cli bin/unidork-import
+update
+edit.namespace .
+run Tv.initDb
+run initDb
+compile cli bin/unidork-import
+update
 edit.namespace .
 push @harryprayiv/uniDork
 update
@@ -40,61 +98,3 @@ debug.find.global Move.run
 view cli
 find : Config -> Optional Text -> Boolean ->{IO, Exception} ()
 find within Move
-find Move.moveFolder
-find Move.promote
-find Move.move
-find Move.run
-compile cli bin/unidork-import
-test
-update
-view Move.partialRoot Move.sweepPartial Move.commitFolder
-view Move.run
-find Move.
-find collectVideoFiles
-find Tv.Move.
-view loadIdentity selectFileByPathSql updateFilePathSql
-view Move.moveOne Move.moveChunk Move.moveBatch Move.run
-view Tv.Move.moveShow Tv.Move.run Tv.Move.updatePathSql
-update
-test
-update
-compile cli bin/unidork-import
-test
-update
-compile cli bin/unidork-import
-update
-view cli
-compile cli bin/unidork-import
-edit.namespace .
-update
-delete.term Tmdb.printCandidate
-delete.term Tmdb.reportLooseVideoWith
-delete.term Tmdb.reportFolderWith
-dependents uniDork.identify
-update
-delete.term Tmdb.buildParsedRelease
-delete.term Stage.selectProbeJsonByPathSql
-delete.term Stage.probeMinutesForPathWith
-delete.term Tmdb.printCandidate
-delete.term Tmdb.reportLooseVideoWith
-delete.term Tmdb.reportFolderWith
-delete.term uniDork.identify
-update
-delete.term uniDork.identify
-dependents Tmdb.reportLooseVideoWith
-dependents Tmdb.reportFolderWith
-dependents uniDork.identify
-update
-edit.namespace .
-view Stage.forkChunk
-view Stage.runChunk
-view runProbeAt
-view runProbeStage
-compile cli bin/unidork-import
-edit.namespace .
-compile cli bin/unidork-import
-test
-update
-edit.namespace .
-compile cli bin/unidork-import
-update
