@@ -1542,12 +1542,19 @@ kernel.cache.writeCachedWith pc encodeValue keyText keyInt = cases
 
 kernel.proc.execute : Text -> [Text] ->{IO, Exception} (Nat, Text, Text)
 kernel.proc.execute cmd cmdArgs =
+  use Handle close
   (stdin, stdout, stderr, p) = Process.start cmd cmdArgs
-  _ = Handle.close stdin
-  out = drainHandle stdout
-  err = drainHandle stderr
-  code = Process.wait p
-  (code, out, err)
+  _ = close stdin
+  result = catch do
+    out = drainHandle stdout
+    err = drainHandle stderr
+    code = Process.wait p
+    (code, out, err)
+  _ = catch do close stdout
+  _ = catch do close stderr
+  match result with
+    Right r -> r
+    Left f  -> Exception.raise f
 
 kernel.score.pickBest : (i ->{g} Float) -> [(i, Nat)] ->{g} Optional (i, Nat)
 kernel.score.pickBest getPop scored = match tiedAtBest scored with
@@ -7841,6 +7848,22 @@ Tv.Parse.isSeasonOnly t =
       Optional.None -> false
   else false
 
+Tv.Parse.mergeAdjacentRefs : [(Nat, EpisodeRef)] -> Optional (Nat, EpisodeRef)
+Tv.Parse.mergeAdjacentRefs = cases
+  [] -> Optional.None
+  (i, r0) +: rest ->
+    use EpisodeRef episodes season
+    use List ++
+    use Nat <=
+    season0 = season r0
+    step acc = cases
+      (_, r) ->
+        merged = episodes acc ++ episodes r
+        if Universal.eq (season r) season0 && List.size merged <= 3 then
+          EpisodeRef season0 merged
+        else acc
+    Some (i, List.foldLeft step r0 rest)
+
 Tv.Parse.natSegment : Text -> Optional Nat
 Tv.Parse.natSegment t =
   if Universal.eq (Text.size t) 0 then Optional.None else Nat.fromText t
@@ -7879,11 +7902,10 @@ Tv.Parse.parseEpisodeName name =
       if Universal.eq (Text.size titleStr) 0 then None else Some titleStr
     ParsedEpisode name titlePrefix ref
   pairs = Db.withIndex tokens
-  singleHit =
-    List.head
-      (List.filterMap
-        (cases (i, t) -> Optional.map (r -> (i, r)) (refFromToken t)) pairs)
-  match singleHit with
+  singleHits =
+    List.filterMap
+      (cases (i, t) -> Optional.map (r -> (i, r)) (refFromToken t)) pairs
+  match mergeAdjacentRefs singleHits with
     Some (i, ref) -> Some (build i ref)
     None          ->
       match scanAdjacentSE tokens with
@@ -7892,6 +7914,22 @@ Tv.Parse.parseEpisodeName name =
           match scanSeasonWordEpisode tokens with
             Some (i, ref) -> Some (build i ref)
             None          -> None
+
+test> Tv.Parse.parseEpisodeName.dualEpisode.test =
+  use Optional None
+  use ParsedEpisode ref
+  use Universal eq
+  case1 =
+    match parseEpisodeName "Doraemon - 1x087 - 1x088 - Le bacche - I regali" with
+      None   -> false
+      Some p -> eq (ref p) (EpisodeRef 1 [87, 88])
+  case2 = match parseEpisodeName "Doraemon - 1x004 - La macchina eco" with
+    None   -> false
+    Some p -> eq (ref p) (EpisodeRef 1 [4])
+  case3 = match parseEpisodeName "Sherlock.S04E00.The.Abominable.Bride" with
+    None   -> false
+    Some p -> eq (ref p) (EpisodeRef 0 [0])
+  List.flatMap check [case1, case2, case3]
 
 test> Tv.Parse.parseEpisodeName.forms.test =
   use Universal eq

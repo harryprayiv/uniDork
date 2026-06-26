@@ -1,5 +1,12 @@
 edit.namespace .
 compile cli bin/unidork-import
+push @harryprayiv/uniDork
+update
+compile cli bin/unidork-import
+push @harryprayiv/uniDork
+update
+edit.namespace .
+compile cli bin/unidork-import
 update
 push @harryprayiv/uniDork
 update
@@ -91,10 +98,3 @@ find.global : Config -> Optional Text -> Boolean ->{IO, Exception} ()
 debug.find.global planBatch
 debug.find.global moveChunk
 debug.find.global moveBatch
-debug.find.global moveOne
-reflog
-update
-edit.namespace .
-debug.find.global Move.run
-view cli
-find : Config -> Optional Text -> Boolean ->{IO, Exception} ()
