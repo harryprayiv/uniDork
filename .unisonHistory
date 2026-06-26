@@ -1,3 +1,4 @@
+edit.namespace .
 compile cli bin/unidork-import
 update
 push @harryprayiv/uniDork
@@ -97,4 +98,3 @@ edit.namespace .
 debug.find.global Move.run
 view cli
 find : Config -> Optional Text -> Boolean ->{IO, Exception} ()
-find within Move

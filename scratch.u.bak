@@ -1632,6 +1632,12 @@ List.chunk n xs =
     if size xs <= n then [xs]
     else List.take n xs +: List.chunk n (List.drop n xs)
 
+List.distinct : [a] -> [a]
+List.distinct xs =
+  use List :+
+  step acc x = if List.any (y -> Universal.eq x y) acc then acc else acc :+ x
+  List.foldLeft step [] xs
+
 List.distinctText : [Text] -> [Text]
 List.distinctText xs =
   use List :+
@@ -2631,6 +2637,20 @@ Nfo.processFolder folder =
               |> folderPath.set (Some (filePathText folder))
               |> nfoPath.set (Some (filePathText nfoFp))
               |> folderMeta.set folderMeta)
+
+Nfo.readAllInFolder : FilePath ->{IO, Exception} [Movie]
+Nfo.readAllInFolder folder = match catch do directoryContents.texts folder with
+  Left _      -> []
+  Right files ->
+    use Optional None
+    nfos = List.filter isNfo files
+    List.filterMap
+      (n -> (match catch do readFileUtf8 (pathJoin folder n) with
+        Left _    -> None
+        Right xml ->
+          match Nfo.parse xml with
+            Left _  -> None
+            Right m -> Some m)) nfos
 
 Nfo.runtimeFromContent : Text -> Optional Nat
 Nfo.runtimeFromContent content =
@@ -4868,11 +4888,31 @@ Stage.isFileCachedWith pq sourcePath mtime sizeBytes =
 Stage.nfoHint :
   Text ->{IO, Exception} (Optional Text, Optional Nat, Optional Nat)
 Stage.nfoHint videoPath =
+  use List filterMap head
   use Optional None
+  use Text ++
   folder = parentDir (FilePath videoPath)
-  match tryReadFolder folder with
-    None   -> (None, None, None)
-    Some m -> (extractTitle m, extractYear m, extractTmdbId m)
+  movies = readAllInFolder folder
+  match movies with
+    [] -> (None, None, None)
+    _ ->
+      tmdbIds = List.distinct (filterMap extractTmdbId movies)
+      titleOpt = head (filterMap extractTitle movies)
+      yearOpt = head (filterMap extractYear movies)
+      tmdbResolved =
+        match tmdbIds with
+          [] -> None
+          [single] -> Some single
+          many ->
+            _ =
+              printLine
+                ("  NFO TMDB CONFLICT in "
+                  ++ filePathText folder
+                  ++ ": ids "
+                  ++ Text.join ", " (List.map Nat.toText many)
+                  ++ " disagree; dropping to title/year search")
+            None
+      (titleOpt, yearOpt, tmdbResolved)
 
 Stage.parseNatString : Optional Text -> Optional Nat
 Stage.parseNatString = cases
@@ -7561,21 +7601,34 @@ Tv.Nfo.scanFolderForImdb folder =
 
 Tv.Parse.bareEpisode : Optional Nat -> Text -> Optional Nat
 Tv.Parse.bareEpisode seasonOpt fileName =
-  use List head
+  use List filterMap head
   use Optional None
   tokens = Tmdb.tokenize fileName
   fromConcat = match seasonOpt with
     None        -> None
-    Some season -> head (List.filterMap (concatEpisode season) tokens)
+    Some season -> head (filterMap (concatEpisode season) tokens)
   match fromConcat with
     Some e -> Some e
     None   ->
       match episodeAfterMarker tokens with
         Some e -> Some e
         None   ->
-          match head tokens with
-            None   -> None
-            Some t -> plainEpisode t
+          match head (filterMap nOfMEpisode tokens) with
+            Some e -> Some e
+            None   ->
+              match head tokens with
+                None   -> None
+                Some t -> plainEpisode t
+
+test> Tv.Parse.bareEpisode.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (bareEpisode (Some 4) "Rick and Morty - 401 - Edge") (Some 1)
+    , eq (bareEpisode (Some 1) "Show - Part 2") (Some 2)
+    , eq (bareEpisode (Some 1) "Doc 1of6 The Beginning") (Some 1)
+    , eq (bareEpisode (Some 2) "Ep 5 - Whatever") (Some 5)
+    ]
 
 Tv.Parse.braceTagValue : Text -> Text -> Optional Text
 Tv.Parse.braceTagValue key name =
@@ -7664,14 +7717,14 @@ Tv.Parse.episodeAfterMarker : [Text] -> Optional Nat
 Tv.Parse.episodeAfterMarker tokens =
   use Nat +
   use Optional None
-  use Universal eq
+  markers = ["ep", "episode", "part", "pt"]
   pairs = Db.withIndex tokens
   hits =
     List.filterMap
       (cases
         (i, t) ->
           lower = Text.toLowercase t
-          if eq lower "ep" || eq lower "episode" then
+          if List.any (m -> Universal.eq m lower) markers then
             match Tmdb.nth (i + 1) tokens with
               Some next -> plainEpisode next
               None      -> None
@@ -7686,6 +7739,36 @@ Tv.Parse.epSegment t =
   if Universal.eq (List.size nats) (List.size parts) && List.size parts > 0 then
     Some nats
   else Optional.None
+
+Tv.Parse.eTokenEpisodes : Text -> Optional [Nat]
+Tv.Parse.eTokenEpisodes tok =
+  use Boolean not
+  use Nat >
+  use Optional None
+  use Universal eq
+  lower = stripVersion (Text.toLowercase tok)
+  if not (startsWith "e" lower) then None
+  else
+    segs = List.filter (s -> not (eq (Text.size s) 0)) (Text.split ?e lower)
+    parsed = List.filterMap epSegment segs
+    if eq (List.size parsed) (List.size segs) && List.size segs > 0 then
+      Some (List.flatMap (x -> x) parsed)
+    else None
+
+test> Tv.Parse.eTokenEpisodes.test =
+  use Optional None
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (eTokenEpisodes "E02") (Some [2])
+    , eq (eTokenEpisodes "e2") (Some [2])
+    , eq (eTokenEpisodes "E02E03") (Some [2, 3])
+    , eq (eTokenEpisodes "E02-E03") (Some [2, 3])
+    , eq (eTokenEpisodes "E02-03") (Some [2, 3])
+    , eq (eTokenEpisodes "E02v2") (Some [2])
+    , eq (eTokenEpisodes "edge") None
+    , eq (eTokenEpisodes "720p") None
+    ]
 
 Tv.Parse.folderImdbTag : Text -> Optional Text
 Tv.Parse.folderImdbTag name =
@@ -7762,21 +7845,69 @@ Tv.Parse.natSegment : Text -> Optional Nat
 Tv.Parse.natSegment t =
   if Universal.eq (Text.size t) 0 then Optional.None else Nat.fromText t
 
+Tv.Parse.nOfMEpisode : Text -> Optional Nat
+Tv.Parse.nOfMEpisode tok =
+  use Nat +
+  use Optional None
+  lower = Text.toLowercase tok
+  match Text.indexOf "of" lower with
+    None -> None
+    Some i ->
+      before = Text.take i lower
+      after = Text.drop (i + 2) lower
+      if digitsOnly before && digitsOnly after then plainEpisode before
+      else None
+
+test> Tv.Parse.nOfMEpisode.test =
+  use Optional None
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (nOfMEpisode "1of6") (Some 1)
+    , eq (nOfMEpisode "10of12") (Some 10)
+    , eq (nOfMEpisode "profile") None
+    , eq (nOfMEpisode "season") None
+    ]
+
 Tv.Parse.parseEpisodeName : Text -> Optional ParsedEpisode
 Tv.Parse.parseEpisodeName name =
   use Optional None
   tokens = Tmdb.tokenize name
+  build i ref =
+    titleStr = cleanTitle (Text.join " " (List.take i tokens))
+    titlePrefix =
+      if Universal.eq (Text.size titleStr) 0 then None else Some titleStr
+    ParsedEpisode name titlePrefix ref
   pairs = Db.withIndex tokens
-  hits =
-    List.filterMap
-      (cases (i, t) -> Optional.map (r -> (i, r)) (refFromToken t)) pairs
-  match hits with
-    [] -> None
-    (i, ref) +: _ ->
-      titleStr = cleanTitle (Text.join " " (List.take i tokens))
-      titlePrefix =
-        if Universal.eq (Text.size titleStr) 0 then None else Some titleStr
-      Some (ParsedEpisode name titlePrefix ref)
+  singleHit =
+    List.head
+      (List.filterMap
+        (cases (i, t) -> Optional.map (r -> (i, r)) (refFromToken t)) pairs)
+  match singleHit with
+    Some (i, ref) -> Some (build i ref)
+    None          ->
+      match scanAdjacentSE tokens with
+        Some (i, ref) -> Some (build i ref)
+        None          ->
+          match scanSeasonWordEpisode tokens with
+            Some (i, ref) -> Some (build i ref)
+            None          -> None
+
+test> Tv.Parse.parseEpisodeName.forms.test =
+  use Universal eq
+  chk name sea eps ttl =
+    match parseEpisodeName name with
+      Optional.None -> false
+      Some p ->
+        eq (ParsedEpisode.ref p) (EpisodeRef sea eps) && eq (titlePrefix p) ttl
+  List.flatMap
+    check
+    [ chk "The Office S01 E02 720p" 1 [2] (Some "The Office")
+    , chk "Fargo.S01.E03.HDTV" 1 [3] (Some "Fargo")
+    , chk "Doctor Who Season 1 Episode 2" 1 [2] (Some "Doctor Who")
+    , chk "Sherlock Series 2 Episode 1" 2 [1] (Some "Sherlock")
+    , chk "Bleach.S01E02v2.1080p" 1 [2] (Some "Bleach")
+    ]
 
 test> Tv.Parse.parseEpisodeName.test =
   use Optional None
@@ -7905,7 +8036,7 @@ Tv.Parse.refFromToken tok =
         else Some (EpisodeRef 0 eps)
   if startsWith "s" lower then
     use List size
-    rest = Text.drop 1 lower
+    rest = stripVersion (Text.drop 1 lower)
     match split ?e rest with
       seasonSeg +: epSegsRaw ->
         epSegs = List.filter notBlank epSegsRaw
@@ -7947,16 +8078,67 @@ test> Tv.Parse.refFromToken.test =
     , eq (refFromToken "1x004") (Some (EpisodeRef 1 [4]))
     , eq (refFromToken "1x02") (Some (EpisodeRef 1 [2]))
     , eq (refFromToken "2x10") (Some (EpisodeRef 2 [10]))
+    , eq (refFromToken "S01E02v2") (Some (EpisodeRef 1 [2]))
     , eq (refFromToken "se7en") None
     , eq (refFromToken "sample") None
     , eq (refFromToken "soundtrack") None
     , eq (refFromToken "S01") None
     , eq (refFromToken "S01E") None
-    , eq (refFromToken "S01E02v2") None
     , eq (refFromToken "x265") None
     , eq (refFromToken "1920x1080") None
     , eq (refFromToken "1280x720") None
     ]
+
+Tv.Parse.scanAdjacentSE : [Text] -> Optional (Nat, EpisodeRef)
+Tv.Parse.scanAdjacentSE tokens =
+  use Nat +
+  use Optional None
+  pairs = Db.withIndex tokens
+  hits =
+    List.filterMap
+      (cases
+        (i, t) ->
+          match sTokenSeason t with
+            None        -> None
+            Some season ->
+              match Tmdb.nth (i + 1) tokens with
+                None       -> None
+                Some nextT ->
+                  match eTokenEpisodes nextT with
+                    None     -> None
+                    Some eps -> Some (i, EpisodeRef season eps)) pairs
+  List.head hits
+
+Tv.Parse.scanSeasonWordEpisode : [Text] -> Optional (Nat, EpisodeRef)
+Tv.Parse.scanSeasonWordEpisode tokens =
+  use Nat +
+  use Optional None
+  use Universal eq
+  pairs = Db.withIndex tokens
+  hits =
+    List.filterMap
+      (cases
+        (i, t) ->
+          lower = Text.toLowercase t
+          seasonAndRest =
+            if eq lower "season" || eq lower "series" then
+              match Tmdb.nth (i + 1) tokens with
+                Some s ->
+                  match seasonNat s with
+                    Some sn -> Some (sn, i + 2)
+                    None    -> None
+                None   -> None
+            else
+              match sTokenSeason t with
+                Some sn -> Some (sn, i + 1)
+                None    -> None
+          match seasonAndRest with
+            None                   -> None
+            Some (season, restIdx) ->
+              match episodeAfterMarker (List.drop restIdx tokens) with
+                Some ep -> Some (i, EpisodeRef season [ep])
+                None    -> None) pairs
+  List.head hits
 
 Tv.Parse.seasonFromFolders : [Text] -> Optional Nat
 Tv.Parse.seasonFromFolders folders =
@@ -8012,6 +8194,18 @@ Tv.Parse.sTokenSeason t =
       match Nat.fromText rest with
         None   -> None
         Some n -> if n <= 99 || n >= 1900 && n <= 2030 then Some n else None
+
+Tv.Parse.stripVersion : Text -> Text
+Tv.Parse.stripVersion t =
+  match Text.split ?v t with
+    [single] -> single
+    parts ->
+      match List.reverse parts with
+        last +: restRev ->
+          if digitsOnly last && Boolean.not (Universal.eq (Text.size last) 0) then
+            Text.join "v" (List.reverse restRev)
+          else t
+        [] -> t
 
 Tv.Parse.titleCutToken : Text -> Boolean
 Tv.Parse.titleCutToken t =
