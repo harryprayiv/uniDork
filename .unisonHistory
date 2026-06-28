@@ -1,4 +1,6 @@
 quit
+update
+quit
 compile cli ./bin/unidork-import
 update
 view cli
