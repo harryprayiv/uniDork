@@ -1,100 +1,49 @@
-edit.namespace .
-compile cli bin/unidork-import
 push @harryprayiv/uniDork
+compile cli ./bin/unidork-import
 update
-compile cli bin/unidork-import
-push @harryprayiv/uniDork
+run sweepMissing
+run sweepStaleStaging
 update
-edit.namespace .
-compile cli bin/unidork-import
+compile cli ./bin/unidork-import
+add
 update
-push @harryprayiv/uniDork
+run sweepMissing
+compile cli ./bin/unidork-import
+run sweepMissing
+run Rename.sweepMissing
 update
-edit.namespace .
-quit
-edit.namespace .
-unsafe.force-push @harryprayiv/uniDork/main
-push.force @harryprayiv/uniDork/main
-push @harryprayiv/uniDork
-undo
-push @harryprayiv/uniDork
-ls Versions
-undo
-edit.namespace .
-push @harryprayiv/uniDork
+run Rename.sweepMissing
 update
-run versionsRun
-compile cli bin/unidork-import
-edit.namespace .
-push @harryprayiv/uniDork
-compile cli bin/unidork-import
+view RenameCatalog
+view runStep
+view Rename.executeOne
+delete.term #4rqk96fvn3
+compile cli ./bin/unidork-import
+dependents myPg.runIO
+dependents myPg.singleIO
 update
-edit.namespace .
+edit Db.createSchema Db.migrate Db.resetSchema Move.run Rename.runNew Resolve.runWith Stage.runProbeAt Tv.Db.createSchema Tv.Db.resetTvSchema Tv.Move.run Tv.Rename.applyTv Tv.Resolve.runWith Tv.Stage.runProbeAtTv uniDork.processBatch Versions.run
 update
-push @harryprayiv/uniDork
-compile cli bin/unidork-import
-run versionsRun
+view lib.runarorama_postgres_2_5_1.postgres.session.withConnection
+version
+update.old
+add myPg.runIO
 update
-run versionsRun
-edit.namespace .
-compile cli bin/unidork-import
-run initDb
-run Tv.initDb
-run versionsRun
-compile cli bin/unidork-import
-push @harryprayiv/uniDork
-update
+edit lib.runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
+upgrade runarorama_postgres_2_5_1 runarorama_postgres_2_5_1
+edit lib.runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
+view #vvpda3av85
+find runIO
+dependents lib.runarorama_postgres_2_5_1.postgres.session.singleIO
+names singleIO
+view singleIO
+names runIO
+dependencies singleIO
+view singleIO
 compile cli bin/unidork-import
 update
-run Tv.initDb
-run initDb
-compile cli bin/unidork-import
-edit.namespace .
-compile cli bin/unidork-import
-push @harryprayiv/uniDork
-update
-push @harryprayiv/uniDork
-edit.namespace .
-update
-push @harryprayiv/uniDork
-compile cli bin/unidork-import
-update
-edit.namespace .
-run Tv.initDb
-run initDb
-compile cli bin/unidork-import
-update
-edit.namespace .
-push @harryprayiv/uniDork
-update
-compile cli bin/unidork-import
-edit.namespace .
-quit
-edit.namespace .
-push @harryprayiv/uniDork
-update
+dependents runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
+view runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
 quit
 push @harryprayiv/uniDork
-edit unisonConfig
-edit ~/.unisonConfig
-pull @unison/cloud-start/releases/latest
-switch uniDork
-project uniDork
-3
-projects
 edit.namespace .
-compile cli bin/unidork-import
-edit.namespace .
-update
-compile cli bin/unidork-import
-update
-compile cli bin/unidork-import
-update
-edit.namespace .
-quit
-compile cli bin/unidork-import
-update
-find.global : Config -> Optional Text -> Boolean ->{IO, Exception} ()
-debug.find.global planBatch
-debug.find.global moveChunk
-debug.find.global moveBatch
