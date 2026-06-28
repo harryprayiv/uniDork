@@ -1,3 +1,6 @@
+quit
+transcript.in-place ./nix/unison/snapshot.md
+ucm transcript.in-place ./nix/unison/snapshot.md
 push @harryprayiv/uniDork
 compile cli ./bin/unidork-import
 update
