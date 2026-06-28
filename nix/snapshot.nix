@@ -6,13 +6,13 @@ pkgs.writeShellApplication {
     set -euo pipefail
     repo="$(git rev-parse --show-toplevel)"
     cd "$repo"
-    anchor=".unison/snapshot-hash"
+    anchor=".unidork-snapshot-hash"
     old="$(cat "$anchor" 2>/dev/null || echo "")"
 
     # 1. push to Share + capture reflog, against the real codebase
     ucm transcript.in-place ./nix/unison/snapshot.md
 
-    # 2. new causal hash = hash in the numbered reflog row "1."
+    # 2. new causal hash = hash in numbered reflog row "1." (skips #abcdef tip)
     new="$(grep -oE '^[[:space:]]*1\.[[:space:]].*#[0-9a-z]+' ./nix/unison/snapshot.output.md \
             | grep -oE '#[0-9a-z]+' | head -n1 || true)"
     if [ -z "$new" ]; then echo "could not parse causal hash" >&2; exit 1; fi
@@ -35,7 +35,7 @@ pkgs.writeShellApplication {
       diffout="''${difftmp%.md}.output.md"
     fi
 
-    # 4. write hash-anchored backup: machine-parseable header, human diff below
+    # 4. write hash-anchored backup
     mkdir -p backup
     out="backup/''${new#\#}.md"
     {

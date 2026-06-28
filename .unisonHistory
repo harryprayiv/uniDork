@@ -1,4 +1,8 @@
 quit
+compile cli ./bin/unidork-import
+update
+view cli
+quit
 update
 quit
 transcript.in-place ./nix/unison/snapshot.md
