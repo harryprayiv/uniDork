@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib, config, uniDork, postgres }:
+{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, snapshot }:
 
 pkgs.writeShellApplication {
   name = "unidork";
@@ -7,7 +7,9 @@ pkgs.writeShellApplication {
     pkgs.postgresql
     pkgs.unison-ucm
     pkgs.rsync
+    pkgs.git
     uniDork
+    snapshot
     postgres.pg-start
     postgres.pg-stop
     postgres.pg-connect
@@ -74,7 +76,7 @@ pkgs.writeShellApplication {
       for a in "$@"; do [ "$a" = "$flag" ] && return 0; done
       return 1
     }
-
+    cmd_push() { unidork-push; }
     cmd_start()  { pg-start; }
     cmd_stop()   { pg-stop; }
 
@@ -191,6 +193,7 @@ SQL
     }
 
     case "$cmd" in
+      push)           cmd_push ;;
       start)          cmd_start ;;
       stop)           cmd_stop ;;
 
@@ -256,6 +259,7 @@ COMBINED
   run               import-library + movie process + tv process
 
 UTILITY
+  push              push to Unison Share + snapshot diff to git mirror
   start | stop      postgres lifecycle
   status            row counts across all tables
   psql              interactive psql session

@@ -33,7 +33,7 @@
         postgres     = import ./nix/postgres.nix  { inherit pkgs; inherit (config) database; };
         snapshot = import ./nix/snapshot.nix { inherit pkgs config; };
         orchestrator = import ./nix/orchestrator.nix {
-          inherit pkgs config uniDork postgres;
+          inherit pkgs config uniDork postgres snapshot;
         };
         
       in {

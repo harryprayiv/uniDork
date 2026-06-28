@@ -63,6 +63,7 @@ pkgs.mkShell {
     echo "  Movies:  unidork process | move | identify | status"
     echo "  TV:      unidork tv-process | tv-identify"
     echo "  Both:    unidork run-all"
+    echo "  Utility: push | start | stop | clean-stage "
     echo ""
   '';
 }
