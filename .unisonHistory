@@ -1,4 +1,6 @@
 quit
+update
+quit
 transcript.in-place ./nix/unison/snapshot.md
 ucm transcript.in-place ./nix/unison/snapshot.md
 push @harryprayiv/uniDork
