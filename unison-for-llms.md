@@ -225,15 +225,19 @@ scratch file, and so on transitively up the containment chain — otherwise
 error almost always means this: the old version of a type you just renamed
 out from under something that still points at it.
 
-When a scratch file redefines a type that already exists in the codebase,
-call its constructor FULLY QUALIFIED (`Config.Tuning.Tuning`, not bare
-`Tuning`) at every construction site in the same file. Bare constructor
-names resolve by suffix, and with old (codebase) and new (file) versions
-both live during typechecking, suffix resolution can bind to the old one —
-producing arity errors like "applied to 3 arguments but has type
-Nat -> [Text] -> Tuning" even though your new 3-field type is right there
-in the file. Wrong-arity constructor errors during a type migration mean
-resolution picked the stale version, not that your code is wrong.
+The scratch file does NOT need every function
+whose signature mentions a changed type. It needs only to be
+SELF-CONSISTENT: any codebase term that the scratch itself applies to a
+value of the redefined type must be copied into the scratch. Downstream
+dependents that are not referenced by the scratch are handled by `update`'s
+automatic propagation -- UCM re-typechecks them against the new hashes and
+upgrades them if their bodies still check (accessor-only usage always
+does). Plan a type change as: (1) redefine the type + its containing types,
+(2) grep the SCRATCH (not the codebase) for terms applied to the changed
+type and copy just those in, (3) run update and let propagation report
+anything it cannot handle. Corollary: never include a high-fan-out root
+like `main`/`cli` in a type-change scratch unless forced -- it drags its
+entire call graph into the self-consistency requirement.
 
 ## 10. Pattern matching specifics
 
