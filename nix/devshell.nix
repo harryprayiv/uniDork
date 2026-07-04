@@ -52,6 +52,7 @@ pkgs.mkShell {
 
     export UNIDORK_TUNE_PROBE_JOBS="${toString config.tuning.probeJobs}"
     export UNIDORK_TUNE_SUB_LANGS="${lib.concatStringsSep "," config.subs.languages}"
+    export UNIDORK_TUNE_SUB_DELAY_MS="${toString config.subs.delayMs}"
 
     export PGPORT="$UNIDORK_DB_PORT"
     export PGUSER="$UNIDORK_DB_USER"
@@ -60,7 +61,7 @@ pkgs.mkShell {
 
     echo ""
     echo "  uniDork dev shell"
-    echo "  Movies:  unidork process | move | identify | status"
+    echo "  Movies:  unidork process | move | subs | identify | status"
     echo "  TV:      unidork tv-process | tv-identify"
     echo "  Both:    unidork run-all"
     echo "  Utility: push | start | stop | clean-stage "

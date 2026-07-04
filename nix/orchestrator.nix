@@ -52,7 +52,8 @@ pkgs.writeShellApplication {
 
     : "''${UNIDORK_TUNE_PROBE_JOBS:=${toString config.tuning.probeJobs}}"
     : "''${UNIDORK_TUNE_SUB_LANGS:=${lib.concatStringsSep "," config.subs.languages}}"
-    export UNIDORK_TUNE_PROBE_JOBS UNIDORK_TUNE_SUB_LANGS
+    : "''${UNIDORK_TUNE_SUB_DELAY_MS:=${toString config.subs.delayMs}}"
+    export UNIDORK_TUNE_PROBE_JOBS UNIDORK_TUNE_SUB_LANGS UNIDORK_TUNE_SUB_DELAY_MS
 
     : "''${UNIDORK_MEM_HIGH:=${config.tuning.memoryHigh}}"
     : "''${UNIDORK_MEM_MAX:=${config.tuning.memoryMax}}"
@@ -67,9 +68,6 @@ pkgs.writeShellApplication {
     log_dir="$HOME/.cache/uniDork/logs"
     mkdir -p "$log_dir"
 
-    # Detect once whether we can create user-level scope units. Fails on
-    # boxes without a user session bus (bare ssh without lingering); we
-    # fall back to an unconfined run rather than refusing to work.
     use_scope=0
     if command -v systemd-run >/dev/null 2>&1; then
       if systemd-run --user --scope --quiet --collect true 2>/dev/null; then
@@ -114,6 +112,7 @@ pkgs.writeShellApplication {
     cmd_identify() { ensure_pg; run_import identify; }
     cmd_process()  { ensure_pg; run_import process "$@"; }
     cmd_move()     { ensure_pg; run_import move "$@"; }
+    cmd_subs()     { ensure_pg; run_import subs "$@"; }
 
     cmd_reconcile()      { ensure_pg; run_import reconcile; }
     cmd_import_library() { ensure_pg; run_import import-library "$UNIDORK_PATH_CONFIG"; }
@@ -231,6 +230,7 @@ SQL
       identify)            cmd_identify ;;
       process)             cmd_process "$@" ;;
       move)                cmd_move "$@" ;;
+      subs)                cmd_subs "$@" ;;
       rename)              cmd_rename "$@" ;;
       probe-resolve)       cmd_probe_resolve ;;
       reconcile|import-buffer) cmd_reconcile ;;
@@ -276,6 +276,7 @@ MOVIE PIPELINE
   identify                   read-only resolver report for movie intake
   rename --apply|--dry-run   rename staging movies into buffer          (DESTRUCTIVE with --apply)
   move [folder] [--dry-run]  promote buffer folder(s) into movie library
+  subs [--dry-run]           fetch missing subtitle sidecars for buffer movies (paced: UNIDORK_TUNE_SUB_DELAY_MS)
   reconcile                  probe movie buffer (repair/record existing files)
   import-library             scan library dirs -> files + library_movies
   import-all                 reconcile + import-library

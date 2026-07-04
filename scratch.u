@@ -1,94 +1,386 @@
-Stage.newestNfoMtime : Text ->{IO} Int
-Stage.newestNfoMtime videoPath =
-  use Int >
-  folder = parentDir (FilePath videoPath)
+Config.readSubToken : Config ->{IO, Exception} Text
+Config.readSubToken cfg =
+  Text.trim (readFileUtf8 (FilePath (subToken (paths cfg))))
+
+Config.toClientConfig : Config -> PostgresClientConfig
+Config.toClientConfig cfg =
+  d = db cfg
+  PostgresClientConfig.default
+    (HostName (Db.host d)) (UserName (Db.user d)) (DatabaseName (Db.name d))
+    |> PostgresClientConfig.port.set (Port (Db.port d))
+
+Subs.Fix.selectBufferMoviesSql :
+  postgres.Query
+    r r ((((Text, Text), Optional Text), Int), Optional Int)
+Subs.Fix.selectBufferMoviesSql =
+  use Codec optional text
+  sql
+    "SELECT f.proposed_folder, f.proposed_name, m.imdb_id, m.tmdb_id, m.year FROM files f JOIN associations a ON a.file_id = f.file_id JOIN movies m ON m.tmdb_id = a.tmdb_id WHERE f.stage = 'buffer' AND f.media_kind = 'movie' AND f.proposed_folder IS NOT NULL AND f.proposed_name IS NOT NULL ORDER BY f.file_id"
+    |> typedQuery
+      (text ~ text ~ optional text ~ integer ~ optional integer)
+
+Subs.Fix.hasSidecarFor : [Text] -> Text -> Text -> Boolean
+Subs.Fix.hasSidecarFor entries base lang =
+  use Text ++
+  prefix = base ++ "." ++ normLang lang ++ "."
+  List.any (n -> startsWith prefix n) entries
+
+Subs.Fix.missingLangs : FilePath -> Text -> [Text] ->{IO} [Text]
+Subs.Fix.missingLangs folder base langs =
   match catch do directoryContents.texts folder with
-    Left _      -> +0
-    Right files ->
-      nfos = List.filter isNfo files
-      step acc n =
-        match fileStat (filePathText (pathJoin folder n)) with
-          Some (mt, _)  -> if mt > acc then mt else acc
-          Optional.None -> acc
-      List.foldLeft step +0 nfos
+    Left _        -> []
+    Right entries ->
+      List.filter
+        (l -> Boolean.not (hasSidecarFor entries base l)) langs
 
-Stage.effectiveMtime : Text -> Int ->{IO} Int
-Stage.effectiveMtime videoPath videoMt =
-  use Int >
-  nfoMt = newestNfoMtime videoPath
-  if nfoMt > videoMt then nfoMt else videoMt
+Subs.Fix.checkOneRow :
+  Optional Text
+  -> [Text]
+  -> Nat
+  -> Boolean
+  -> ((((Text, Text), Optional Text), Int), Optional Int)
+  ->{IO, Exception} Nat
+Subs.Fix.checkOneRow tokenOpt subLangs delayMs dryRun row =
+  use Optional None
+  use Text ++
+  ((((folderText, base), imdbOpt), tmdbInt), _yr) = row
+  folder = FilePath folderText
+  if Boolean.not (isDirectory folder) then
+    _ = printLine ("  SKIP (folder gone, run move or sweep): " ++ folderText)
+    0
+  else
+    missing = missingLangs folder base subLangs
+    match missing with
+      [] -> 0
+      _  ->
+        _ =
+          printLine
+            ("  "
+              ++ base
+              ++ " missing: "
+              ++ Text.join ", " (List.map normLang missing))
+        if dryRun then 1
+        else
+          match tokenOpt with
+            None -> 0
+            Some token ->
+              tmdbNat = Optional.getOrElse 0 (Nat.fromInt tmdbInt)
+              outcomes = match imdbOpt with
+                Some imdb ->
+                  fetchAndSaveByImdb token delayMs imdb folder base missing
+                None ->
+                  fetchAndSaveByTmdb token delayMs tmdbNat folder base missing
+              _ = logSubOutcomes outcomes
+              1
 
-Stage.partitionWork :
-  PreparedQuery r a1 Int -> [(a, Text)] ->{IO, Postgres} [(Nat, (a, Text))]
-Stage.partitionWork pqCached work =
+Subs.Fix.run : Config -> Boolean ->{IO, Exception} ()
+Subs.Fix.run cfg dryRun =
+  use Nat + toText
+  use Optional None
+  use Text ++
+  bufferRoot = buffer (paths cfg)
+  subLangs = Tuning.subLangs (tuning cfg)
+  delayMs = subDelayMs (tuning cfg)
+  mountUp = match deviceOf bufferRoot with
+    Some _ -> true
+    None   -> false
+  if Boolean.not mountUp then
+    printLine ("[subs] buffer root not mounted, refusing: " ++ bufferRoot)
+  else
+    if Universal.eq (List.size subLangs) 0 then
+      printLine "[subs] no languages configured (UNIDORK_TUNE_SUB_LANGS)"
+    else
+      tokenOpt = match catch do readSubToken cfg with
+        Right t -> Some t
+        Left _  -> None
+      match (dryRun, tokenOpt) with
+        (false, None) ->
+          printLine
+            ("[subs] no sub token readable at " ++ subToken (paths cfg))
+        _ ->
+          _ =
+            if dryRun then
+              printLine "[subs] DRY RUN: no files will be created"
+            else ()
+          myPg.singleIO (toClientConfig cfg) do
+            pqRows = prepareQuery selectBufferMoviesSql
+            rowsResult = catch do
+              portal = bindQuery pqRows []
+              (rs, _) = executeQueryPortal portal 0
+              rs
+            rows = match rowsResult with
+              Left f   ->
+                _ = printLine ("[subs] QUERY FAILED: " ++ Failure.message f)
+                []
+              Right rs -> rs
+            _ =
+              printLine
+                ("[subs] "
+                  ++ toText (List.size rows)
+                  ++ " buffer movie(s) to check")
+            step counts row =
+              (checked, fetched) = counts
+              n = checkOneRow tokenOpt subLangs delayMs dryRun row
+              (checked + 1, fetched + n)
+            (checked, fetched) = List.foldLeft step (0, 0) rows
+            _ = PreparedQuery.close pqRows
+            printLine
+              ("[subs] done ("
+                ++ toText checked
+                ++ " checked, "
+                ++ toText fetched
+                ++ " with missing sidecars)")
+
+type Config
+  = { db : Db, cache : Cache, paths : Paths, tuning : Tuning }
+
+type Config.Tuning
+  = { probeJobs : Nat, subLangs : [Text], subDelayMs : Nat }
+
+Config.fromEnv : '{IO} Config
+Config.fromEnv =
+  do
+    use Text ++
+    home = getEnvOr "HOME" "/home/bismuth"
+    db =
+      Db
+        (getEnvOr "UNIDORK_DB_HOST" "localhost")
+        (getEnvOr "UNIDORK_DB_PORT" "5434")
+        (getEnvOr "UNIDORK_DB_USER" "postgres")
+        (getEnvOr "UNIDORK_DB_NAME" "dork")
+    cache =
+      Cache
+        (getEnvOr "UNIDORK_CACHE_FFPROBE" (home ++ "/.cache/uniDork/ffprobe"))
+        (getEnvOr "UNIDORK_CACHE_STAGE" (home ++ "/.cache/uniDork/stage"))
+    paths =
+      Paths
+        (getEnvOr "UNIDORK_PATH_CONFIG" "./uniDork.conf")
+        (getEnvOr
+          "UNIDORK_PATH_INTAKE"
+          "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies")
+        (getEnvOr
+          "UNIDORK_PATH_BUFFER"
+          "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TEST")
+        (getEnvOr
+          "UNIDORK_FORMAT_MOVIE"
+          "{ny} [{gigabytes}.{vf}.{vc}.{bitdepth}b.{minutes}min] ~{crc32}/{ny} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}")
+        (getEnvOr "UNIDORK_TOKEN_TMDB" (home ++ "/.config/uniDork/tmdb-token"))
+        (getEnvOr "UNIDORK_TOKEN_SUB" (home ++ "/.config/uniDork/sub-token"))
+        (getEnvOr
+          "UNIDORK_PATH_LIBRARY"
+          "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Movies")
+        (getEnvOr
+          "UNIDORK_PATH_TV_INTAKE"
+          "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Episodic")
+        (getEnvOr
+          "UNIDORK_PATH_TV_BUFFER"
+          "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TEST_TV")
+        (getEnvOr
+          "UNIDORK_PATH_TV_LIBRARY"
+          "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TV")
+        (getEnvOr
+          "UNIDORK_FORMAT_TV"
+          "{ny}/Season {s00}/{n} - S{s00}E{e00} - {t} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}")
+    tuning =
+      Config.Tuning.Tuning
+        (getNatOr "UNIDORK_TUNE_PROBE_JOBS" 8)
+        (getLangsOr "UNIDORK_TUNE_SUB_LANGS" ["en", "es", "th"])
+        (getNatOr "UNIDORK_TUNE_SUB_DELAY_MS" 2000)
+    Config.Config db cache paths tuning
+
+Subs.subtitleExtensions : [Text]
+Subs.subtitleExtensions = [".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup"]
+
+Subs.isSubtitleFile : Text -> Boolean
+Subs.isSubtitleFile name =
+  lower = Text.toLowercase name
+  List.any (e -> endsWith e lower) subtitleExtensions
+
+Subs.subExt : Text -> Text
+Subs.subExt name =
+  lower = Text.toLowercase name
+  match List.find (e -> endsWith e lower) subtitleExtensions with
+    Some e        -> e
+    Optional.None -> ""
+
+Subs.subDirNames : [Text]
+Subs.subDirNames = ["subs", "subtitles", "sub"]
+
+Subs.langAliasSet : Text -> [Text]
+Subs.langAliasSet l =
   use List +:
-  step acc item =
-    (_, videoPath) = item
-    match fileStat videoPath with
-      Optional.None -> (0, item) +: acc
-      Some (mt, sz) ->
-        eff = effectiveMtime videoPath mt
-        if isFileCachedWith pqCached videoPath eff (Nat.toInt sz) then acc
-        else (sz, item) +: acc
-  withSizes = List.foldLeft step [] work
-  sortBySize withSizes
+  low = normLang l
+  match Relang.toIso6392 low with
+    Some iso3     -> List.distinctText (low +: (iso3 +: titleAliases iso3))
+    Optional.None -> [low]
 
-Stage.runChunk :
-  Text
-  -> PreparedCommand r1 a2
-  -> PreparedCommand r a1
-  -> [(a, Text)]
-  ->{IO, Exception, Postgres} ()
-Stage.runChunk stage pcFiles pcGate chunk =
-  results = forkChunk chunk
-  Db.foreach_
-    (cases
-      (_, videoPath, outcome) ->
-        match outcome with
-          Left _ -> ()
-          Right pr ->
-            originalName = filePathBasename (FilePath videoPath)
-            hint = nfoHint videoPath
-            _ =
-              Stage.upsertFileWith pcFiles videoPath originalName hint stage pr
-            mtime = match fileStat videoPath with
-              Some (mt, _)  -> effectiveMtime videoPath mt
-              Optional.None -> +0
-            upsertProbeCacheWith pcGate videoPath mtime pr)
-    results
+Subs.detectLang : [Text] -> Text -> Optional Text
+Subs.detectLang langs name =
+  use Universal eq
+  tokens = splitMany titleSeparators (Text.toLowercase (basenameNoExt name))
+  hit l = List.any (t -> List.any (a -> eq a t) (langAliasSet l)) tokens
+  List.find hit langs
 
-Tv.Stage.runChunk :
+Subs.freeUndPath : FilePath -> Text -> Text ->{IO, Exception} Optional FilePath
+Subs.freeUndPath targetFolder base ext =
+  use Nat + >=
+  use Text ++
+  go n =
+    name =
+      if Universal.eq n 1 then base ++ ".und" ++ ext
+      else base ++ ".und." ++ Nat.toText n ++ ext
+    fp = pathJoin targetFolder name
+    if pathExists fp then (if n >= 9 then Optional.None else go (n + 1))
+    else Some fp
+  go 1
+
+Subs.harvestLocal :
+  [Text] -> Text -> FilePath -> Text ->{IO, Exception} [Text]
+Subs.harvestLocal langs sourceFolderText targetFolder base =
+  use List :+
+  use Text ++
+  use Universal eq
+  sourceFolder = FilePath sourceFolderText
+  subs = collectLocalSubs sourceFolder
+  step acc = cases
+    (fp, name) ->
+      ext = subExt name
+      match detectLang langs name with
+        Some l ->
+          code = normLang l
+          dest = pathJoin targetFolder (base ++ "." ++ code ++ ext)
+          already = List.any (s -> eq s code) acc
+          if pathExists dest then (if already then acc else acc :+ code)
+          else
+            match catch do renameFile fp dest with
+              Right _ ->
+                _ =
+                  printLine
+                    ("    SUB local " ++ code ++ " -> " ++ filePathText dest)
+                if already then acc else acc :+ code
+              Left f ->
+                _ =
+                  printLine
+                    ("    SUB local move failed: " ++ Failure.message f)
+                acc
+        Optional.None ->
+          match freeUndPath targetFolder base ext with
+            Optional.None -> acc
+            Some dest     ->
+              match catch do renameFile fp dest with
+                Right _ ->
+                  _ =
+                    printLine
+                      ("    SUB local (unknown lang) -> "
+                        ++ filePathText dest)
+                  acc
+                Left f ->
+                  _ =
+                    printLine
+                      ("    SUB local move failed: " ++ Failure.message f)
+                  acc
+  List.foldLeft step [] subs
+
+Subs.looksRateLimited : Text -> Boolean
+Subs.looksRateLimited e =
+  lower = Text.toLowercase e
+  containsText "429" lower
+    || containsText "too many" lower
+    || containsText "rate" lower
+
+Subs.withThrottle :
+  Nat -> '{IO, Exception} Either Text a ->{IO, Exception} Either Text a
+Subs.withThrottle delayMs op =
+  use Nat * + 
+  go attempt waitMs =
+    _ = concurrent.sleepMicroseconds (waitMs * 1000)
+    match op() with
+      Right v -> Right v
+      Left e  ->
+        if looksRateLimited e && (attempt < 3) then go (attempt + 1) (waitMs * 4)
+        else Left e
+  go 1 delayMs
+
+Subs.saveOneLanguage :
+  Nat -> FilePath -> Text -> [UnpackFile] -> Text ->{IO, Exception} SaveOutcome
+Subs.saveOneLanguage delayMs targetDir baseName allFiles lang =
+  use Text ++
+  langCode = normLang lang
+  match pickUnpackForLanguage lang allFiles with
+    Optional.None -> SaveOutcome.NotFound langCode
+    Some uf       ->
+      match withThrottle delayMs (do downloadUnpackRaw uf) with
+        Left err   -> Errored langCode err
+        Right body ->
+          ext = normLang (UnpackFile.format uf)
+          filename = baseName ++ "." ++ langCode ++ "." ++ ext
+          path = pathJoin targetDir filename
+          match catch do writeFileUtf8 path body with
+            Left f  -> Errored langCode (Failure.message f)
+            Right _ -> Saved langCode (filePathText path)
+
+Subs.fetchAndSaveByImdb :
   Text
+  -> Nat
   -> Text
-  -> PreparedCommand r1 a1
-  -> PreparedCommand r a
-  -> [((), Text)]
-  ->{IO, Exception, Postgres} ()
-Tv.Stage.runChunk root stage pcFiles pcGate chunk =
-  results = forkChunk chunk
-  Db.foreach_
-    (cases
-      (_, videoPath, outcome) ->
-        match outcome with
-          Left _ -> ()
-          Right pr ->
-            originalName = filePathBasename (FilePath videoPath)
-            hints = episodeHints root videoPath
-            _ =
-              Tv.Stage.upsertFileWith
-                pcFiles videoPath originalName hints stage pr
-            mtime = match fileStat videoPath with
-              Some (mt, _)  -> effectiveMtime videoPath mt
-              Optional.None -> +0
-            upsertProbeCacheWith pcGate videoPath mtime pr)
-    results
+  -> FilePath
+  -> Text
+  -> [Text]
+  ->{IO, Exception} [SaveOutcome]
+Subs.fetchAndSaveByImdb apiKey delayMs imdbId targetDir baseName langs =
+  use List map
+  langsParam = languagesParam langs
+  match withThrottle delayMs (do searchByImdb apiKey imdbId langsParam) with
+    Left err   -> map (l -> Errored (normLang l) err) langs
+    Right resp ->
+      allFiles = allUnpackFiles resp
+      map (saveOneLanguage delayMs targetDir baseName allFiles) langs
 
-Rename.firstSizeMatch : FilePath -> Nat -> [Text] ->{IO} Optional Text
-Rename.firstSizeMatch targetFolder expectedSize entries =
-  sizeMatches n = match fileStat (filePathText (pathJoin targetFolder n)) with
-    Some (_, sz)  -> Universal.eq sz expectedSize
-    Optional.None -> false
-  List.find sizeMatches entries
+Subs.fetchAndSaveByTmdb :
+  Text
+  -> Nat
+  -> Nat
+  -> FilePath
+  -> Text
+  -> [Text]
+  ->{IO, Exception} [SaveOutcome]
+Subs.fetchAndSaveByTmdb apiKey delayMs tmdbId targetDir baseName langs =
+  use List map
+  langsParam = languagesParam langs
+  match withThrottle delayMs (do searchByTmdb apiKey tmdbId langsParam) with
+    Left err   -> map (l -> Errored (normLang l) err) langs
+    Right resp ->
+      allFiles = allUnpackFiles resp
+      map (saveOneLanguage delayMs targetDir baseName allFiles) langs
+
+Rename.maybeFetchSubsM :
+  Optional Text
+  -> Nat
+  -> [Text]
+  -> MovieRecord
+  -> FilePath
+  -> Text
+  ->{IO, Exception} ()
+Rename.maybeFetchSubsM maybeToken delayMs missingLangs m targetFolder base =
+  match maybeToken with
+    Optional.None -> ()
+    Some token ->
+      if Universal.eq (List.size missingLangs) 0 then ()
+      else
+        outcomes =
+          match MovieRecord.imdbId m with
+            Some imdb ->
+              fetchAndSaveByImdb
+                token delayMs imdb targetFolder base missingLangs
+            Optional.None ->
+              fetchAndSaveByTmdb
+                token
+                delayMs
+                (MovieRecord.tmdbId m)
+                targetFolder
+                base
+                missingLangs
+        logSubOutcomes outcomes
 
 Rename.executeOne :
   Boolean
@@ -98,18 +390,29 @@ Rename.executeOne :
   -> [FormatPart]
   -> Optional Text
   -> [Text]
+  -> Nat
   -> RenameRow
   ->{IO, Exception, RenameCatalog} Rename.Outcome
 Rename.executeOne
-  dryRun targetRootText intakeRootText folderFmt fileFmt subsToken subLangs row =
+  dryRun
+  targetRootText
+  intakeRootText
+  folderFmt
+  fileFmt
+  subsToken
+  subLangs
+  delayMs
+  row =
   use Failure message
   use Optional None
   use ProbeResult sizeBytes
   use Text ++
+  use Universal eq
   use unison_json_1_4_2.Decoder run
   crc = RenameRow.crc32 row
   sourceText = RenameRow.originalPath row
   sourceVideo = FilePath sourceText
+  sourceFolderText = filePathText (parentDir sourceVideo)
   m = toMovieRecord row
   prParsed = catch do run ProbeResult.fromJson (RenameRow.probeJson row)
   match prParsed with
@@ -133,8 +436,16 @@ Rename.executeOne
               actualPath = filePathText (pathJoin targetFolder actualName)
               if dryRun then WouldRemoveDuplicate sourceText actualPath
               else
-                _ = catch do removeFile sourceVideo
                 actualBase = basenameNoExt actualName
+                _ =
+                  if eq sourceFolderText intakeRootText then ()
+                  else
+                    _ = 
+                      catch do
+                        harvestLocal
+                          subLangs sourceFolderText targetFolder actualBase
+                    ()
+                _ = catch do removeFile sourceVideo
                 szInt = Nat.toInt (sizeBytes pr)
                 _ =
                   promoteToBuffer
@@ -168,9 +479,27 @@ Rename.executeOne
                   renameFile sourceVideo targetVideo
                 match fsOutcome with
                   Right _ ->
+                    localLangs =
+                      if eq sourceFolderText intakeRootText then []
+                      else
+                        match 
+                          catch do
+                            harvestLocal
+                              subLangs sourceFolderText targetFolder base
+                         with
+                          Right ls -> ls
+                          Left _   -> []
+                    missing =
+                      List.filter
+                        (l ->
+                          Boolean.not
+                            (List.any
+                              (s -> eq s (normLang l)) localLangs))
+                        subLangs
                     _ = 
                       catch do
-                        maybeFetchSubsM subsToken subLangs m targetFolder base
+                        maybeFetchSubsM
+                          subsToken delayMs missing m targetFolder base
                     newName = base ++ videoExt
                     szInt = Nat.toInt (sizeBytes pr)
                     _ =
@@ -187,6 +516,168 @@ Rename.executeOne
                     Renamed sourceText targetVideoText
                   Left f -> RenameError sourceText (message f)
 
+Rename.runStep :
+  Boolean
+  -> Text
+  -> Text
+  -> [FormatPart]
+  -> [FormatPart]
+  -> Optional Text
+  -> [Text]
+  -> Nat
+  -> RenameRow
+  ->{IO, Exception, RenameCatalog} ()
+Rename.runStep
+  dryRun
+  targetRootText
+  intakeRootText
+  folderFmt
+  fileFmt
+  subsToken
+  subLangs
+  delayMs
+  row =
+  use Text ++
+  crc = RenameRow.crc32 row
+  sourceText = RenameRow.originalPath row
+  _ = printLine ("processing: " ++ sourceText)
+  _ =
+    match priorTargetForCrc crc with
+      Some prior ->
+        printLine ("  note: previously renamed this file -> " ++ prior)
+      Optional.None -> ()
+  outcome =
+    executeOne
+      dryRun
+      targetRootText
+      intakeRootText
+      folderFmt
+      fileFmt
+      subsToken
+      subLangs
+      delayMs
+      row
+  match outcome with
+    Renamed _ tgt -> printLine ("  RENAMED -> " ++ tgt)
+    WouldRename _ tgt -> printLine ("  DRY-RUN: would rename -> " ++ tgt)
+    DuplicateRemoved _ tgt ->
+      printLine ("  DUPLICATE -> source removed (already at " ++ tgt ++ ")")
+    WouldRemoveDuplicate _ tgt ->
+      printLine
+        ("  DRY-RUN: would remove source as verified duplicate of " ++ tgt)
+    NoVideo src -> printLine ("  RETIRED (source gone): " ++ src)
+    NoProbe src -> printLine ("  SKIP: no probe for " ++ src)
+    NoMatch src reason ->
+      printLine ("  SKIP: no match for " ++ src ++ " (" ++ reason ++ ")")
+    Conflict _ t -> printLine ("  SKIP: different file already at " ++ t)
+    AlreadyDone src -> printLine ("  SKIP: already done " ++ src)
+    RenameError _ msg -> printLine ("  ERROR: " ++ msg)
+
+Rename.runNew : Config -> Text -> Text -> Boolean -> '{IO, Exception} ()
+Rename.runNew cfg folderFmtText fileFmtText dryRun =
+  do
+    use Nat + toText
+    use Text ++
+    folderFmt = parseFormat folderFmtText
+    fileFmt = parseFormat fileFmtText
+    subsToken = match catch do readSubToken cfg with
+      Right t -> Some t
+      Left _  -> Optional.None
+    targetRootText = buffer (paths cfg)
+    intakeRootText = intake (paths cfg)
+    subLangs = Tuning.subLangs (tuning cfg)
+    delayMs = subDelayMs (tuning cfg)
+    _ =
+      if dryRun then
+        printLine
+          "[rename] DRY RUN: no files will be created, moved, or deleted"
+      else
+        if isDirectory (FilePath targetRootText) then ()
+        else
+          _ = catch do createDirectory (FilePath targetRootText)
+          ()
+    runChunk lastId = 
+      myPg.singleIO (toClientConfig cfg) do
+        pqRows = prepareQuery selectRenamableChunkSql
+        pcPromote = prepareCommand promoteToBufferSql
+        pcCache = prepareCommand upsertProbeCacheSql
+        pcDelCache = prepareCommand deleteProbeCacheSql
+        pcRetire = prepareCommand retireMissingSql
+        pqProposed = prepareQuery selectProposedSql
+        rowsResult = catch do
+          portal = bindQuery pqRows (pobi (Some lastId))
+          (rs, _) = executeQueryPortal portal 0
+          rs
+        rows = match rowsResult with
+          Left f   ->
+            _ = printLine ("[rename] QUERY FAILED: " ++ Failure.message f)
+            []
+          Right rs -> List.map rowToRenameRowK rs
+        let
+          use List ++
+          renameGo = cases
+            { r } -> r
+            { priorTargetForCrc crc -> k } ->
+              handle k (findPriorTargetForCrcWith pqProposed crc) with renameGo
+            { promoteToBuffer path name base folder crc size -> k } ->
+              _ = 
+                catch do
+                  bindAndExecuteCommand
+                    pcPromote
+                    (pt path
+                      ++ pt name
+                      ++ pt base
+                      ++ pt folder
+                      ++ pt crc
+                      ++ pobi (Some size))
+              handle k() with renameGo
+            { upsertProbeCache path mt pr -> k } ->
+              _ = upsertProbeCacheWith pcCache path mt pr
+              handle k() with renameGo
+            { deleteProbeCache path -> k } ->
+              _ = catch do bindAndExecuteCommand pcDelCache (pt path)
+              handle k() with renameGo
+            { retireMissing path -> k } ->
+              _ = catch do bindAndExecuteCommand pcRetire (pt path)
+              handle k() with renameGo
+          runOne = cases
+            (_, row) ->
+              handle
+                runStep
+                  dryRun
+                  targetRootText
+                  intakeRootText
+                  folderFmt
+                  fileFmt
+                  subsToken
+                  subLangs
+                  delayMs
+                  row
+              with renameGo
+          _ = Db.foreach_ runOne rows
+          _ = PreparedQuery.close pqRows
+          _ = PreparedCommand.close pcPromote
+          _ = PreparedCommand.close pcCache
+          _ = PreparedCommand.close pcDelCache
+          _ = PreparedCommand.close pcRetire
+          _ = PreparedQuery.close pqProposed
+          match lastOf rows with
+            Some (fid, _) -> Some (fid, List.size rows)
+            Optional.None -> Optional.None
+    loop lastId done = match runChunk lastId with
+      Optional.None    -> done
+      Some (nextId, n) ->
+        _ =
+          printLine
+            ("[rename] chunk done ("
+              ++ toText n
+              ++ " file(s), cursor at file_id "
+              ++ Int.toText nextId
+              ++ ")")
+        loop nextId (done + n)
+    total = loop +0 0
+    printLine ("[rename] done (" ++ toText total ++ " file(s))")
+
 Tv.Rename.executeEpisode :
   Boolean
   -> PreparedQuery r1 a1 Text
@@ -196,18 +687,30 @@ Tv.Rename.executeEpisode :
   -> [FormatPart]
   -> [FormatPart]
   -> [FormatPart]
+  -> [Text]
   -> EpisodeJob
   ->{IO, Exception, Postgres, RenameCatalog} TvRenameOutcome
 Tv.Rename.executeEpisode
-  dryRun pqShow pqSeason intakeRoot bufferRoot showFmt seasonFmt fileFmt job =
+  dryRun
+  pqShow
+  pqSeason
+  intakeRoot
+  bufferRoot
+  showFmt
+  seasonFmt
+  fileFmt
+  subLangs
+  job =
   use Boolean not
   use Failure message
   use Optional None
   use ProbeResult sizeBytes
   use Text ++
+  use Universal eq
   use unison_json_1_4_2.Decoder run
   crc = EpisodeJob.crc32 job
   sourceText = EpisodeJob.originalPath job
+  sourceFolderText = filePathText (parentDir (FilePath sourceText))
   showId = EpisodeJob.showId job
   if not (enforceUnderRoot intakeRoot sourceText) then
     EpOutsideRoot sourceText intakeRoot
@@ -237,8 +740,19 @@ Tv.Rename.executeEpisode
                   if dryRun then
                     EpWouldRemoveDuplicate sourceText actualPath
                   else
-                    _ = catch do removeFile sourceVideo
                     actualBase = basenameNoExt actualName
+                    _ =
+                      if eq sourceFolderText intakeRoot then ()
+                      else
+                        _ = 
+                          catch do
+                            harvestLocal
+                              subLangs
+                              sourceFolderText
+                              (FilePath seasonDirText)
+                              actualBase
+                        ()
+                    _ = catch do removeFile sourceVideo
                     szInt = Nat.toInt (sizeBytes pr)
                     _ =
                       promoteToBuffer
@@ -299,6 +813,17 @@ Tv.Rename.executeEpisode
                         renameFile sourceVideo (FilePath targetVideoText)
                     match fsOutcome with
                       Right _ ->
+                        _ =
+                          if eq sourceFolderText intakeRoot then ()
+                          else
+                            _ = 
+                              catch do
+                                harvestLocal
+                                  subLangs
+                                  sourceFolderText
+                                  (FilePath seasonDirText)
+                                  base
+                            ()
                         newName = base ++ videoExt
                         szInt = Nat.toInt (sizeBytes pr)
                         _ =
@@ -321,67 +846,182 @@ Tv.Rename.executeEpisode
                         EpRenamed sourceText targetVideoText
                       Left f -> EpError sourceText (message f)
 
-Rename.cleanOrphanCacheSql : Command a a
-Rename.cleanOrphanCacheSql =
-  sql
-    "DELETE FROM probe_cache WHERE file_id IS NULL OR file_id IN (SELECT file_id FROM files WHERE stage = 'missing')"
-    |> buildCommand
-
-Rename.sweepStaleStaging : Config ->{IO, Exception} ()
-Rename.sweepStaleStaging cfg =
-  use Boolean not
-  use Nat + toText
-  use Optional None
-  use Text ++
-  intakeRootText = intake (paths cfg)
-  tvIntakeRootText = tvIntake (paths cfg)
-  movieMountUp = match deviceOf intakeRootText with
-    Some _ -> true
-    None   -> false
-  tvMountUp = match deviceOf tvIntakeRootText with
-    Some _ -> true
-    None   -> false
-  if not movieMountUp then
-    printLine
-      ("[sweep-stale] intake root not mounted, refusing: " ++ intakeRootText)
-  else
-    if not tvMountUp then
-      printLine
-        ("[sweep-stale] tv intake root not mounted, refusing: "
-          ++ tvIntakeRootText)
-    else
-      myPg.singleIO (toClientConfig cfg) do
-        pqRows = prepareQuery sweepStaleStagingSql
-        pcRetire = prepareCommand retireMissingSql
-        pcCleanCache = prepareCommand cleanOrphanCacheSql
-        rowsResult = catch do
-          portal = bindQuery pqRows []
-          (rs, _) = executeQueryPortal portal 0
-          rs
-        rows = match rowsResult with
-          Left f   ->
-            _ = printLine ("[sweep-stale] QUERY FAILED: " ++ Failure.message f)
-            []
-          Right rs -> rs
-        _ =
-          printLine
-            ("[sweep-stale] checking "
-              ++ toText (List.size rows)
-              ++ " staging row(s)")
-        step n = cases
-          (_, path) ->
-            if pathExists (FilePath path) then n
-            else
-              _ = catch do bindAndExecuteCommand pcRetire (pt path)
-              _ = printLine ("  retired (source gone): " ++ path)
-              n + 1
-        retired = List.foldLeft step 0 rows
-        _ = catch do bindAndExecuteCommand pcCleanCache []
-        _ = printLine "[sweep-stale] cleared orphaned probe_cache rows"
-        _ = PreparedQuery.close pqRows
-        _ = PreparedCommand.close pcRetire
-        _ = PreparedCommand.close pcCleanCache
+Tv.Rename.applyTv : Config -> Boolean -> '{IO, Exception} ()
+Tv.Rename.applyTv cfg dryRun =
+  do
+    use Nat + toText
+    use Optional None
+    use Text ++
+    intakeRoot = tvIntake (paths cfg)
+    bufferRoot = tvBuffer (paths cfg)
+    subLangs = Tuning.subLangs (tuning cfg)
+    match splitTvFormat (tvFormat (paths cfg)) with
+      None ->
         printLine
-          ("[sweep-stale] retired "
-            ++ toText retired
-            ++ " row(s) to stage='missing'")
+          "[tv-rename] tvFormat must be exactly show/season/file (two '/')"
+      Some (showFmt, seasonFmt, fileFmt) ->
+        _ =
+          if dryRun then
+            printLine
+              "[tv-rename] DRY RUN: no files will be created, moved, or deleted"
+          else
+            if isDirectory (FilePath bufferRoot) then ()
+            else
+              _ = catch do createDirectory (FilePath bufferRoot)
+              ()
+        runChunk lastId = 
+          myPg.singleIO (toClientConfig cfg) do
+            pqIds = prepareQuery selectEpisodeFileIdsSql
+            pqRows = prepareQuery selectEpisodeRenamableChunkSql
+            pqShow = prepareQuery selectShowSql
+            pqSeason = prepareQuery selectSeasonSql
+            pcPromote = prepareCommand promoteToBufferSql
+            pcCache = prepareCommand upsertProbeCacheSql
+            pcDelCache = prepareCommand deleteProbeCacheSql
+            pcRetire = prepareCommand retireMissingSql
+            closeAll _u =
+              _ = PreparedQuery.close pqIds
+              _ = PreparedQuery.close pqRows
+              _ = PreparedQuery.close pqShow
+              _ = PreparedQuery.close pqSeason
+              _ = PreparedCommand.close pcPromote
+              _ = PreparedCommand.close pcCache
+              _ = PreparedCommand.close pcDelCache
+              PreparedCommand.close pcRetire
+            idsResult = catch do
+              portal = bindQuery pqIds (pobi (Some lastId))
+              (rs, _) = executeQueryPortal portal 0
+              rs
+            ids = match idsResult with
+              Left f   ->
+                _ =
+                  printLine
+                    ("[tv-rename] ID QUERY FAILED: " ++ Failure.message f)
+                []
+              Right rs -> rs
+            match lastOf ids with
+              None ->
+                _ = closeAll()
+                None
+              Some upperId ->
+                rowsResult = catch do
+                  use List ++
+                  portal =
+                    bindQuery
+                      pqRows (pobi (Some lastId) ++ pobi (Some upperId))
+                  (rs, _) = executeQueryPortal portal 0
+                  rs
+                rows = match rowsResult with
+                  Left f   ->
+                    _ =
+                      printLine
+                        ("[tv-rename] QUERY FAILED: " ++ Failure.message f)
+                    []
+                  Right rs -> rs
+                jobs = groupJobs rows
+                let
+                  renameGo = cases
+                    { r } -> r
+                    { priorTargetForCrc _ -> k } -> handle k None with renameGo
+                    { promoteToBuffer path name base folder crc size -> k } ->
+                      use List ++
+                      _ = 
+                        catch do
+                          bindAndExecuteCommand
+                            pcPromote
+                            (pt path
+                              ++ pt name
+                              ++ pt base
+                              ++ pt folder
+                              ++ pt crc
+                              ++ pobi (Some size))
+                      handle k() with renameGo
+                    { upsertProbeCache path mt pr -> k } ->
+                      _ = upsertProbeCacheWith pcCache path mt pr
+                      handle k() with renameGo
+                    { deleteProbeCache path -> k } ->
+                      _ = catch do bindAndExecuteCommand pcDelCache (pt path)
+                      handle k() with renameGo
+                    { retireMissing path -> k } ->
+                      _ = catch do bindAndExecuteCommand pcRetire (pt path)
+                      handle k() with renameGo
+                  step job =
+                    _ =
+                      printLine ("processing: " ++ EpisodeJob.originalPath job)
+                    outcome =
+                      handle
+                        executeEpisode
+                          dryRun
+                          pqShow
+                          pqSeason
+                          intakeRoot
+                          bufferRoot
+                          showFmt
+                          seasonFmt
+                          fileFmt
+                          subLangs
+                          job
+                      with renameGo
+                    printTvOutcome outcome
+                  _ = Db.foreach_ step jobs
+                  _ = closeAll()
+                  Some (upperId, List.size jobs)
+        loop lastId done = match runChunk lastId with
+          None             -> done
+          Some (nextId, n) ->
+            _ =
+              printLine
+                ("[tv-rename] chunk done ("
+                  ++ toText n
+                  ++ " file(s), cursor at file_id "
+                  ++ Int.toText nextId
+                  ++ ")")
+            loop nextId (done + n)
+        total = loop +0 0
+        printLine ("[tv-rename] done (" ++ toText total ++ " file(s))")
+
+subDemo : '{IO, Exception} ()
+subDemo = do
+  cfg = fromEnv()
+  token = readSubToken cfg
+  outcomes =
+    fetchAndSaveByImdb
+      token 2000 "tt1375666" (FilePath "/tmp/subs-test") "inception"
+      ["en", "es", "th"]
+  logSubOutcomes outcomes
+
+Subs.subsInDir : FilePath -> Text ->{IO, Exception} [(FilePath, Text)]
+Subs.subsInDir folder dirName =
+  dfp = pathJoin folder dirName
+  match catch do directoryContents.texts dfp with
+    Left _    -> []
+    Right es2 ->
+      List.filterMap
+        (n ->
+          (if isSubtitleFile n then Some (pathJoin dfp n, n)
+          else Optional.None))
+        es2
+
+Subs.collectLocalSubs : FilePath ->{IO, Exception} [(FilePath, Text)]
+Subs.collectLocalSubs folder =
+  use List ++
+  use Universal eq
+  entries = match catch do directoryContents.texts folder with
+    Left _   -> []
+    Right es -> es
+  real = List.filter (n -> Boolean.not (eq n "." || eq n "..")) entries
+  here =
+    List.filterMap
+      (n ->
+        (if isSubtitleFile n && Boolean.not (isDirectory (pathJoin folder n))
+        then Some (pathJoin folder n, n)
+        else Optional.None))
+      real
+  subdirs =
+    List.filter
+      (n ->
+        List.any (d -> eq d (Text.toLowercase n)) subDirNames
+          && isDirectory (pathJoin folder n))
+      real
+  deeper = List.flatMap (Subs.subsInDir folder) subdirs
+  here ++ deeper

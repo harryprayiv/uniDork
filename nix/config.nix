@@ -38,6 +38,10 @@
   subs = {
     tokenFile = "$HOME/.config/uniDork/sub-token";
     languages = [ "en" "es" "th" ];
+    # Minimum pacing between subdl API requests, in milliseconds. On a
+    # rate-limit-shaped failure the fetch retries with 4x backoff, max 3
+    # attempts (2s -> 8s -> 32s at the default).
+    delayMs = 2000;
   };
 
   tuning = {
@@ -49,11 +53,9 @@
     memoryHigh = "6G";
     memoryMax  = "8G";
 
-    # GHC RTS options for the ucm runtime. -M caps the heap (raises a
-    # catchable heap-overflow instead of an OOM kill), -c switches the
-    # old generation to compacting GC (halves headroom vs copying GC).
-    # Silently ignored if the ucm binary wasn't built with full -rtsopts;
-    # the cgroup above is the enforcement layer either way.
+    # GHC RTS options for the ucm runtime. Silently ignored if the ucm
+    # binary wasn't built with full -rtsopts; the cgroup above is the
+    # enforcement layer either way.
     ghcRts = "-M5G -c";
   };
 }
