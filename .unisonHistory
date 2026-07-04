@@ -1,4 +1,6 @@
 quit
+compile cli ./bin/unidork-import
+quit
 delete.term snapshotProbe
 quit
 update
