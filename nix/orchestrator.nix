@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, snapshot }:
+{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, snapshot, mirror }:
 
 pkgs.writeShellApplication {
   name = "unidork";
@@ -10,6 +10,8 @@ pkgs.writeShellApplication {
     pkgs.git
     uniDork
     snapshot
+    mirror.unidork-log-change
+    mirror.unidork-snapshot
     postgres.pg-start
     postgres.pg-stop
     postgres.pg-connect
@@ -104,6 +106,8 @@ pkgs.writeShellApplication {
       return 1
     }
     cmd_push() { unidork-push; }
+    cmd_log_change() { unidork-log-change "$@"; }
+    cmd_snapshot()   { unidork-snapshot; }
     cmd_start()  { pg-start; }
     cmd_stop()   { pg-stop; }
 
@@ -222,6 +226,8 @@ SQL
 
     case "$cmd" in
       push)           cmd_push ;;
+      log-change)          cmd_log_change "$@" ;;
+      snapshot)            cmd_snapshot ;;
       start)          cmd_start ;;
       stop)           cmd_stop ;;
 

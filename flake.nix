@@ -32,8 +32,9 @@
         uniDork      = import ./nix/build.nix     { inherit pkgs; };
         postgres     = import ./nix/postgres.nix  { inherit pkgs; inherit (config) database; };
         snapshot = import ./nix/snapshot.nix { inherit pkgs config; };
+        mirror = import ./nix/mirror.nix { inherit pkgs; };
         orchestrator = import ./nix/orchestrator.nix {
-          inherit pkgs config uniDork postgres snapshot;
+          inherit pkgs config uniDork postgres snapshot mirror;
         };
         
       in {
@@ -44,7 +45,7 @@
         };
 
         devShells.default = import ./nix/devshell.nix {
-          inherit pkgs config uniDork postgres orchestrator snapshot;
+          inherit pkgs config uniDork postgres orchestrator snapshot mirror;
         };
       });
 

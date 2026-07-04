@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, orchestrator, snapshot }:
+{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, orchestrator, snapshot, mirror }:
 
 pkgs.mkShell {
   name = "uniDork-devshell";
@@ -22,6 +22,8 @@ pkgs.mkShell {
     uniDork
     orchestrator
     snapshot
+    mirror.unidork-log-change
+    mirror.unidork-snapshot
   ];
 
   shellHook = ''
