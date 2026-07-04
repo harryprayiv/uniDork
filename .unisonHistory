@@ -1,3 +1,10 @@
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+update
+quit
 compile cli ./bin/unidork-import
 quit
 update

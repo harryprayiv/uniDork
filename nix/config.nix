@@ -42,5 +42,18 @@
 
   tuning = {
     probeJobs = 8;
+
+    # cgroup ceiling for unidork-import: MemoryHigh throttles + reclaims
+    # to swap/zram, MemoryMax is the hard kill line. Size these to the
+    # box actually running the job, not to your workstation.
+    memoryHigh = "6G";
+    memoryMax  = "8G";
+
+    # GHC RTS options for the ucm runtime. -M caps the heap (raises a
+    # catchable heap-overflow instead of an OOM kill), -c switches the
+    # old generation to compacting GC (halves headroom vs copying GC).
+    # Silently ignored if the ucm binary wasn't built with full -rtsopts;
+    # the cgroup above is the enforcement layer either way.
+    ghcRts = "-M5G -c";
   };
 }

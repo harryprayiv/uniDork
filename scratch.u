@@ -1,0 +1,387 @@
+Stage.newestNfoMtime : Text ->{IO} Int
+Stage.newestNfoMtime videoPath =
+  use Int >
+  folder = parentDir (FilePath videoPath)
+  match catch do directoryContents.texts folder with
+    Left _      -> +0
+    Right files ->
+      nfos = List.filter isNfo files
+      step acc n =
+        match fileStat (filePathText (pathJoin folder n)) with
+          Some (mt, _)  -> if mt > acc then mt else acc
+          Optional.None -> acc
+      List.foldLeft step +0 nfos
+
+Stage.effectiveMtime : Text -> Int ->{IO} Int
+Stage.effectiveMtime videoPath videoMt =
+  use Int >
+  nfoMt = newestNfoMtime videoPath
+  if nfoMt > videoMt then nfoMt else videoMt
+
+Stage.partitionWork :
+  PreparedQuery r a1 Int -> [(a, Text)] ->{IO, Postgres} [(Nat, (a, Text))]
+Stage.partitionWork pqCached work =
+  use List +:
+  step acc item =
+    (_, videoPath) = item
+    match fileStat videoPath with
+      Optional.None -> (0, item) +: acc
+      Some (mt, sz) ->
+        eff = effectiveMtime videoPath mt
+        if isFileCachedWith pqCached videoPath eff (Nat.toInt sz) then acc
+        else (sz, item) +: acc
+  withSizes = List.foldLeft step [] work
+  sortBySize withSizes
+
+Stage.runChunk :
+  Text
+  -> PreparedCommand r1 a2
+  -> PreparedCommand r a1
+  -> [(a, Text)]
+  ->{IO, Exception, Postgres} ()
+Stage.runChunk stage pcFiles pcGate chunk =
+  results = forkChunk chunk
+  Db.foreach_
+    (cases
+      (_, videoPath, outcome) ->
+        match outcome with
+          Left _ -> ()
+          Right pr ->
+            originalName = filePathBasename (FilePath videoPath)
+            hint = nfoHint videoPath
+            _ =
+              Stage.upsertFileWith pcFiles videoPath originalName hint stage pr
+            mtime = match fileStat videoPath with
+              Some (mt, _)  -> effectiveMtime videoPath mt
+              Optional.None -> +0
+            upsertProbeCacheWith pcGate videoPath mtime pr)
+    results
+
+Tv.Stage.runChunk :
+  Text
+  -> Text
+  -> PreparedCommand r1 a1
+  -> PreparedCommand r a
+  -> [((), Text)]
+  ->{IO, Exception, Postgres} ()
+Tv.Stage.runChunk root stage pcFiles pcGate chunk =
+  results = forkChunk chunk
+  Db.foreach_
+    (cases
+      (_, videoPath, outcome) ->
+        match outcome with
+          Left _ -> ()
+          Right pr ->
+            originalName = filePathBasename (FilePath videoPath)
+            hints = episodeHints root videoPath
+            _ =
+              Tv.Stage.upsertFileWith
+                pcFiles videoPath originalName hints stage pr
+            mtime = match fileStat videoPath with
+              Some (mt, _)  -> effectiveMtime videoPath mt
+              Optional.None -> +0
+            upsertProbeCacheWith pcGate videoPath mtime pr)
+    results
+
+Rename.firstSizeMatch : FilePath -> Nat -> [Text] ->{IO} Optional Text
+Rename.firstSizeMatch targetFolder expectedSize entries =
+  sizeMatches n = match fileStat (filePathText (pathJoin targetFolder n)) with
+    Some (_, sz)  -> Universal.eq sz expectedSize
+    Optional.None -> false
+  List.find sizeMatches entries
+
+Rename.executeOne :
+  Boolean
+  -> Text
+  -> Text
+  -> [FormatPart]
+  -> [FormatPart]
+  -> Optional Text
+  -> [Text]
+  -> RenameRow
+  ->{IO, Exception, RenameCatalog} Rename.Outcome
+Rename.executeOne
+  dryRun targetRootText intakeRootText folderFmt fileFmt subsToken subLangs row =
+  use Failure message
+  use Optional None
+  use ProbeResult sizeBytes
+  use Text ++
+  use unison_json_1_4_2.Decoder run
+  crc = RenameRow.crc32 row
+  sourceText = RenameRow.originalPath row
+  sourceVideo = FilePath sourceText
+  m = toMovieRecord row
+  prParsed = catch do run ProbeResult.fromJson (RenameRow.probeJson row)
+  match prParsed with
+    Left f -> RenameError sourceText (message f)
+    Right pr ->
+      nfoText = match catch do run Details.fromJson (detailsJson row) with
+        Right d -> Nfo.generate (resultFromDetails d) d pr
+        Left _  -> minimalNfoM m crc
+      videoExt = fileExt sourceText
+      base = renderName fileFmt m pr
+      targetFolderText = targetRootText ++ "/" ++ renderName folderFmt m pr
+      targetFolder = FilePath targetFolderText
+      targetVideo = pathJoin targetFolder (base ++ videoExt)
+      targetNfo = pathJoin targetFolder (nfoBase base ++ ".nfo")
+      targetVideoText = filePathText targetVideo
+      tagged = crcTaggedEntries targetFolder crc
+      match tagged with
+        _ +: _ ->
+          match firstSizeMatch targetFolder (sizeBytes pr) tagged with
+            Some actualName ->
+              actualPath = filePathText (pathJoin targetFolder actualName)
+              if dryRun then WouldRemoveDuplicate sourceText actualPath
+              else
+                _ = catch do removeFile sourceVideo
+                actualBase = basenameNoExt actualName
+                szInt = Nat.toInt (sizeBytes pr)
+                _ =
+                  promoteToBuffer
+                    actualPath actualName actualBase targetFolderText crc szInt
+                _ = match fileStat actualPath with
+                  Some (mt, _) ->
+                    upsertProbeCache
+                      actualPath (effectiveMtime actualPath mt) pr
+                  None -> ()
+                _ = deleteProbeCache sourceText
+                DuplicateRemoved sourceText actualPath
+            None -> Conflict sourceText targetVideoText
+        [] ->
+          if Boolean.not (pathExists sourceVideo) then
+            _ = match deviceOf intakeRootText with
+              Some _ -> retireMissing sourceText
+              None   -> ()
+            NoVideo sourceText
+          else
+            if pathExists targetVideo then Conflict sourceText targetVideoText
+            else
+              if dryRun then WouldRename sourceText targetVideoText
+              else
+                fsOutcome = catch do
+                  _ =
+                    if isDirectory targetFolder then ()
+                    else
+                      _ = createDirectory targetFolder
+                      ()
+                  _ = writeFileUtf8 targetNfo nfoText
+                  renameFile sourceVideo targetVideo
+                match fsOutcome with
+                  Right _ ->
+                    _ = 
+                      catch do
+                        maybeFetchSubsM subsToken subLangs m targetFolder base
+                    newName = base ++ videoExt
+                    szInt = Nat.toInt (sizeBytes pr)
+                    _ =
+                      promoteToBuffer
+                        targetVideoText newName base targetFolderText crc szInt
+                    _ = match fileStat targetVideoText with
+                      Some (mt, _) ->
+                        upsertProbeCache
+                          targetVideoText
+                          (effectiveMtime targetVideoText mt)
+                          pr
+                      None -> ()
+                    _ = deleteProbeCache sourceText
+                    Renamed sourceText targetVideoText
+                  Left f -> RenameError sourceText (message f)
+
+Tv.Rename.executeEpisode :
+  Boolean
+  -> PreparedQuery r1 a1 Text
+  -> PreparedQuery r a Text
+  -> Text
+  -> Text
+  -> [FormatPart]
+  -> [FormatPart]
+  -> [FormatPart]
+  -> EpisodeJob
+  ->{IO, Exception, Postgres, RenameCatalog} TvRenameOutcome
+Tv.Rename.executeEpisode
+  dryRun pqShow pqSeason intakeRoot bufferRoot showFmt seasonFmt fileFmt job =
+  use Boolean not
+  use Failure message
+  use Optional None
+  use ProbeResult sizeBytes
+  use Text ++
+  use unison_json_1_4_2.Decoder run
+  crc = EpisodeJob.crc32 job
+  sourceText = EpisodeJob.originalPath job
+  showId = EpisodeJob.showId job
+  if not (enforceUnderRoot intakeRoot sourceText) then
+    EpOutsideRoot sourceText intakeRoot
+  else
+    pjson = EpisodeJob.probeJson job
+    match catch do run ProbeResult.fromJson pjson with
+      Left f -> EpBadProbe sourceText (message f)
+      Right pr ->
+        showFolder = renderEpisode showFmt job pr
+        seasonFolder = renderEpisode seasonFmt job pr
+        base = renderEpisode fileFmt job pr
+        showDirText = bufferRoot ++ "/" ++ showFolder
+        seasonDirText = showDirText ++ "/" ++ seasonFolder
+        videoExt = fileExt sourceText
+        targetVideoText = seasonDirText ++ "/" ++ base ++ videoExt
+        sourceVideo = FilePath sourceText
+        if not (enforceUnderRoot bufferRoot seasonDirText) then
+          EpOutsideRoot targetVideoText bufferRoot
+        else
+          tagged = crcTaggedEntries (FilePath seasonDirText) crc
+          match tagged with
+            _ +: _ ->
+              match firstSizeMatch
+                (FilePath seasonDirText) (sizeBytes pr) tagged with
+                Some actualName ->
+                  actualPath = seasonDirText ++ "/" ++ actualName
+                  if dryRun then
+                    EpWouldRemoveDuplicate sourceText actualPath
+                  else
+                    _ = catch do removeFile sourceVideo
+                    actualBase = basenameNoExt actualName
+                    szInt = Nat.toInt (sizeBytes pr)
+                    _ =
+                      promoteToBuffer
+                        actualPath
+                        actualName
+                        actualBase
+                        seasonDirText
+                        crc
+                        szInt
+                    _ = match fileStat actualPath with
+                      Some (mt, _) ->
+                        upsertProbeCache
+                          actualPath (effectiveMtime actualPath mt) pr
+                      None -> ()
+                    _ = deleteProbeCache sourceText
+                    EpDuplicateRemoved sourceText actualPath
+                None -> EpConflict sourceText targetVideoText
+            [] ->
+              if not (pathExists sourceVideo) then
+                _ = match deviceOf intakeRoot with
+                  Some _ -> retireMissing sourceText
+                  None   -> ()
+                EpNoVideo sourceText
+              else
+                if pathExists (FilePath targetVideoText) then
+                  EpConflict sourceText targetVideoText
+                else
+                  if dryRun then EpWouldRename sourceText targetVideoText
+                  else
+                    seasonBody =
+                      readSeasonBodyWith
+                        pqSeason showId (EpisodeJob.season job)
+                    seasonOpt = match seasonBody with
+                      None      -> None
+                      Some body ->
+                        match catch do run Season.fromJson body with
+                          Right s -> Some s
+                          Left _  -> None
+                    showNfoText = match readShowBodyWith pqShow showId with
+                      None      -> minimalShowNfo showId (showName job)
+                      Some body ->
+                        match catch do run ShowDetails.fromJson body with
+                          Right d -> generateShowNfo d
+                          Left _  -> minimalShowNfo showId (showName job)
+                    epNfoText = episodeNfoFor seasonOpt job pr
+                    fsOutcome = 
+                      catch do
+                        _ = ensureDir showDirText
+                        _ = ensureDir seasonDirText
+                        tvshowNfo = FilePath (showDirText ++ "/tvshow.nfo")
+                        _ =
+                          if pathExists tvshowNfo then ()
+                          else writeFileUtf8 tvshowNfo showNfoText
+                        _ =
+                          writeFileUtf8
+                            (FilePath (seasonDirText ++ "/" ++ base ++ ".nfo"))
+                            epNfoText
+                        renameFile sourceVideo (FilePath targetVideoText)
+                    match fsOutcome with
+                      Right _ ->
+                        newName = base ++ videoExt
+                        szInt = Nat.toInt (sizeBytes pr)
+                        _ =
+                          promoteToBuffer
+                            targetVideoText
+                            newName
+                            base
+                            seasonDirText
+                            crc
+                            szInt
+                        _ =
+                          match fileStat targetVideoText with
+                            Some (mt, _) ->
+                              upsertProbeCache
+                                targetVideoText
+                                (effectiveMtime targetVideoText mt)
+                                pr
+                            None -> ()
+                        _ = deleteProbeCache sourceText
+                        EpRenamed sourceText targetVideoText
+                      Left f -> EpError sourceText (message f)
+
+Rename.cleanOrphanCacheSql : Command a a
+Rename.cleanOrphanCacheSql =
+  sql
+    "DELETE FROM probe_cache WHERE file_id IS NULL OR file_id IN (SELECT file_id FROM files WHERE stage = 'missing')"
+    |> buildCommand
+
+Rename.sweepStaleStaging : Config ->{IO, Exception} ()
+Rename.sweepStaleStaging cfg =
+  use Boolean not
+  use Nat + toText
+  use Optional None
+  use Text ++
+  intakeRootText = intake (paths cfg)
+  tvIntakeRootText = tvIntake (paths cfg)
+  movieMountUp = match deviceOf intakeRootText with
+    Some _ -> true
+    None   -> false
+  tvMountUp = match deviceOf tvIntakeRootText with
+    Some _ -> true
+    None   -> false
+  if not movieMountUp then
+    printLine
+      ("[sweep-stale] intake root not mounted, refusing: " ++ intakeRootText)
+  else
+    if not tvMountUp then
+      printLine
+        ("[sweep-stale] tv intake root not mounted, refusing: "
+          ++ tvIntakeRootText)
+    else
+      myPg.singleIO (toClientConfig cfg) do
+        pqRows = prepareQuery sweepStaleStagingSql
+        pcRetire = prepareCommand retireMissingSql
+        pcCleanCache = prepareCommand cleanOrphanCacheSql
+        rowsResult = catch do
+          portal = bindQuery pqRows []
+          (rs, _) = executeQueryPortal portal 0
+          rs
+        rows = match rowsResult with
+          Left f   ->
+            _ = printLine ("[sweep-stale] QUERY FAILED: " ++ Failure.message f)
+            []
+          Right rs -> rs
+        _ =
+          printLine
+            ("[sweep-stale] checking "
+              ++ toText (List.size rows)
+              ++ " staging row(s)")
+        step n = cases
+          (_, path) ->
+            if pathExists (FilePath path) then n
+            else
+              _ = catch do bindAndExecuteCommand pcRetire (pt path)
+              _ = printLine ("  retired (source gone): " ++ path)
+              n + 1
+        retired = List.foldLeft step 0 rows
+        _ = catch do bindAndExecuteCommand pcCleanCache []
+        _ = printLine "[sweep-stale] cleared orphaned probe_cache rows"
+        _ = PreparedQuery.close pqRows
+        _ = PreparedCommand.close pcRetire
+        _ = PreparedCommand.close pcCleanCache
+        printLine
+          ("[sweep-stale] retired "
+            ++ toText retired
+            ++ " row(s) to stage='missing'")

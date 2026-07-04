@@ -54,6 +54,11 @@ pkgs.writeShellApplication {
     : "''${UNIDORK_TUNE_SUB_LANGS:=${lib.concatStringsSep "," config.subs.languages}}"
     export UNIDORK_TUNE_PROBE_JOBS UNIDORK_TUNE_SUB_LANGS
 
+    : "''${UNIDORK_MEM_HIGH:=${config.tuning.memoryHigh}}"
+    : "''${UNIDORK_MEM_MAX:=${config.tuning.memoryMax}}"
+    : "''${UNIDORK_GHCRTS:=${config.tuning.ghcRts}}"
+    export UNIDORK_MEM_HIGH UNIDORK_MEM_MAX UNIDORK_GHCRTS
+
     export PGPORT="$UNIDORK_DB_PORT"
     export PGUSER="$UNIDORK_DB_USER"
     export PGDATABASE="$UNIDORK_DB_NAME"
@@ -61,6 +66,30 @@ pkgs.writeShellApplication {
 
     log_dir="$HOME/.cache/uniDork/logs"
     mkdir -p "$log_dir"
+
+    # Detect once whether we can create user-level scope units. Fails on
+    # boxes without a user session bus (bare ssh without lingering); we
+    # fall back to an unconfined run rather than refusing to work.
+    use_scope=0
+    if command -v systemd-run >/dev/null 2>&1; then
+      if systemd-run --user --scope --quiet --collect true 2>/dev/null; then
+        use_scope=1
+      fi
+    fi
+    if [ "$use_scope" = 0 ]; then
+      echo "[orchestrator] warn: no user systemd scope available; running without memory cgroup" >&2
+    fi
+
+    run_import() {
+      if [ "$use_scope" = 1 ]; then
+        systemd-run --user --scope --quiet --collect \
+          -p "MemoryHigh=$UNIDORK_MEM_HIGH" \
+          -p "MemoryMax=$UNIDORK_MEM_MAX" \
+          env "GHCRTS=$UNIDORK_GHCRTS" unidork-import "$@"
+      else
+        GHCRTS="$UNIDORK_GHCRTS" unidork-import "$@"
+      fi
+    }
 
     cmd="''${1:-help}"; shift || true
 
@@ -80,41 +109,41 @@ pkgs.writeShellApplication {
     cmd_start()  { pg-start; }
     cmd_stop()   { pg-stop; }
 
-    cmd_probe()    { ensure_pg; unidork-import probe-stage; }
-    cmd_resolve()  { ensure_pg; unidork-import resolve; }
-    cmd_identify() { ensure_pg; unidork-import identify; }
-    cmd_process()  { ensure_pg; unidork-import process "$@"; }
-    cmd_move()     { ensure_pg; unidork-import move "$@"; }
+    cmd_probe()    { ensure_pg; run_import probe-stage; }
+    cmd_resolve()  { ensure_pg; run_import resolve; }
+    cmd_identify() { ensure_pg; run_import identify; }
+    cmd_process()  { ensure_pg; run_import process "$@"; }
+    cmd_move()     { ensure_pg; run_import move "$@"; }
 
-    cmd_reconcile()      { ensure_pg; unidork-import reconcile; }
-    cmd_import_library() { ensure_pg; unidork-import import-library "$UNIDORK_PATH_CONFIG"; }
-    cmd_import_all()     { ensure_pg; unidork-import import-all "$UNIDORK_PATH_CONFIG"; }
+    cmd_reconcile()      { ensure_pg; run_import reconcile; }
+    cmd_import_library() { ensure_pg; run_import import-library "$UNIDORK_PATH_CONFIG"; }
+    cmd_import_all()     { ensure_pg; run_import import-all "$UNIDORK_PATH_CONFIG"; }
 
     cmd_rename() {
       ensure_pg
       if has_flag "--dry-run" "$@"; then
-        unidork-import rename "$UNIDORK_FORMAT_MOVIE" --dry-run
+        run_import rename "$UNIDORK_FORMAT_MOVIE" --dry-run
       elif has_flag "--apply" "$@"; then
-        unidork-import rename "$UNIDORK_FORMAT_MOVIE"
+        run_import rename "$UNIDORK_FORMAT_MOVIE"
       else
         echo "rename is destructive. pass --apply to move files, or --dry-run to preview."
         exit 1
       fi
     }
 
-    cmd_tv_init()     { ensure_pg; unidork-import tv-init; }
-    cmd_tv_probe()    { ensure_pg; unidork-import tv-probe; }
-    cmd_tv_resolve()  { ensure_pg; unidork-import tv-resolve; }
-    cmd_tv_identify() { ensure_pg; unidork-import tv-identify; }
-    cmd_tv_process()  { ensure_pg; unidork-import tv-process "$@"; }
-    cmd_tv_move()     { ensure_pg; unidork-import tv-move "$@"; }
+    cmd_tv_init()     { ensure_pg; run_import tv-init; }
+    cmd_tv_probe()    { ensure_pg; run_import tv-probe; }
+    cmd_tv_resolve()  { ensure_pg; run_import tv-resolve; }
+    cmd_tv_identify() { ensure_pg; run_import tv-identify; }
+    cmd_tv_process()  { ensure_pg; run_import tv-process "$@"; }
+    cmd_tv_move()     { ensure_pg; run_import tv-move "$@"; }
 
     cmd_tv_rename() {
       ensure_pg
       if has_flag "--dry-run" "$@"; then
-        unidork-import tv-rename --dry-run
+        run_import tv-rename --dry-run
       elif has_flag "--apply" "$@"; then
-        unidork-import tv-rename
+        run_import tv-rename
       else
         echo "tv-rename is destructive. pass --apply to move files, or --dry-run to preview."
         exit 1
@@ -124,10 +153,10 @@ pkgs.writeShellApplication {
     cmd_process_all() {
       ensure_pg
       echo "[orchestrator] === movie process ==="
-      unidork-import process
+      run_import process
       echo ""
       echo "[orchestrator] === tv process ==="
-      unidork-import tv-process
+      run_import tv-process
       echo ""
       echo "[orchestrator] both pipelines done."
       echo "  review movie buffer: $UNIDORK_PATH_BUFFER"
@@ -233,6 +262,12 @@ DRY RUN
   Every destructive verb accepts --dry-run: no file is created, moved, or
   deleted. DB metadata (probe rows, associations, TMDB caches) may still be
   written.
+
+MEMORY
+  unidork-import runs inside a systemd user scope with
+  MemoryHigh=$UNIDORK_MEM_HIGH / MemoryMax=$UNIDORK_MEM_MAX when a user
+  session bus is available. Override per-run with UNIDORK_MEM_HIGH,
+  UNIDORK_MEM_MAX, UNIDORK_GHCRTS.
 
 MOVIE PIPELINE
   process [--dry-run]        probe + resolve + rename -> movie buffer   (DESTRUCTIVE without --dry-run)
