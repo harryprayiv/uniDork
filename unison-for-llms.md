@@ -181,6 +181,14 @@ logGo = cases
     handle k() with logGo
 
 result = handle program() with logGo
+
+`printLine` in base is `Text ->{IO, Exception} ()`. Adding a debug print to
+a function declared `->{IO}` is an ability widening and will fail with "needs
+the {Exception} ability". Before declaring any effectful function's row,
+check the row of EVERY base function the body calls -- printing, file stats,
+and env reads mostly require Exception, not just IO. When unsure, omit the
+signature and let inference supply the row, then read what it inferred.
+
 ```
 
   Note the recursion: each operation case re-wraps the continuation with
@@ -267,6 +275,19 @@ test> myFn.test =
 `test>` definitions run on file save and are cached by content hash. Failing
 branches use `[Fail "message"]`. Effectful code is tested by wrapping it in
 scripted handlers (section 7) so the test itself stays pure.
+
+Postgres codecs are validated against actual column types AT RUNTIME, per
+query, with an unhandled "Column alignment mismatch" exception on the first
+execution. `integer` means int4 and `bigint` means int8; match the DDL
+column type, not the Unison-side type (both decode to Int). Asymmetry that
+creates false confidence: PARAMETERS (`var integer` in a WHERE clause) are
+coerced by postgres and work even when mistyped, but RESULT-COLUMN codecs
+are checked strictly. Copying a codec choice from a working parameter into
+a SELECT decoder is therefore not evidence it is correct. When writing any
+new SELECT, read the table's DDL (or an existing SELECT of the same
+columns) and align the `~` codec chain to it column by column. The error
+dump prints both sides ("Query types" vs "Row types") -- diff them to find
+the misaligned position.
 
 ## 12. Miscellaneous traps, rapid fire
 

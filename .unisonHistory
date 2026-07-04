@@ -4,6 +4,13 @@ update
 quit
 compile cli ./bin/unidork-import
 update
+edit.namespace .
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+update
 quit
 compile cli ./bin/unidork-import
 update
@@ -91,4 +98,3 @@ dependents runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.ru
 view runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
 quit
 push @harryprayiv/uniDork
-edit.namespace .
