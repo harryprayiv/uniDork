@@ -1,14 +1,21 @@
 { ... }:
+let
+  name       = "uniDork";
+  shareOwner = "harryprayiv";
+in
 {
-  name = "uniDork";
+  inherit name;
 
   # Where this codebase's git working copy and Unison project live.
   # config.nix is the machine-facts file; absolute paths belong here.
+  # The Share slug is derived from `name` because they match today;
+  # split into its own binding if they ever diverge.
   repo = {
     dir = "/home/bismuth/git/uniDork";
     unison = {
-      project = "uniDork";
+      project = name;
       branch  = "main";
+      share   = "@${shareOwner}/${name}";
     };
   };
 

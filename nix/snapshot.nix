@@ -1,38 +1,56 @@
 { pkgs, config }:
+
+let
+  ucmPrompt   = "${config.repo.unison.project}/${config.repo.unison.branch}";
+  shareTarget = "${config.repo.unison.share}/${config.repo.unison.branch}";
+
+  pushTranscript = pkgs.writeText "unidork-push-transcript.md" ''
+```ucm
+    ${ucmPrompt}> push ${shareTarget}
+    ${ucmPrompt}> reflog
+```
+  '';
+in
 pkgs.writeShellApplication {
   name = "unidork-push";
   runtimeInputs = [ pkgs.unison-ucm pkgs.git pkgs.gnugrep pkgs.coreutils ];
   text = ''
-    set -euo pipefail
-    repo="$(git rev-parse --show-toplevel)"
+    repo="''${UNIDORK_REPO:-${config.repo.dir}}"
     cd "$repo"
     anchor=".unidork-snapshot-hash"
     old="$(cat "$anchor" 2>/dev/null || echo "")"
 
-    # 1. push to Share + capture reflog, against the real codebase
-    ucm transcript.in-place ./nix/unison/snapshot.md
+    tmp="$(mktemp -d)"
+    cleanup() { rm -rf "$tmp"; }
+    trap cleanup EXIT
 
-    # 2. new causal hash = hash in numbered reflog row "1." (skips #abcdef tip)
-    new="$(grep -oE '^[[:space:]]*1\.[[:space:]].*#[0-9a-z]+' ./nix/unison/snapshot.output.md \
+    # 1. push to Share + capture reflog. The transcript lives in the
+    #    read-only store; transcript.in-place writes its output beside
+    #    its input, so copy it somewhere writable first.
+    cp ${pushTranscript} "$tmp/push.md"
+    chmod u+w "$tmp/push.md"
+    ( cd "$tmp" && ucm transcript.in-place push.md )
+
+    # 2. new causal hash = hash in numbered reflog row "1." (skips tip)
+    new="$(grep -oE '^[[:space:]]*1\.[[:space:]].*#[0-9a-z]+' "$tmp/push.output.md" \
             | grep -oE '#[0-9a-z]+' | head -n1 || true)"
     if [ -z "$new" ]; then echo "could not parse causal hash" >&2; exit 1; fi
     if [ "$new" = "$old" ]; then
       echo "no change since last snapshot ($new)"
-      rm -f ./nix/unison/snapshot.output.md
       exit 0
     fi
 
     # 3. diff the whole session: old anchor -> new, by hash
     diffout=""
     if [ -n "$old" ]; then
-      difftmp="$(mktemp -d)/diff.md"
       {
         echo '```ucm'
-        echo "uniDork/main> diff.namespace $old $new"
+        echo "${ucmPrompt}> diff.namespace $old $new"
         echo '```'
-      } > "$difftmp"
-      ucm transcript.in-place "$difftmp" || echo "  (diff failed; hash-only snapshot)"
-      diffout="''${difftmp%.md}.output.md"
+      } > "$tmp/diff.md"
+      ( cd "$tmp" && ucm transcript.in-place diff.md ) \
+        || echo "  (diff failed; hash-only snapshot)"
+      diffout="$tmp/diff.output.md"
     fi
 
     # 4. write hash-anchored backup
@@ -41,10 +59,10 @@ pkgs.writeShellApplication {
     {
       echo "<!-- unison-causal: $new -->"
       echo "<!-- unison-prev:   $old -->"
-      echo "<!-- restore: pull @harryprayiv/uniDork/main ; reset $new -->"
+      echo "<!-- restore: pull ${shareTarget} ; reset $new -->"
       echo "<!-- generated: $(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
       echo ""
-      echo "# uniDork snapshot \`$new\`"
+      echo "# ${config.name} snapshot \`$new\`"
       echo ""
       echo "Restore by causal hash, not the text below (diff is a lossy summary)."
       echo ""
@@ -57,12 +75,15 @@ pkgs.writeShellApplication {
       echo '```'
     } > "$out"
 
-    # 5. record anchor + commit
+    # 5. record anchor + commit ONLY our own paths, regardless of what
+    #    else happens to be staged in the working tree
     echo "$new" > "$anchor"
-    git add backup/ "$anchor"
-    git commit -m "snapshot $new" --quiet
-    echo "snapshotted $new -> $out (committed)"
-
-    rm -f ./nix/unison/snapshot.output.md
+    git add -- backup "$anchor"
+    if git diff --cached --quiet -- backup "$anchor"; then
+      echo "nothing to commit"
+    else
+      git commit -m "snapshot $new" --quiet -- backup "$anchor"
+      echo "snapshotted $new -> $out (committed)"
+    fi
   '';
 }
