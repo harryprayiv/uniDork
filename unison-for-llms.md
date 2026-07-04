@@ -8,6 +8,16 @@ different edit workflow. Read this before emitting any code, and run the
 checklist at the end before every scratch file you produce. Every rule in
 here was paid for with a real typecheck round-trip; do not rediscover them.
 
+Transcript automation (verified): `ucm transcript.in-place file.md` runs
+against the real codebase and writes results to `file.output.md`. In
+transcript mode, `edit` / `edit.namespace` do NOT write a `.u` file
+anywhere; they emit the rendered definitions as fenced ```unison blocks
+inside the output markdown. Harvest by extracting those fences. Project
+prompts (`myProject/main>`) work inside transcripts. Caveat: fence-based
+extraction breaks if any rendered definition itself contains a line
+beginning with three backticks (embedded code fences in {{ }} Docs);
+verify with a grep before trusting a harvested dump.
+
 ## 1. The workflow shapes everything
 
 Unison code lives in a content-addressed database (the "codebase"), not in
