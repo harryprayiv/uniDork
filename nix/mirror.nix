@@ -3,7 +3,6 @@
 let
   common = ''
     : "''${UNIDORK_REPO:=$HOME/git/uniDork}"
-    scratch="$UNIDORK_REPO/scratch.u"
 
     git_commit_push() {
       msg="$1"; shift
@@ -27,6 +26,7 @@ in
     runtimeInputs = [ pkgs.git pkgs.coreutils ];
     text = ''
       ${common}
+      scratch="$UNIDORK_REPO/scratch.u"
 
       slug="''${1:-update}"
       slug="$(echo "$slug" | tr -cs 'a-zA-Z0-9' '-' | sed 's/^-*//;s/-*$//')"
