@@ -1,8 +1,10 @@
-{ pkgs }:
+{ pkgs, config }:
 
 let
+  ucmPrompt = "${config.repo.unison.project}/${config.repo.unison.branch}";
+
   common = ''
-    : "''${UNIDORK_REPO:=$HOME/git/uniDork}"
+    : "''${UNIDORK_REPO:=${config.repo.dir}}"
 
     git_commit_push() {
       msg="$1"; shift
@@ -46,7 +48,7 @@ in
 
   unidork-snapshot = pkgs.writeShellApplication {
     name = "unidork-snapshot";
-    runtimeInputs = [ pkgs.unison-ucm pkgs.git pkgs.gawk pkgs.coreutils ];
+    runtimeInputs = [ pkgs.unison-ucm pkgs.git pkgs.gawk pkgs.findutils pkgs.coreutils ];
     text = ''
       ${common}
 
@@ -54,9 +56,12 @@ in
       cleanup() { rm -rf "$tmp"; }
       trap cleanup EXIT
 
+      marker="$tmp/.marker"
+      touch "$marker"
+
       cat > "$tmp/dump.md" <<'TRANSCRIPT'
 ```ucm
-uniDork/main> edit.namespace .
+${ucmPrompt}> edit.namespace .
 ```
 TRANSCRIPT
 
@@ -66,18 +71,34 @@ TRANSCRIPT
       staged="$tmp/harvest.u"
       : > "$staged"
 
+      # Candidate 1: a .u file written into the transcript's working dir.
       shopt -s nullglob
       for u in "$tmp"/*.u; do
         if [ "$u" = "$staged" ]; then continue; fi
         if [ -s "$u" ]; then
           cp "$u" "$staged"
-          echo "[snapshot] harvested $(basename "$u") written by edit.namespace"
+          echo "[snapshot] harvested $(basename "$u") from transcript dir"
           break
         fi
       done
 
+      # Candidate 2: a fresh .u file beside the codebase root (UCM may
+      # resolve its scratch file relative to the codebase, not the cwd).
+      if [ ! -s "$staged" ]; then
+        while IFS= read -r -d "" u; do
+          if [ -s "$u" ]; then
+            cp "$u" "$staged"
+            echo "[snapshot] harvested $u (written beside the codebase)"
+            break
+          fi
+        done < <(find "$HOME" -maxdepth 1 -name '*.u' -newer "$marker" -print0 2>/dev/null)
+      fi
+
+      # Candidate 3: fenced unison blocks inside the transcript output,
+      # matching any info string that mentions unison (UCM tags these
+      # like ```unison :added-by-ucm scratch.u).
       if [ ! -s "$staged" ] && [ -f "$tmp/dump.output.md" ]; then
-        awk '/^```[[:space:]]*unison/{f=1; next} /^```/{f=0} f' \
+        awk '/^```.*unison/{f=1; next} /^```/{f=0} f' \
           "$tmp/dump.output.md" > "$staged"
         if [ -s "$staged" ]; then
           echo "[snapshot] harvested unison blocks from transcript output"
@@ -85,8 +106,18 @@ TRANSCRIPT
       fi
 
       if [ ! -s "$staged" ]; then
-        echo "[snapshot] dump produced nothing: no .u in temp dir, no unison blocks in output." >&2
-        echo "[snapshot] run 'edit.namespace .' manually in ucm once and note where it writes." >&2
+        mkdir -p "$UNIDORK_REPO/snapshots"
+        debug="$UNIDORK_REPO/snapshots/last-transcript-debug.md"
+        cp "$tmp/dump.output.md" "$debug" 2>/dev/null || true
+        echo "[snapshot] dump produced nothing harvestable." >&2
+        if [ -f "$debug" ]; then
+          echo "[snapshot] transcript output preserved at $debug -- first lines:" >&2
+          echo "----------------------------------------------------------" >&2
+          head -n 40 "$debug" >&2
+          echo "----------------------------------------------------------" >&2
+        else
+          echo "[snapshot] no transcript output existed to preserve." >&2
+        fi
         exit 1
       fi
 

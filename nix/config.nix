@@ -2,6 +2,16 @@
 {
   name = "uniDork";
 
+  # Where this codebase's git working copy and Unison project live.
+  # config.nix is the machine-facts file; absolute paths belong here.
+  repo = {
+    dir = "/home/bismuth/git/uniDork";
+    unison = {
+      project = "uniDork";
+      branch  = "main";
+    };
+  };
+
   database = {
     host    = "localhost";
     name    = "dork";
