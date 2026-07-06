@@ -3,13 +3,6 @@
 let
   ucmPrompt   = "${config.repo.unison.project}/${config.repo.unison.branch}";
   shareTarget = "${config.repo.unison.share}/${config.repo.unison.branch}";
-
-  pushTranscript = pkgs.writeText "unidork-push-transcript.md" ''
-```ucm
-    ${ucmPrompt}> push ${shareTarget}
-    ${ucmPrompt}> reflog
-```
-  '';
 in
 pkgs.writeShellApplication {
   name = "unidork-push";
@@ -24,23 +17,29 @@ pkgs.writeShellApplication {
     cleanup() { rm -rf "$tmp"; }
     trap cleanup EXIT
 
-    # 1. push to Share + capture reflog. The transcript lives in the
-    #    read-only store; transcript.in-place writes its output beside
-    #    its input, so copy it somewhere writable first.
-    cp ${pushTranscript} "$tmp/push.md"
-    chmod u+w "$tmp/push.md"
+    cat > "$tmp/push.md" <<'TRANSCRIPT'
+```ucm
+${ucmPrompt}> push ${shareTarget}
+${ucmPrompt}> reflog
+```
+TRANSCRIPT
+
     ( cd "$tmp" && ucm transcript.in-place push.md )
 
-    # 2. new causal hash = hash in numbered reflog row "1." (skips tip)
-    new="$(grep -oE '^[[:space:]]*1\.[[:space:]].*#[0-9a-z]+' "$tmp/push.output.md" \
+    new="$(grep -E '^[[:space:]]*1\.[[:space:]]' "$tmp/push.output.md" \
             | grep -oE '#[0-9a-z]+' | head -n1 || true)"
-    if [ -z "$new" ]; then echo "could not parse causal hash" >&2; exit 1; fi
+    if [ -z "$new" ]; then
+      echo "could not parse causal hash; transcript output follows:" >&2
+      echo "------------------------------------------------------------" >&2
+      cat "$tmp/push.output.md" >&2
+      echo "------------------------------------------------------------" >&2
+      exit 1
+    fi
     if [ "$new" = "$old" ]; then
       echo "no change since last snapshot ($new)"
       exit 0
     fi
 
-    # 3. diff the whole session: old anchor -> new, by hash
     diffout=""
     if [ -n "$old" ]; then
       {
@@ -53,7 +52,6 @@ pkgs.writeShellApplication {
       diffout="$tmp/diff.output.md"
     fi
 
-    # 4. write hash-anchored backup
     mkdir -p backup
     out="backup/''${new#\#}.md"
     {
@@ -75,8 +73,6 @@ pkgs.writeShellApplication {
       echo '```'
     } > "$out"
 
-    # 5. record anchor + commit ONLY our own paths, regardless of what
-    #    else happens to be staged in the working tree
     echo "$new" > "$anchor"
     git add -- backup "$anchor"
     if git diff --cached --quiet -- backup "$anchor"; then
