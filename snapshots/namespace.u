@@ -4583,6 +4583,9 @@ Resolve.printOutcome = cases
   SearchError fid err ->
     printLine (Text.join "" ["  file ", Int.toText fid, " -> error: ", err])
 
+Resolve.resolveChunkSize : Nat
+Resolve.resolveChunkSize = 100
+
 Resolve.resolveOne :
   Boolean
   -> Text
@@ -4735,28 +4738,29 @@ Resolve.rowToFile = cases
 
 Resolve.runWith : Boolean -> Config ->{IO, Exception} ()
 Resolve.runWith dryRun cfg =
-  use Nat toText
+  use Nat +
+  use Optional None
   use Text ++
   token = readTmdbToken cfg
-  myPg.singleIO (toClientConfig cfg) do
-    pqFiles = prepareQuery selectUnresolvedSql
-    pqSearch = prepareQuery Tmdb.selectSearchSql
-    pcSearch = prepareCommand Tmdb.upsertSearchSql
-    pqDet = prepareQuery selectDetailsSql
-    pcDet = prepareCommand upsertDetailsSql
-    pcAssoc = prepareCommand upsertAssociationSql
-    pcDelOther = prepareCommand deleteOtherAssociationsSql
-    rowsResult = catch do
-      portal = bindQuery pqFiles []
-      (rs, _) = executeQueryPortal portal 0
-      rs
-    rows = match rowsResult with
-      Left _   -> []
-      Right rs -> List.map Resolve.rowToFile rs
-    label = if dryRun then "[identify] " else "[resolve] "
-    _ = printLine (label ++ toText (List.size rows) ++ " unresolved file(s)")
-    seen = IO.ref 0
-    let
+  label = if dryRun then "[identify] " else "[resolve] "
+  runChunk lastId = 
+    myPg.singleIO (toClientConfig cfg) do
+      pqFiles = prepareQuery selectUnresolvedChunkSql
+      pqSearch = prepareQuery Tmdb.selectSearchSql
+      pcSearch = prepareCommand Tmdb.upsertSearchSql
+      pqDet = prepareQuery selectDetailsSql
+      pcDet = prepareCommand upsertDetailsSql
+      pcAssoc = prepareCommand upsertAssociationSql
+      pcDelOther = prepareCommand deleteOtherAssociationsSql
+      rowsResult = catch do
+        portal = bindQuery pqFiles (pobi (Some lastId))
+        (rs, _) = executeQueryPortal portal 0
+        rs
+      rows = match rowsResult with
+        Left f   ->
+          _ = printLine (label ++ "QUERY FAILED: " ++ Failure.message f)
+          []
+        Right rs -> List.map Resolve.rowToFile rs
       metaGo = cases
         { r } -> r
         { movieDetails tmdbId -> k } ->
@@ -4770,21 +4774,10 @@ Resolve.runWith dryRun cfg =
           _ = Resolve.writeMatch pcAssoc pcDelOther fileId tmdbId conf source
           handle k() with catalogGo
       runOne row =
-        use Nat % +
         outcome =
           handle handle Resolve.resolveOne dryRun token row with catalogGo
           with metaGo
-        _ = Resolve.printOutcome outcome
-        n = mutable.Ref.read seen + 1
-        _ = mutable.Ref.write seen n
-        if Universal.eq (n % 100) 0 then
-          printLine
-            ("[mem] resolve, "
-              ++ toText n
-              ++ " files, rss "
-              ++ toText rssMb()
-              ++ " MB")
-        else ()
+        Resolve.printOutcome outcome
       _ = Db.foreach_ runOne rows
       _ = PreparedQuery.close pqFiles
       _ = PreparedQuery.close pqSearch
@@ -4793,8 +4786,51 @@ Resolve.runWith dryRun cfg =
       _ = PreparedCommand.close pcDet
       _ = PreparedCommand.close pcAssoc
       _ = PreparedCommand.close pcDelOther
-      printLine
-        (if dryRun then "[identify] done (no writes)" else "[resolve] done")
+      match lastOf rows with
+        Some lastRow -> Some (Resolve.FileRow.fileId lastRow, List.size rows)
+        None         -> None
+  loop lastId done =
+    match runChunk lastId with
+      None -> done
+      Some (nextId, n) ->
+        _ =
+          printLine
+            (label
+              ++ "chunk done ("
+              ++ Nat.toText n
+              ++ " file(s), cursor at file_id "
+              ++ Int.toText nextId
+              ++ ", rss "
+              ++ Nat.toText rssMb()
+              ++ " MB)")
+        loop nextId (done + n)
+  total = loop +0 0
+  printLine
+    (label
+      ++ "done ("
+      ++ Nat.toText total
+      ++ " file(s)"
+      ++ (if dryRun then ", no writes)" else ")"))
+
+Resolve.selectUnresolvedChunkSql :
+  postgres.Query
+    r
+    (Int ->{g, g1} r)
+    (((((Int, Text), Float), Optional Text), Optional Int), Optional Int)
+Resolve.selectUnresolvedChunkSql =
+  use Codec optional text
+  use Text ++
+  sql
+    "SELECT f.file_id, f.original_name, f.duration_sec, f.hint_title, f.hint_year, f.hint_tmdb_id FROM files f LEFT JOIN associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.stage <> 'buffer' AND f.media_kind = 'movie' AND f.file_id > "
+    %% StatementBuilder.var bigint
+    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText resolveChunkSize)
+    |> typedQuery
+      (bigint
+        ~ text
+        ~ Codec.double
+        ~ optional text
+        ~ optional integer
+        ~ optional integer)
 
 Resolve.selectUnresolvedSql :
   postgres.Query
@@ -9896,33 +9932,33 @@ Tv.Resolve.run cfg = Tv.Resolve.runWith false cfg
 
 Tv.Resolve.runWith : Boolean -> Config ->{IO, Exception} ()
 Tv.Resolve.runWith dryRun cfg =
+  use Nat +
+  use Optional None
   use Text ++
   token = readTmdbToken cfg
-  myPg.singleIO (toClientConfig cfg) do
-    pqFiles = prepareQuery selectUnresolvedTvSql
-    pqSearch = prepareQuery Tv.Tmdb.selectSearchSql
-    pcSearch = prepareCommand Tv.Tmdb.upsertSearchSql
-    pqShow = prepareQuery selectShowSql
-    pcShow = prepareCommand upsertShowSql
-    pqSeason = prepareQuery selectSeasonSql
-    pcSeason = prepareCommand upsertSeasonSql
-    pcEp = prepareCommand upsertEpisodeSql
-    pcAssoc = prepareCommand upsertEpAssocSql
-    pcDel = prepareCommand deleteFileAssocSql
-    pqShowByImdb = prepareQuery selectShowByImdbSql
-    rows = match 
-      catch do
-        portal = bindQuery pqFiles []
+  label = if dryRun then "[tv-identify] " else "[tv-resolve] "
+  runChunk lastId = 
+    myPg.singleIO (toClientConfig cfg) do
+      pqFiles = prepareQuery selectUnresolvedTvChunkSql
+      pqSearch = prepareQuery Tv.Tmdb.selectSearchSql
+      pcSearch = prepareCommand Tv.Tmdb.upsertSearchSql
+      pqShow = prepareQuery selectShowSql
+      pcShow = prepareCommand upsertShowSql
+      pqSeason = prepareQuery selectSeasonSql
+      pcSeason = prepareCommand upsertSeasonSql
+      pcEp = prepareCommand upsertEpisodeSql
+      pcAssoc = prepareCommand upsertEpAssocSql
+      pcDel = prepareCommand deleteFileAssocSql
+      pqShowByImdb = prepareQuery selectShowByImdbSql
+      rowsResult = catch do
+        portal = bindQuery pqFiles (pobi (Some lastId))
         (rs, _) = executeQueryPortal portal 0
         rs
-     with
-      Left _   -> []
-      Right rs -> List.map Tv.Resolve.rowToFile rs
-    label = if dryRun then "[tv-identify] " else "[tv-resolve] "
-    _ =
-      printLine
-        (label ++ Nat.toText (List.size rows) ++ " unresolved episode file(s)")
-    let
+      rows = match rowsResult with
+        Left f   ->
+          _ = printLine (label ++ "QUERY FAILED: " ++ Failure.message f)
+          []
+        Right rs -> List.map Tv.Resolve.rowToFile rs
       metaGo = cases
         { r } -> r
         { searchShows title year -> k } ->
@@ -9964,9 +10000,55 @@ Tv.Resolve.runWith dryRun cfg =
       _ = PreparedCommand.close pcAssoc
       _ = PreparedCommand.close pcDel
       _ = PreparedQuery.close pqShowByImdb
-      printLine
-        (if dryRun then "[tv-identify] done (no writes)"
-        else "[tv-resolve] done")
+      match lastOf rows with
+        Some lastRow ->
+          Some (Tv.Resolve.FileRow.fileId lastRow, List.size rows)
+        None -> None
+  loop lastId done =
+    match runChunk lastId with
+      None -> done
+      Some (nextId, n) ->
+        _ =
+          printLine
+            (label
+              ++ "chunk done ("
+              ++ Nat.toText n
+              ++ " file(s), cursor at file_id "
+              ++ Int.toText nextId
+              ++ ", rss "
+              ++ Nat.toText rssMb()
+              ++ " MB)")
+        loop nextId (done + n)
+  total = loop +0 0
+  printLine
+    (label
+      ++ "done ("
+      ++ Nat.toText total
+      ++ " file(s)"
+      ++ (if dryRun then ", no writes)" else ")"))
+
+Tv.Resolve.selectUnresolvedTvChunkSql :
+  postgres.Query
+    r
+    (Int ->{g, g1} r)
+    ( ( ((((Int, Text), Optional Text), Optional Int), Optional Int),
+      Optional Text),
+      Text)
+Tv.Resolve.selectUnresolvedTvChunkSql =
+  use Codec optional text
+  use Text ++
+  sql
+    "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id, f.hint_imdb_id, f.original_path FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging' AND f.file_id > "
+    %% StatementBuilder.var bigint
+    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText resolveChunkSize)
+    |> typedQuery
+      (bigint
+        ~ text
+        ~ optional text
+        ~ optional integer
+        ~ optional integer
+        ~ optional text
+        ~ text)
 
 Tv.Resolve.selectUnresolvedTvSql :
   postgres.Query
