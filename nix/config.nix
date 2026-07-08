@@ -34,8 +34,8 @@ in
 
   paths = {
     intake  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Movies";
-    buffer  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TEST";
-    library = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Movies";
+    buffer  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Movies";
+    library = "/home/bismuth/NAS/video/_Movies";
 
     tvIntake  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Episodic";
     tvBuffer  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TEST_TV";
