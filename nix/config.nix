@@ -25,6 +25,20 @@ in
     user    = "postgres";
     port    = 5434;
     dataDir = "$HOME/.local/share/uniDork/postgres";
+
+    backup = {
+      # Must live on a different device than dataDir to survive disk death.
+      # NAS is correct here since PGDATA is on local disk.
+      dir = "/home/bismuth/NAS/video/HT_Profile/~Backup";
+
+      # How many timestamped dumps to keep. Older ones are pruned after each
+      # successful backup.
+      keep = 14;
+
+      # `pg-backup --auto` (used by the orchestrator before destructive verbs)
+      # is a no-op if a backup newer than this many hours already exists.
+      autoIntervalHours = 6;
+    };
   };
 
   cache = {

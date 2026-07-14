@@ -12,10 +12,13 @@ pkgs.writeShellApplication {
     snapshot
     mirror.unidork-log-change
     mirror.unidork-snapshot
+    postgres.pg-ensure
     postgres.pg-start
     postgres.pg-stop
     postgres.pg-connect
     postgres.pg-cleanup
+    postgres.pg-backup
+    postgres.pg-restore
   ];
   text = ''
     set -euo pipefail
@@ -62,6 +65,12 @@ pkgs.writeShellApplication {
     : "''${UNIDORK_GHCRTS:=${config.tuning.ghcRts}}"
     export UNIDORK_MEM_HIGH UNIDORK_MEM_MAX UNIDORK_GHCRTS
 
+    : "''${UNIDORK_BACKUP_DIR:=${config.database.backup.dir}}"
+    : "''${UNIDORK_BACKUP_KEEP:=${toString config.database.backup.keep}}"
+    : "''${UNIDORK_BACKUP_AUTO_HOURS:=${toString config.database.backup.autoIntervalHours}}"
+    : "''${UNIDORK_AUTO_BACKUP:=1}"
+    export UNIDORK_BACKUP_DIR UNIDORK_BACKUP_KEEP UNIDORK_BACKUP_AUTO_HOURS UNIDORK_AUTO_BACKUP
+
     export PGPORT="$UNIDORK_DB_PORT"
     export PGUSER="$UNIDORK_DB_USER"
     export PGDATABASE="$UNIDORK_DB_NAME"
@@ -93,10 +102,21 @@ pkgs.writeShellApplication {
 
     cmd="''${1:-help}"; shift || true
 
-    ensure_pg() {
-      if ! pg_isready -h "$PGHOST" -p "$PGPORT" -q 2>/dev/null; then
-        echo "[orchestrator] starting postgres..."
-        pg-start
+    # Every database-touching command routes through this. pg-ensure is
+    # idempotent: running server, stale pid, missing cluster, and missing
+    # database are all handled. It never fails because the db is "already
+    # running".
+    ensure_pg() { pg-ensure; }
+
+    # Throttled safety net taken before destructive verbs. Non-fatal on
+    # purpose: an unmounted backup volume should not block a rename you
+    # explicitly asked for, but you WILL be yelled at.
+    auto_backup() {
+      if [ "$UNIDORK_AUTO_BACKUP" = 1 ]; then
+        if ! pg-backup --auto; then
+          echo "[orchestrator] WARNING: auto-backup failed (backup root missing/unmounted?)." >&2
+          echo "[orchestrator] Proceeding anyway. Run 'unidork backup --init' with the volume mounted." >&2
+        fi
       fi
     }
 
@@ -108,25 +128,30 @@ pkgs.writeShellApplication {
     cmd_push() { unidork-push; }
     cmd_log_change() { unidork-log-change "$@"; }
     cmd_snapshot()   { unidork-snapshot; }
-    cmd_start()  { pg-start; }
+    cmd_start()  { pg-ensure; }
     cmd_stop()   { pg-stop; }
+
+    cmd_backup()  { ensure_pg; pg-backup "$@"; }
+    cmd_backups() { pg-backup --list; }
+    cmd_restore() { ensure_pg; pg-restore "$@"; }
 
     cmd_probe()    { ensure_pg; run_import probe-stage; }
     cmd_resolve()  { ensure_pg; run_import resolve; }
     cmd_identify() { ensure_pg; run_import identify; }
-    cmd_process()  { ensure_pg; run_import process "$@"; }
-    cmd_move()     { ensure_pg; run_import move "$@"; }
+    cmd_process()  { ensure_pg; auto_backup; run_import process "$@"; }
+    cmd_move()     { ensure_pg; auto_backup; run_import move "$@"; }
     cmd_subs()     { ensure_pg; run_import subs "$@"; }
 
     cmd_reconcile()      { ensure_pg; run_import reconcile; }
-    cmd_import_library() { ensure_pg; run_import import-library "$UNIDORK_PATH_CONFIG"; }
-    cmd_import_all()     { ensure_pg; run_import import-all "$UNIDORK_PATH_CONFIG"; }
+    cmd_import_library() { ensure_pg; auto_backup; run_import import-library "$UNIDORK_PATH_CONFIG"; }
+    cmd_import_all()     { ensure_pg; auto_backup; run_import import-all "$UNIDORK_PATH_CONFIG"; }
 
     cmd_rename() {
       ensure_pg
       if has_flag "--dry-run" "$@"; then
         run_import rename "$UNIDORK_FORMAT_MOVIE" --dry-run
       elif has_flag "--apply" "$@"; then
+        auto_backup
         run_import rename "$UNIDORK_FORMAT_MOVIE"
       else
         echo "rename is destructive. pass --apply to move files, or --dry-run to preview."
@@ -138,14 +163,15 @@ pkgs.writeShellApplication {
     cmd_tv_probe()    { ensure_pg; run_import tv-probe; }
     cmd_tv_resolve()  { ensure_pg; run_import tv-resolve; }
     cmd_tv_identify() { ensure_pg; run_import tv-identify; }
-    cmd_tv_process()  { ensure_pg; run_import tv-process "$@"; }
-    cmd_tv_move()     { ensure_pg; run_import tv-move "$@"; }
+    cmd_tv_process()  { ensure_pg; auto_backup; run_import tv-process "$@"; }
+    cmd_tv_move()     { ensure_pg; auto_backup; run_import tv-move "$@"; }
 
     cmd_tv_rename() {
       ensure_pg
       if has_flag "--dry-run" "$@"; then
         run_import tv-rename --dry-run
       elif has_flag "--apply" "$@"; then
+        auto_backup
         run_import tv-rename
       else
         echo "tv-rename is destructive. pass --apply to move files, or --dry-run to preview."
@@ -155,6 +181,7 @@ pkgs.writeShellApplication {
 
     cmd_process_all() {
       ensure_pg
+      auto_backup
       echo "[orchestrator] === movie process ==="
       run_import process
       echo ""
@@ -167,8 +194,9 @@ pkgs.writeShellApplication {
     }
 
     cmd_run_all() {
-      echo "[orchestrator] start -> import-library -> movie process -> tv process"
-      cmd_start
+      echo "[orchestrator] ensure -> backup -> import-library -> movie process -> tv process"
+      ensure_pg
+      auto_backup
       cmd_import_library
       cmd_process
       cmd_tv_process
@@ -222,6 +250,8 @@ SELECT '  tmdb tv searches:   ' || COUNT(*)::text FROM tmdb_tv_search_cache;
 SELECT '  season cache:       ' || COUNT(*)::text FROM tmdb_season_cache;
 SQL
       fi
+      echo "=== backups ==="
+      pg-backup --list 2>/dev/null | sed 's/^/  /' || echo "  (backup root not initialized: unidork backup --init)"
     }
 
     case "$cmd" in
@@ -230,6 +260,10 @@ SQL
       snapshot)            cmd_snapshot ;;
       start)          cmd_start ;;
       stop)           cmd_stop ;;
+
+      backup)              cmd_backup "$@" ;;
+      backups)             cmd_backups ;;
+      restore)             cmd_restore "$@" ;;
 
       probe|probe-stage)   cmd_probe ;;
       resolve)             cmd_resolve ;;
@@ -263,6 +297,18 @@ SQL
       help|--help|-h|"")
         cat <<EOF
 unidork - pipeline orchestrator
+
+DATABASE SAFETY
+  Every db-touching command routes through pg-ensure (idempotent: handles
+  already-running, stale pid after a crash, missing cluster, missing db).
+  Destructive verbs take a throttled auto-backup first (skipped if a backup
+  newer than $UNIDORK_BACKUP_AUTO_HOURS h exists; disable with UNIDORK_AUTO_BACKUP=0).
+
+  backup [--init|--list]   dump db -> $UNIDORK_BACKUP_DIR (verified, checksummed,
+                           keeps newest $UNIDORK_BACKUP_KEEP). --init once, with volume mounted.
+  backups                  list available dumps
+  restore <file|latest>    restore into a FRESH database (live db untouched)
+  restore <f> --swap       ...then swap names; old db kept as <name>_pre_restore_<ts>
 
 DRY RUN
   Every destructive verb accepts --dry-run: no file is created, moved, or
@@ -298,12 +344,12 @@ TV PIPELINE
 
 COMBINED
   process-all       movie process then tv process                       (DESTRUCTIVE)
-  run               import-library + movie process + tv process
+  run               backup + import-library + movie process + tv process
 
 UTILITY
   push              push to Unison Share + snapshot diff to git mirror
-  start | stop      postgres lifecycle
-  status            row counts across all tables
+  start | stop      postgres lifecycle (start == ensure, always safe)
+  status            row counts across all tables + backup inventory
   psql              interactive psql session
   clean-stage       truncate probe_cache
   logs              list log files

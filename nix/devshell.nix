@@ -14,10 +14,13 @@ pkgs.mkShell {
     fzf
     bat
 
+    postgres.pg-ensure
     postgres.pg-start
     postgres.pg-stop
     postgres.pg-connect
     postgres.pg-cleanup
+    postgres.pg-backup
+    postgres.pg-restore
 
     uniDork
     orchestrator
@@ -33,6 +36,10 @@ pkgs.mkShell {
     export UNIDORK_DB_PORT="${toString config.database.port}"
     export UNIDORK_DB_USER="${config.database.user}"
     export UNIDORK_DB_NAME="${config.database.name}"
+
+    export UNIDORK_BACKUP_DIR="${config.database.backup.dir}"
+    export UNIDORK_BACKUP_KEEP="${toString config.database.backup.keep}"
+    export UNIDORK_BACKUP_AUTO_HOURS="${toString config.database.backup.autoIntervalHours}"
 
     export UNIDORK_CACHE_FFPROBE="${config.cache.ffprobeDir}"
     export UNIDORK_CACHE_STAGE="${config.cache.stageDir}"
@@ -66,7 +73,10 @@ pkgs.mkShell {
     echo "  Movies:  unidork process | move | subs | identify | status"
     echo "  TV:      unidork tv-process | tv-identify"
     echo "  Both:    unidork run-all"
-    echo "  Utility: push | start | stop | clean-stage "
+    echo "  Safety:  unidork backup | backups | restore <file|latest> [--swap]"
+    echo "  Utility: push | start | stop | clean-stage"
+    echo ""
+    echo "  First time: unidork backup --init   (with the backup volume mounted)"
     echo ""
   '';
 }
