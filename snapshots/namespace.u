@@ -9062,6 +9062,8 @@ Tv.Rename.applyTv cfg dryRun =
                     []
                   Right rs -> rs
                 jobs = groupJobs rows
+                showNfos = chunkShowNfos pqShow jobs
+                seasons = chunkSeasons pqSeason jobs
                 renameGo = cases
                   { r } -> r
                   { priorTargetForCrc _ -> k } -> handle k None with renameGo
@@ -9094,8 +9096,8 @@ Tv.Rename.applyTv cfg dryRun =
                     handle
                       executeEpisode
                         dryRun
-                        pqShow
-                        pqSeason
+                        showNfos
+                        seasons
                         intakeRoot
                         bufferRoot
                         showFmt
@@ -9124,6 +9126,39 @@ Tv.Rename.applyTv cfg dryRun =
         total = loop +0 0
         printLine
           ("[tv-rename] done (" Text.++ Nat.toText total Text.++ " file(s))")
+
+Tv.Rename.chunkSeasons :
+  PreparedQuery r a Text -> [EpisodeJob] ->{Postgres} Map Text Season
+Tv.Rename.chunkSeasons pqSeason jobs =
+  use Optional None
+  pairs = List.distinct (List.map (j -> (showId j, EpisodeJob.season j)) jobs)
+  entry = cases
+    (sid, sea) ->
+      match readSeasonBodyWith pqSeason sid sea with
+        None -> None
+        Some body ->
+          match catch do unison_json_1_4_2.Decoder.run Season.fromJson body with
+            Right s -> Some (seasonKey sid sea, s)
+            Left _  -> None
+  Map.fromList (List.filterMap entry pairs)
+
+Tv.Rename.chunkShowNfos :
+  PreparedQuery r a Text -> [EpisodeJob] ->{Postgres} Map Text Text
+Tv.Rename.chunkShowNfos pqShow jobs =
+  use List map
+  pairs = List.distinct (map (j -> (showId j, showName j)) jobs)
+  render = cases
+    (sid, name) ->
+      txt =
+        match readShowBodyWith pqShow sid with
+          Optional.None -> minimalShowNfo sid name
+          Some body ->
+            match catch do
+              unison_json_1_4_2.Decoder.run ShowDetails.fromJson body with
+              Right d -> generateShowNfo d
+              Left _  -> minimalShowNfo sid name
+      (Nat.toText sid, txt)
+  Map.fromList (map render pairs)
 
 Tv.Rename.episodeNfoFor : Optional Season -> EpisodeJob -> ProbeResult -> Text
 Tv.Rename.episodeNfoFor seasonOpt job pr =
@@ -9161,8 +9196,8 @@ Tv.Rename.episodeNfoFor seasonOpt job pr =
 
 Tv.Rename.executeEpisode :
   Boolean
-  -> PreparedQuery r1 a1 Text
-  -> PreparedQuery r a Text
+  -> Map Text Text
+  -> Map Text Season
   -> Text
   -> Text
   -> [FormatPart]
@@ -9170,11 +9205,11 @@ Tv.Rename.executeEpisode :
   -> [FormatPart]
   -> [Text]
   -> EpisodeJob
-  ->{IO, Exception, Postgres, RenameCatalog} TvRenameOutcome
+  ->{IO, Exception, RenameCatalog} TvRenameOutcome
 Tv.Rename.executeEpisode
   dryRun
-  pqShow
-  pqSeason
+  showNfos
+  seasons
   intakeRoot
   bufferRoot
   showFmt
@@ -9184,12 +9219,12 @@ Tv.Rename.executeEpisode
   job =
   use Boolean not
   use Failure message
+  use Map get
   use Nat toInt
   use Optional None
   use ProbeResult sizeBytes
   use Text ++
   use Universal eq
-  use unison_json_1_4_2.Decoder run
   crc = EpisodeJob.crc32 job
   sourceText = EpisodeJob.originalPath job
   sourceFolderText = filePathText (parentDir (FilePath sourceText))
@@ -9198,7 +9233,7 @@ Tv.Rename.executeEpisode
     EpOutsideRoot sourceText intakeRoot
   else
     pjson = EpisodeJob.probeJson job
-    match catch do run ProbeResult.fromJson pjson with
+    match catch do unison_json_1_4_2.Decoder.run ProbeResult.fromJson pjson with
       Left f -> EpBadProbe sourceText (message f)
       Right pr ->
         showFolder = renderEpisode showFmt job pr
@@ -9264,21 +9299,12 @@ Tv.Rename.executeEpisode
                 else
                   if dryRun then EpWouldRename sourceText targetVideoText
                   else
-                    seasonBody =
-                      readSeasonBodyWith
-                        pqSeason showId (EpisodeJob.season job)
-                    seasonOpt = match seasonBody with
-                      None      -> None
-                      Some body ->
-                        match catch do run Season.fromJson body with
-                          Right s -> Some s
-                          Left _  -> None
-                    showNfoText = match readShowBodyWith pqShow showId with
-                      None      -> minimalShowNfo showId (showName job)
-                      Some body ->
-                        match catch do run ShowDetails.fromJson body with
-                          Right d -> generateShowNfo d
-                          Left _  -> minimalShowNfo showId (showName job)
+                    seasonOpt =
+                      get (seasonKey showId (EpisodeJob.season job)) seasons
+                    showNfoText =
+                      Optional.getOrElse
+                        (minimalShowNfo showId (showName job))
+                        (get (Nat.toText showId) showNfos)
                     epNfoText = episodeNfoFor seasonOpt job pr
                     fsOutcome = 
                       catch do
@@ -9437,6 +9463,12 @@ Tv.Rename.resolveEpisodeToken job pr tok =
         Some a -> channelsTag (AudioInfo.channels a)
         None   -> "0"
     _ -> ""
+
+Tv.Rename.seasonKey : Nat -> Nat -> Text
+Tv.Rename.seasonKey showId seasonNum =
+  use Nat toText
+  use Text ++
+  toText showId ++ ":" ++ toText seasonNum
 
 Tv.Rename.selectEpisodeFileIdsSql : postgres.Query r (Int ->{g, g1} r) Int
 Tv.Rename.selectEpisodeFileIdsSql =
