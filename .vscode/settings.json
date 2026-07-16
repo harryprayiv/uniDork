@@ -1,0 +1,1 @@
+{"[nix]":{"editor.defaultFormatter":"jnoortheen.nix-ide","editor.formatOnSave":false},"direnv.restart.automatic":true,"files.associations":{"*.u":"unison"},"nix.enableLanguageServer":true,"nix.serverPath":"nixd","nix.serverSettings":{"nixd":{"formatting":{"command":["nixfmt"]}}}}

@@ -6,10 +6,21 @@ in
 {
   inherit name;
 
-  # Where this codebase's git working copy and Unison project live.
-  # config.nix is the machine-facts file; absolute paths belong here.
-  # The Share slug is derived from `name` because they match today;
-  # split into its own binding if they ever diverge.
+  # ------------------------------------------------------------------
+  # TEMPLATE KNOB. This is the only thing a new project derived from
+  # this template should need to touch for editor integration.
+  # Available languages are defined in nix/ide.nix's registry; unknown
+  # names fail evaluation loudly.
+  # ------------------------------------------------------------------
+  ide = {
+    languages = [ "unison" "nix" ];
+
+    # Escape hatches for one-off project needs, so ide.nix itself never
+    # has to be edited per-project:
+    extraRecommendations = [ ];   # e.g. [ "tamasfe.even-better-toml" ]
+    extraSettings = { };          # merged last, wins over registry settings
+  };
+
   repo = {
     dir = "/home/bismuth/git/uniDork";
     unison = {

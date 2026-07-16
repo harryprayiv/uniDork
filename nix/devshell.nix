@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, orchestrator, snapshot, mirror }:
+{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, orchestrator, snapshot, mirror, ide }:
 
 pkgs.mkShell {
   name = "uniDork-devshell";
@@ -27,7 +27,9 @@ pkgs.mkShell {
     snapshot
     mirror.unidork-log-change
     mirror.unidork-snapshot
-  ];
+
+    ide.sync
+  ] ++ ide.tools;
 
   shellHook = ''
     export PGDATA="${config.database.dataDir}"
@@ -68,6 +70,8 @@ pkgs.mkShell {
     export PGDATABASE="$UNIDORK_DB_NAME"
     export PGHOST="$PGDATA"
 
+    unidork-ide-sync
+
     echo ""
     echo "  uniDork dev shell"
     echo "  Movies:  unidork process | move | subs | identify | status"
@@ -75,8 +79,6 @@ pkgs.mkShell {
     echo "  Both:    unidork run-all"
     echo "  Safety:  unidork backup | backups | restore <file|latest> [--swap]"
     echo "  Utility: push | start | stop | clean-stage"
-    echo ""
-    echo "  First time: unidork backup --init   (with the backup volume mounted)"
     echo ""
   '';
 }
