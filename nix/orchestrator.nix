@@ -138,7 +138,26 @@ pkgs.writeShellApplication {
     cmd_probe()    { ensure_pg; run_import probe-stage; }
     cmd_resolve()  { ensure_pg; run_import resolve; }
     cmd_identify() { ensure_pg; run_import identify; }
-    cmd_process()  { ensure_pg; auto_backup; run_import process "$@"; }
+
+    # Staged: probe, resolve, and rename each run as a SEPARATE
+    # unidork-import invocation, i.e. a fresh runtime heap and a fresh
+    # systemd scope per stage. The in-binary 'process' verb (all three in
+    # one heap) is deliberately no longer used.
+    cmd_process() {
+      ensure_pg
+      auto_backup
+      run_import probe-stage
+      run_import resolve
+      if has_flag "--dry-run" "$@"; then
+        run_import rename "$UNIDORK_FORMAT_MOVIE" --dry-run
+        echo "[process] dry run done. no files were created, moved, or deleted."
+      else
+        run_import rename "$UNIDORK_FORMAT_MOVIE"
+        run_import reconcile-stage
+        echo "[process] done. review the buffer, then: unidork move"
+      fi
+    }
+
     cmd_move()     { ensure_pg; auto_backup; run_import move "$@"; }
     cmd_subs()     { ensure_pg; run_import subs "$@"; }
 
@@ -163,8 +182,24 @@ pkgs.writeShellApplication {
     cmd_tv_probe()    { ensure_pg; run_import tv-probe; }
     cmd_tv_resolve()  { ensure_pg; run_import tv-resolve; }
     cmd_tv_identify() { ensure_pg; run_import tv-identify; }
-    cmd_tv_process()  { ensure_pg; auto_backup; run_import tv-process "$@"; }
     cmd_tv_move()     { ensure_pg; auto_backup; run_import tv-move "$@"; }
+
+    # Staged for the same reason as cmd_process: the tv pipeline was the
+    # one still running probe + resolve + rename in a single heap.
+    cmd_tv_process() {
+      ensure_pg
+      auto_backup
+      run_import tv-probe
+      run_import tv-resolve
+      if has_flag "--dry-run" "$@"; then
+        run_import tv-rename --dry-run
+        echo "[tv-process] dry run done. no files were created, moved, or deleted."
+      else
+        run_import tv-rename
+        run_import reconcile-stage
+        echo "[tv-process] done. review the TV buffer, then: unidork tv-move"
+      fi
+    }
 
     cmd_tv_rename() {
       ensure_pg
@@ -183,10 +218,10 @@ pkgs.writeShellApplication {
       ensure_pg
       auto_backup
       echo "[orchestrator] === movie process ==="
-      run_import process
+      cmd_process
       echo ""
       echo "[orchestrator] === tv process ==="
-      run_import tv-process
+      cmd_tv_process
       echo ""
       echo "[orchestrator] both pipelines done."
       echo "  review movie buffer: $UNIDORK_PATH_BUFFER"
@@ -318,11 +353,12 @@ DRY RUN
 MEMORY
   unidork-import runs inside a systemd user scope with
   MemoryHigh=$UNIDORK_MEM_HIGH / MemoryMax=$UNIDORK_MEM_MAX when a user
-  session bus is available. Override per-run with UNIDORK_MEM_HIGH,
-  UNIDORK_MEM_MAX, UNIDORK_GHCRTS.
+  session bus is available. process and tv-process run each stage (probe,
+  resolve, rename, sweep) as a separate invocation: fresh heap per stage.
+  Override per-run with UNIDORK_MEM_HIGH, UNIDORK_MEM_MAX, UNIDORK_GHCRTS.
 
 MOVIE PIPELINE
-  process [--dry-run]        probe + resolve + rename -> movie buffer   (DESTRUCTIVE without --dry-run)
+  process [--dry-run]        probe, resolve, rename -> buffer, each in its own heap (DESTRUCTIVE without --dry-run)
   probe                      probe movie intake -> files (stage=staging)
   resolve                    associate staging movie files -> tmdb movies
   identify                   read-only resolver report for movie intake
@@ -334,7 +370,7 @@ MOVIE PIPELINE
   import-all                 reconcile + import-library
 
 TV PIPELINE
-  tv-process [--dry-run]        probe + resolve + rename -> tv buffer   (DESTRUCTIVE without --dry-run)
+  tv-process [--dry-run]        tv-probe, tv-resolve, tv-rename -> tv buffer, each in its own heap (DESTRUCTIVE without --dry-run)
   tv-probe                      probe tv intake -> files
   tv-resolve                    associate staging episode files -> shows/episodes
   tv-identify                   read-only resolver report for tv intake

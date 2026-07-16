@@ -1,4 +1,7 @@
 quit
+compile cli ./bin/unidork-import
+update
+quit
 push @harryprayiv/uniDork
 quit
 compile cli ./bin/unidork-import
@@ -95,6 +98,3 @@ dependents lib.runarorama_postgres_2_5_1.postgres.session.singleIO
 names singleIO
 view singleIO
 names runIO
-dependencies singleIO
-view singleIO
-compile cli bin/unidork-import
