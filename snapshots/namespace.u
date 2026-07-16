@@ -5388,18 +5388,31 @@ Stage.partitionWorkDb :
 Stage.partitionWorkDb cfg work = 
   myPg.singleIO (toClientConfig cfg) do
     use List +:
+    use Nat % + toText
+    use Text ++
     pq = prepareQuery probeCacheFreshSql
     step acc item =
+      (n, out) = acc
       (_, videoPath) = item
+      n' = n + 1
+      _ =
+        if Universal.eq (n' % 500) 0 then
+          printLine
+            ("[probe] partition "
+              ++ toText n'
+              ++ " file(s), rss "
+              ++ toText rssMb()
+              ++ " MB")
+        else ()
       match fileStat videoPath with
-        Optional.None -> (0, item) +: acc
+        Optional.None -> (n', (0, item) +: out)
         Some (mt, sz) ->
           eff = effectiveMtime videoPath mt
-          if isFileCachedWith pq videoPath eff (Nat.toInt sz) then acc
-          else (sz, item) +: acc
-    out = List.foldLeft step [] work
+          if isFileCachedWith pq videoPath eff (Nat.toInt sz) then (n', out)
+          else (n', (sz, item) +: out)
+    (_, withSizes) = List.foldLeft step (0, []) work
     _ = PreparedQuery.close pq
-    sortBySize out
+    sortBySize withSizes
 
 Stage.probeCacheFreshSql :
   postgres.Query a (Text ->{g4, g5} Int ->{g2, g3} Int ->{g, g1} a) Int
