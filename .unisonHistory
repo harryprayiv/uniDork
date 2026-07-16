@@ -1,6 +1,13 @@
 quit
 compile cli ./bin/unidork-import
 update
+edit Tv.Stage.runProbeAtTv
+update
+edit Stage.runProbeAt
+update
+quit
+compile cli ./bin/unidork-import
+update
 quit
 push @harryprayiv/uniDork
 quit
@@ -91,10 +98,3 @@ add myPg.runIO
 update
 edit lib.runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
 upgrade runarorama_postgres_2_5_1 runarorama_postgres_2_5_1
-edit lib.runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
-view #vvpda3av85
-find runIO
-dependents lib.runarorama_postgres_2_5_1.postgres.session.singleIO
-names singleIO
-view singleIO
-names runIO
