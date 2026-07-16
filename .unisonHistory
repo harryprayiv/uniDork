@@ -1,6 +1,17 @@
 quit
 compile cli ./bin/unidork-import
 update
+delete.term Stage.selectFreshCacheSql Stage.cacheLoadChunk Stage.smallProbeThreshold Stage.partitionWork Stage.isCachedLocal Stage.cacheRowToPair
+delete.term Stage.selectFreshCacheChunkSql
+delete.term Stage.loadFreshCache
+update
+quit
+update
+edit Stage.runProbeAt
+update
+quit
+compile cli ./bin/unidork-import
+update
 edit Tv.Stage.runProbeAtTv
 update
 edit Stage.runProbeAt
@@ -87,14 +98,3 @@ view Rename.executeOne
 delete.term #4rqk96fvn3
 compile cli ./bin/unidork-import
 dependents myPg.runIO
-dependents myPg.singleIO
-update
-edit Db.createSchema Db.migrate Db.resetSchema Move.run Rename.runNew Resolve.runWith Stage.runProbeAt Tv.Db.createSchema Tv.Db.resetTvSchema Tv.Move.run Tv.Rename.applyTv Tv.Resolve.runWith Tv.Stage.runProbeAtTv uniDork.processBatch Versions.run
-update
-view lib.runarorama_postgres_2_5_1.postgres.session.withConnection
-version
-update.old
-add myPg.runIO
-update
-edit lib.runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
-upgrade runarorama_postgres_2_5_1 runarorama_postgres_2_5_1
