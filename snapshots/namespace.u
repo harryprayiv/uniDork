@@ -5013,6 +5013,9 @@ test> Stage.bitDepthFrom.test =
     , eq (bitDepthFrom None "") 8
     ]
 
+Stage.cacheLoadChunk : Nat
+Stage.cacheLoadChunk = 5000
+
 Stage.cacheRowToPair : ((Text, Int), Int) -> (Text, (Int, Int))
 Stage.cacheRowToPair = cases ((p, m), s) -> (p, (m, s))
 
@@ -5266,20 +5269,44 @@ Stage.isFileCachedWith pq sourcePath mtime sizeBytes =
         []     -> false
 
 Stage.loadFreshCache : Config ->{IO, Exception} Map Text (Int, Int)
-Stage.loadFreshCache cfg = myPg.singleIO (toClientConfig cfg) do
-  use Map fromList
-  use Text ++
-  pq = prepareQuery selectFreshCacheSql
-  rowsResult = catch do
-    portal = bindQuery pq []
-    (rs, _) = executeQueryPortal portal 0
-    rs
-  _ = PreparedQuery.close pq
-  match rowsResult with
-    Left f   ->
-      _ = printLine ("[probe] cache load failed: " ++ Failure.message f)
-      fromList []
-    Right rs -> fromList (List.map cacheRowToPair rs)
+Stage.loadFreshCache cfg = 
+  myPg.singleIO (toClientConfig cfg) do
+    use Text ++
+    pq = prepareQuery selectFreshCacheChunkSql
+    fetch cursor =
+      match 
+        catch do
+          portal = bindQuery pq (pt cursor)
+          (rs, _) = executeQueryPortal portal 0
+          rs
+       with
+        Left f ->
+          _ =
+            printLine
+              ("[probe] cache chunk load failed: " ++ Failure.message f)
+          []
+        Right rs -> rs
+    loop acc cursor n =
+      use List size
+      use Nat + < toText
+      rows = fetch cursor
+      match lastOf rows with
+        Optional.None -> acc
+        Some ((lastPath, _), _) ->
+          insertOne m = cases (k, v) -> Map.insert k v m
+          acc' = List.foldLeft insertOne acc (List.map cacheRowToPair rows)
+          n' = n + size rows
+          _ =
+            printLine
+              ("[probe] cache loaded "
+                ++ toText n'
+                ++ " row(s), rss "
+                ++ toText rssMb()
+                ++ " MB")
+          if size rows < cacheLoadChunk then acc' else loop acc' lastPath n'
+    result = loop (Map.fromList []) "" 0
+    _ = PreparedQuery.close pq
+    result
 
 Stage.newestNfoMtime : Text ->{IO} Int
 Stage.newestNfoMtime videoPath =
@@ -5355,6 +5382,24 @@ Stage.partitionWork cache work =
         else (n', (sz, item) +: out)
   (_, withSizes) = List.foldLeft step (0, []) work
   sortBySize withSizes
+
+Stage.partitionWorkDb :
+  Config -> [(a, Text)] ->{IO, Exception} [(Nat, (a, Text))]
+Stage.partitionWorkDb cfg work = 
+  myPg.singleIO (toClientConfig cfg) do
+    use List +:
+    pq = prepareQuery probeCacheFreshSql
+    step acc item =
+      (_, videoPath) = item
+      match fileStat videoPath with
+        Optional.None -> (0, item) +: acc
+        Some (mt, sz) ->
+          eff = effectiveMtime videoPath mt
+          if isFileCachedWith pq videoPath eff (Nat.toInt sz) then acc
+          else (sz, item) +: acc
+    out = List.foldLeft step [] work
+    _ = PreparedQuery.close pq
+    sortBySize out
 
 Stage.probeCacheFreshSql :
   postgres.Query a (Text ->{g4, g5} Int ->{g2, g3} Int ->{g, g1} a) Int
@@ -5577,7 +5622,7 @@ Stage.runProbeAt : Config -> Text -> Text ->{IO, Exception} ()
 Stage.runProbeAt cfg rootText stage =
   use Db foreach_
   use List foldLeft size
-  use Nat + - toText
+  use Nat + - <= toText
   use PreparedCommand close
   use Text ++
   jobs = probeJobs (tuning cfg)
@@ -5593,8 +5638,9 @@ Stage.runProbeAt cfg rootText stage =
           ++ "): "
           ++ toText (size work)
           ++ " video(s) found")
-    cache = loadFreshCache cfg
-    toProbe = partitionWork cache work
+    toProbe =
+      if size work <= smallProbeThreshold then partitionWorkDb cfg work
+      else partitionWork (loadFreshCache cfg) work
     sumStep acc = cases (b, _) -> acc + b
     totalBytes = foldLeft sumStep 0 toProbe
     totalFiles = size toProbe
@@ -5641,11 +5687,25 @@ Stage.runRhashCrc32 path =
       if code Nat.== 0 then Right (Text.toUppercase (Text.trim out))
       else Left ("rhash exit " Text.++ Nat.toText code)
 
+Stage.selectFreshCacheChunkSql :
+  postgres.Query r (Text ->{g, g1} r) ((Text, Int), Int)
+Stage.selectFreshCacheChunkSql =
+  use Codec text
+  use Text ++
+  sql
+    "SELECT pc.original_path, pc.mtime, pc.size_bytes FROM probe_cache pc JOIN files f ON f.file_id = pc.file_id WHERE f.stage <> 'missing' AND pc.original_path > "
+    %% StatementBuilder.var text
+    %% sql (" ORDER BY pc.original_path LIMIT " ++ Nat.toText cacheLoadChunk)
+    |> typedQuery (text ~ bigint ~ bigint)
+
 Stage.selectFreshCacheSql : postgres.Query r r ((Text, Int), Int)
 Stage.selectFreshCacheSql =
   sql
     "SELECT pc.original_path, pc.mtime, pc.size_bytes FROM probe_cache pc JOIN files f ON f.file_id = pc.file_id WHERE f.stage <> 'missing'"
     |> typedQuery (Codec.text ~ bigint ~ bigint)
+
+Stage.smallProbeThreshold : Nat
+Stage.smallProbeThreshold = 500
 
 Stage.sortBySize : [(Nat, (a, Text))] -> [(Nat, (a, Text))]
 Stage.sortBySize items =
@@ -10331,7 +10391,7 @@ Tv.Stage.runProbeAtTv : Config -> Text -> Text ->{IO, Exception} ()
 Tv.Stage.runProbeAtTv cfg rootText stage =
   use Db foreach_
   use List foldLeft map size
-  use Nat + - toText
+  use Nat + - <= toText
   use PreparedCommand close
   use Text ++
   jobs = probeJobs (tuning cfg)
@@ -10347,8 +10407,9 @@ Tv.Stage.runProbeAtTv cfg rootText stage =
           ++ "): "
           ++ toText (size work)
           ++ " video(s) found")
-    cache = loadFreshCache cfg
-    toProbe = partitionWork cache work
+    toProbe =
+      if size work <= smallProbeThreshold then partitionWorkDb cfg work
+      else partitionWork (loadFreshCache cfg) work
     sumStep acc = cases (b, _) -> acc + b
     totalBytes = foldLeft sumStep 0 toProbe
     totalFiles = size toProbe
