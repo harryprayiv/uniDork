@@ -44,11 +44,11 @@ in
 
       # How many timestamped dumps to keep. Older ones are pruned after each
       # successful backup.
-      keep = 14;
+      keep = 10;
 
       # `pg-backup --auto` (used by the orchestrator before destructive verbs)
       # is a no-op if a backup newer than this many hours already exists.
-      autoIntervalHours = 6;
+      autoIntervalHours = 2;
     };
   };
 
@@ -63,8 +63,8 @@ in
     library = "/home/bismuth/NAS/video/_Movies";
 
     tvIntake  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/renameQue/Episodic";
-    tvBuffer  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/TEST_TV";
-    tvLibrary = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Episodic";
+    tvBuffer  = "/home/bismuth/NAS/video/_Unsorted/torrents/Complete/AMC/Episodic";
+    tvLibrary = "/home/bismuth/NAS/video/_Episodic";
   };
 
   rename = {
