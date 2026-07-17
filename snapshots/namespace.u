@@ -6167,7 +6167,7 @@ Subs.Fix.missingLangs folder base langs =
 Subs.Fix.run : Config -> Boolean ->{IO, Exception} ()
 Subs.Fix.run cfg dryRun =
   use List size
-  use Nat + toText
+  use Nat toText
   use Optional None
   use Text ++
   bufferRoot = buffer (paths cfg)
@@ -6193,42 +6193,68 @@ Subs.Fix.run cfg dryRun =
           _ =
             if dryRun then printLine "[subs] DRY RUN: no files will be created"
             else ()
-          myPg.singleIO (toClientConfig cfg) do
-            pqRows = prepareQuery selectBufferMoviesSql
-            rowsResult = catch do
-              portal = bindQuery pqRows []
-              (rs, _) = executeQueryPortal portal 0
-              rs
-            rows = match rowsResult with
+          fetchChunk lastId = myPg.singleIO (toClientConfig cfg) do
+            pqRows = prepareQuery selectBufferMoviesChunkSql
+            rows = match 
+              catch do
+                portal = bindQuery pqRows (pobi (Some lastId))
+                (rs, _) = executeQueryPortal portal 0
+                rs
+             with
               Left f   ->
                 _ = printLine ("[subs] QUERY FAILED: " ++ Failure.message f)
                 []
               Right rs -> rs
-            _ =
-              printLine
-                ("[subs] "
-                  ++ toText (size rows)
-                  ++ " buffer movie(s) to check")
-            step counts row =
-              (checked, fetched) = counts
-              n = checkOneRow tokenOpt subLangs delayMs dryRun row
-              (checked + 1, fetched + n)
-            (checked, fetched) = List.foldLeft step (0, 0) rows
             _ = PreparedQuery.close pqRows
-            printLine
-              ("[subs] done ("
-                ++ toText checked
-                ++ " checked, "
-                ++ toText fetched
-                ++ " with missing sidecars)")
+            rows
+          loop lastId checked fetched =
+            use Nat +
+            rows = fetchChunk lastId
+            match lastOf rows with
+              None -> (checked, fetched)
+              Some (((((fid, _), _), _), _), _) ->
+                step counts = cases
+                  (((((_, folder), name), imdb), tmdb), yr) ->
+                    (c, f) = counts
+                    n =
+                      checkOneRow
+                        tokenOpt
+                        subLangs
+                        delayMs
+                        dryRun
+                        ((((folder, name), imdb), tmdb), yr)
+                    (c + 1, f + n)
+                (c, f) = List.foldLeft step (checked, fetched) rows
+                _ =
+                  printLine
+                    ("[subs] chunk done ("
+                      ++ toText (size rows)
+                      ++ " movie(s), rss "
+                      ++ toText rssMb()
+                      ++ " MB)")
+                loop fid c f
+          (checked, fetched) = loop +0 0 0
+          printLine
+            ("[subs] done ("
+              ++ toText checked
+              ++ " checked, "
+              ++ toText fetched
+              ++ " with missing sidecars)")
 
-Subs.Fix.selectBufferMoviesSql :
-  postgres.Query r r ((((Text, Text), Optional Text), Int), Optional Int)
-Subs.Fix.selectBufferMoviesSql =
+Subs.Fix.selectBufferMoviesChunkSql :
+  postgres.Query
+    r
+    (Int ->{g, g1} r)
+    (((((Int, Text), Text), Optional Text), Int), Optional Int)
+Subs.Fix.selectBufferMoviesChunkSql =
   use Codec optional text
+  use Text ++
   sql
-    "SELECT f.proposed_folder, f.proposed_name, m.imdb_id, m.tmdb_id, m.year FROM files f JOIN associations a ON a.file_id = f.file_id JOIN movies m ON m.tmdb_id = a.tmdb_id WHERE f.stage = 'buffer' AND f.media_kind = 'movie' AND f.proposed_folder IS NOT NULL AND f.proposed_name IS NOT NULL ORDER BY f.file_id"
-    |> typedQuery (text ~ text ~ optional text ~ integer ~ optional integer)
+    "SELECT f.file_id, f.proposed_folder, f.proposed_name, m.imdb_id, m.tmdb_id, m.year FROM files f JOIN associations a ON a.file_id = f.file_id JOIN movies m ON m.tmdb_id = a.tmdb_id WHERE f.stage = 'buffer' AND f.media_kind = 'movie' AND f.proposed_folder IS NOT NULL AND f.proposed_name IS NOT NULL AND f.file_id > "
+    %% StatementBuilder.var bigint
+    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText subsChunkSize)
+    |> typedQuery
+      (bigint ~ text ~ text ~ optional text ~ integer ~ optional integer)
 
 Subs.freeUndPath : FilePath -> Text -> Text ->{IO, Exception} Optional FilePath
 Subs.freeUndPath targetFolder base ext =
