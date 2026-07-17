@@ -1557,16 +1557,18 @@ kernel.mem.rssMb = do
   isNat t = match fromText t with
     Some _ -> true
     None   -> false
-  match catch do readFileUtf8 (FilePath "/proc/self/status") with
-    Left _    -> 0
-    Right txt ->
-      match find (l -> startsWith "VmRSS:" l) (lines txt) with
-        None   -> 0
-        Some l ->
-          toks = splitMany [?\s, ?\t] l
-          match find isNat toks with
-            Some kb -> Optional.getOrElse 0 (fromText kb) / 1024
-            None    -> 0
+  match catch do proc.execute "cat" ["/proc/self/status"] with
+    Left _               -> 0
+    Right (code, out, _) ->
+      if Universal.eq code 0 then
+        match find (l -> startsWith "VmRSS:" l) (lines out) with
+          None   -> 0
+          Some l ->
+            toks = splitMany [?\s, ?\t] l
+            match find isNat toks with
+              Some kb -> Optional.getOrElse 0 (fromText kb) / 1024
+              None    -> 0
+      else 0
 
 kernel.proc.execute : Text -> [Text] ->{IO, Exception} (Nat, Text, Text)
 kernel.proc.execute cmd cmdArgs =
@@ -4355,7 +4357,7 @@ Rename.shrink needle replacement t =
     |> replaceAll needle replacement
 
 Rename.sweepChunkSize : Nat
-Rename.sweepChunkSize = 500
+Rename.sweepChunkSize = 200
 
 Rename.sweepMissing : Config ->{IO, Exception} ()
 Rename.sweepMissing cfg = myPg.singleIO (toClientConfig cfg) do
@@ -4374,6 +4376,7 @@ Rename.sweepStaleStaging cfg =
   use Nat + toText
   use Optional None
   use Text ++
+  use myPg singleIO
   intakeRootText = intake (paths cfg)
   tvIntakeRootText = tvIntake (paths cfg)
   movieMountUp = match deviceOf intakeRootText with
@@ -4391,11 +4394,10 @@ Rename.sweepStaleStaging cfg =
         ("[sweep-stale] tv intake root not mounted, refusing: "
           ++ tvIntakeRootText)
     else
-      myPg.singleIO (toClientConfig cfg) do
+      runChunk lastId = singleIO (toClientConfig cfg) do
         pqRows = prepareQuery sweepStaleStagingChunkSql
         pcRetire = prepareCommand retireMissingSql
-        pcCleanCache = prepareCommand cleanOrphanCacheSql
-        fetch lastId = match 
+        rows = match 
           catch do
             portal = bindQuery pqRows (pobi (Some lastId))
             (rs, _) = executeQueryPortal portal 0
@@ -4412,25 +4414,36 @@ Rename.sweepStaleStaging cfg =
               _ = catch do bindAndExecuteCommand pcRetire (pt path)
               _ = printLine ("  retired (source gone): " ++ path)
               n + 1
-        loop lastId checked retired =
-          rows = fetch lastId
-          match lastOf rows with
-            None          -> (checked, retired)
-            Some (fid, _) ->
-              r = List.foldLeft step 0 rows
-              loop fid (checked + List.size rows) (retired + r)
-        (checked, retired) = loop +0 0 0
-        _ = catch do bindAndExecuteCommand pcCleanCache []
-        _ = printLine "[sweep-stale] cleared orphaned probe_cache rows"
+        r = List.foldLeft step 0 rows
         _ = PreparedQuery.close pqRows
         _ = PreparedCommand.close pcRetire
-        _ = PreparedCommand.close pcCleanCache
-        printLine
-          ("[sweep-stale] checked "
-            ++ toText checked
-            ++ " row(s), retired "
-            ++ toText retired
-            ++ " to stage='missing'")
+        match lastOf rows with
+          None          -> None
+          Some (fid, _) -> Some (fid, List.size rows, r)
+      loop lastId checked retired =
+        match runChunk lastId with
+          None -> (checked, retired)
+          Some (fid, n, r) ->
+            _ =
+              printLine
+                ("[sweep-stale] chunk done ("
+                  ++ toText n
+                  ++ " row(s), rss "
+                  ++ toText rssMb()
+                  ++ " MB)")
+            loop fid (checked + n) (retired + r)
+      (checked, retired) = loop +0 0 0
+      _ = singleIO (toClientConfig cfg) do
+        pcCleanCache = prepareCommand cleanOrphanCacheSql
+        _ = catch do bindAndExecuteCommand pcCleanCache []
+        PreparedCommand.close pcCleanCache
+      _ = printLine "[sweep-stale] cleared orphaned probe_cache rows"
+      printLine
+        ("[sweep-stale] checked "
+          ++ toText checked
+          ++ " row(s), retired "
+          ++ toText retired
+          ++ " to stage='missing'")
 
 Rename.sweepStaleStagingChunkSql :
   postgres.Query r (Int ->{g, g1} r) (Int, Text)
@@ -4602,9 +4615,6 @@ Resolve.printOutcome = cases
       ("  file " Text.++ Int.toText fid Text.++ " -> no confident match")
   SearchError fid err ->
     printLine (Text.join "" ["  file ", Int.toText fid, " -> error: ", err])
-
-Resolve.resolveChunkSize : Nat
-Resolve.resolveChunkSize = 100
 
 Resolve.resolveOne :
   Boolean
@@ -5324,36 +5334,46 @@ Stage.parseNatString = cases
   Optional.None -> Optional.None
   Some s        -> Nat.fromText (Text.trim s)
 
+Stage.partitionSessionSize : Nat
+Stage.partitionSessionSize = 100
+
 Stage.partitionWorkDb :
   Config -> [(a, Text)] ->{IO, Exception} [(Nat, (a, Text))]
-Stage.partitionWorkDb cfg work = 
-  myPg.singleIO (toClientConfig cfg) do
-    use List +:
-    use Nat % + toText
-    use Text ++
-    pq = prepareQuery probeCacheFreshSql
-    step acc item =
-      (n, out) = acc
-      (_, videoPath) = item
-      n' = n + 1
+Stage.partitionWorkDb cfg work =
+  use List +: size
+  use Nat + toText
+  total = size work
+  groups = List.chunk partitionSessionSize work
+  runGroup grp = 
+    myPg.singleIO (toClientConfig cfg) do
+      pq = prepareQuery probeCacheFreshSql
+      step out item =
+        (_, videoPath) = item
+        match fileStat videoPath with
+          Optional.None -> (0, item) +: out
+          Some (mt, sz) ->
+            eff = effectiveMtime videoPath mt
+            if isFileCachedWith pq videoPath eff (Nat.toInt sz) then out
+            else (sz, item) +: out
+      out = List.foldLeft step [] grp
+      _ = PreparedQuery.close pq
+      out
+  goGroups acc n = cases
+    [] -> acc
+    g +: rest ->
+      out = runGroup g
+      n' = n + size g
       _ =
-        if Universal.eq (n' % 500) 0 then
-          printLine
-            ("[probe] partition "
-              ++ toText n'
-              ++ " file(s), rss "
-              ++ toText rssMb()
-              ++ " MB")
-        else ()
-      match fileStat videoPath with
-        Optional.None -> (n', (0, item) +: out)
-        Some (mt, sz) ->
-          eff = effectiveMtime videoPath mt
-          if isFileCachedWith pq videoPath eff (Nat.toInt sz) then (n', out)
-          else (n', (sz, item) +: out)
-    (_, withSizes) = List.foldLeft step (0, []) work
-    _ = PreparedQuery.close pq
-    sortBySize withSizes
+        printLine
+          ("[probe] partition "
+            Text.++ toText n'
+            Text.++ "/"
+            Text.++ toText total
+            Text.++ " file(s), rss "
+            Text.++ toText rssMb()
+            Text.++ " MB")
+      goGroups (acc List.++ out) n' rest
+  sortBySize (goGroups [] 0 groups)
 
 Stage.probeCacheFreshSql :
   postgres.Query a (Text ->{g4, g5} Int ->{g2, g3} Int ->{g, g1} a) Int
@@ -5370,7 +5390,7 @@ Stage.probeCacheFreshSql =
     |> typedQuery bigint
 
 Stage.probeConnChunks : Nat
-Stage.probeConnChunks = 10
+Stage.probeConnChunks = 4
 
 test> Stage.probeJsonRoundtrip.test =
   match 
@@ -10064,7 +10084,7 @@ Tv.Resolve.selectUnresolvedTvChunkSql =
   sql
     "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id, f.hint_imdb_id, f.original_path FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging' AND f.file_id > "
     %% StatementBuilder.var bigint
-    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText resolveChunkSize)
+    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText partitionSessionSize)
     |> typedQuery
       (bigint
         ~ text
@@ -10265,9 +10285,6 @@ Tv.Stage.isSampleName n = match Text.indexOf "sample" (Text.toLowercase n) with
   Some _        -> true
   Optional.None -> false
 
-Tv.Stage.maxDepth : Nat
-Tv.Stage.maxDepth = 4
-
 Tv.Stage.relFolders : Text -> Text -> [Text]
 Tv.Stage.relFolders root fullPath =
   use List reverse
@@ -10357,7 +10374,7 @@ Tv.Stage.runProbeAtTv cfg rootText stage =
     counter = IO.ref (0, 0)
     startEpoch = epochSeconds()
     chunks = List.chunk jobs toProbe
-    groups = List.chunk probeConnChunks chunks
+    groups = List.chunk maxDepth chunks
     runGroup group = myPg.singleIO (toClientConfig cfg) do
       pcFiles = prepareCommand Tv.Stage.upsertFileSql
       pcGate = prepareCommand upsertProbeCacheSql
