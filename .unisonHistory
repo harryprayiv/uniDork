@@ -1,5 +1,14 @@
 quit
 compile cli ./bin/unidork-import
+delete.term Subs.Fix.selectBufferMoviesSql
+update
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+quit
+compile cli ./bin/unidork-import
 update
 delete.term Stage.selectFreshCacheSql Stage.cacheLoadChunk Stage.smallProbeThreshold Stage.partitionWork Stage.isCachedLocal Stage.cacheRowToPair
 delete.term Stage.selectFreshCacheChunkSql
@@ -89,12 +98,3 @@ run sweepMissing
 compile cli ./bin/unidork-import
 run sweepMissing
 run Rename.sweepMissing
-update
-run Rename.sweepMissing
-update
-view RenameCatalog
-view runStep
-view Rename.executeOne
-delete.term #4rqk96fvn3
-compile cli ./bin/unidork-import
-dependents myPg.runIO
