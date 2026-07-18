@@ -4360,9 +4360,6 @@ Rename.shrink needle replacement t =
     |> replaceAll needle replacement
     |> replaceAll needle replacement
 
-Rename.sweepChunkSize : Nat
-Rename.sweepChunkSize = 200
-
 Rename.sweepMissing : Config ->{IO, Exception} ()
 Rename.sweepMissing cfg = myPg.singleIO (toClientConfig cfg) do
   pc = prepareCommand sweepMissingSql
@@ -4632,6 +4629,9 @@ Resolve.printOutcome = cases
       ("  file " Text.++ Int.toText fid Text.++ " -> no confident match")
   SearchError fid err ->
     printLine (Text.join "" ["  file ", Int.toText fid, " -> error: ", err])
+
+Resolve.resolveChunkSize : Nat
+Resolve.resolveChunkSize = 100
 
 Resolve.resolveOne :
   Boolean
@@ -5351,9 +5351,6 @@ Stage.parseNatString = cases
   Optional.None -> Optional.None
   Some s        -> Nat.fromText (Text.trim s)
 
-Stage.partitionSessionSize : Nat
-Stage.partitionSessionSize = 100
-
 Stage.partitionWorkDb :
   Config -> [(a, Text)] ->{IO, Exception} [(Nat, (a, Text))]
 Stage.partitionWorkDb cfg work =
@@ -5405,9 +5402,6 @@ Stage.probeCacheFreshSql =
     %% var bigint
     %% sql " AND f.stage <> 'missing'"
     |> typedQuery bigint
-
-Stage.probeConnChunks : Nat
-Stage.probeConnChunks = 4
 
 test> Stage.probeJsonRoundtrip.test =
   match 
@@ -10142,7 +10136,7 @@ Tv.Resolve.selectUnresolvedTvChunkSql =
   sql
     "SELECT f.file_id, f.original_name, f.hint_title, f.hint_year, f.hint_show_tmdb_id, f.hint_imdb_id, f.original_path FROM files f LEFT JOIN episode_associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.media_kind = 'episode' AND f.stage = 'staging' AND f.file_id > "
     %% StatementBuilder.var bigint
-    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText partitionSessionSize)
+    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText resolveChunkSize)
     |> typedQuery
       (bigint
         ~ text
@@ -10342,6 +10336,9 @@ Tv.Stage.isSampleName : Text -> Boolean
 Tv.Stage.isSampleName n = match Text.indexOf "sample" (Text.toLowercase n) with
   Some _        -> true
   Optional.None -> false
+
+Tv.Stage.maxDepth : Nat
+Tv.Stage.maxDepth = 4
 
 Tv.Stage.relFolders : Text -> Text -> [Text]
 Tv.Stage.relFolders root fullPath =
