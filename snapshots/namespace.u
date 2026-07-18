@@ -2289,9 +2289,11 @@ myPg.singleIO cfg p =
     TcpConnect.runIO do
       TcpConnect.connect
         (PostgresClientConfig.host cfg) (PostgresClientConfig.port cfg)
-  result = myPg.withConnection cfg conn p
-  Connection.close conn
-  result
+  result = catch do myPg.withConnection cfg conn p
+  _ = catch do Connection.close conn
+  match result with
+    Right r -> r
+    Left f  -> Exception.raise f
 
 myPg.withConnection :
   PostgresClientConfig
@@ -7814,13 +7816,14 @@ Tv.Move.mergeTree src dst =
   _ = Db.foreach_ processEntry entries
   rmdirFolder src
 
-Tv.Move.moveShow :
-  Boolean -> Text -> FilePath ->{IO, Exception, TvMoveCatalog} ()
-Tv.Move.moveShow dryRun libraryRoot folder =
+Tv.Move.moveShow : Config -> Boolean -> Text -> FilePath ->{IO, Exception} ()
+Tv.Move.moveShow cfg dryRun libraryRoot folder =
   use Boolean not
-  use List size
+  use Db foreach_
+  use List chunk size
   use Nat - toText
   use Text ++
+  win = partitionSession (tuning cfg)
   showName = filePathBasename folder
   srcText = filePathText folder
   dstText = libraryRoot ++ "/" ++ showName
@@ -7830,7 +7833,8 @@ Tv.Move.moveShow dryRun libraryRoot folder =
   else
     videoPaths = collectVideoFiles folder
     _ = printLine ("  " ++ toText (size videoPaths) ++ " video file(s)")
-    verified = List.map verifyEpisode videoPaths
+    verifyWindow w = withCatalog cfg do List.map verifyEpisode w
+    verified = List.flatMap verifyWindow (chunk win videoPaths)
     verifiedCount = size (List.filter (cases (_, ok, _) -> ok) verified)
     _ =
       printLine
@@ -7869,7 +7873,8 @@ Tv.Move.moveShow dryRun libraryRoot folder =
         applyOne = cases
           (oldPath, ok, identOpt) ->
             updateEpisode srcText dstText oldPath ok identOpt
-        _ = Db.foreach_ applyOne verified
+        updateWindow w = withCatalog cfg do foreach_ applyOne w
+        _ = foreach_ updateWindow (chunk win verified)
         printLine ("  promoted -> " ++ dstText)
 
 Tv.Move.rebasePath : Text -> Text -> Text -> Text
@@ -7882,13 +7887,13 @@ Tv.Move.run : Config -> Optional Text -> Boolean ->{IO, Exception} ()
 Tv.Move.run cfg maybeFolderName dryRun =
   use Db foreach_
   use List size
+  use Text ++
   use Universal eq
-  use myPg singleIO
   bufferRoot = tvBuffer (paths cfg)
   libraryRoot = tvLibrary (paths cfg)
   bufferFp = FilePath bufferRoot
   if Boolean.not (isDirectory bufferFp) then
-    printLine ("tv buffer not found: " Text.++ bufferRoot)
+    printLine ("tv buffer not found: " ++ bufferRoot)
   else
     _ =
       if dryRun then
@@ -7897,7 +7902,6 @@ Tv.Move.run cfg maybeFolderName dryRun =
     folders =
       match maybeFolderName with
         Some name ->
-          use Text ++
           trimmed = Text.trim name
           bad = List.any (b -> eq b trimmed) ["", ".", ".."]
           if bad then
@@ -7925,8 +7929,8 @@ Tv.Move.run cfg maybeFolderName dryRun =
     _ =
       printLine
         ("[tv-move] "
-          Text.++ Nat.toText (size folders)
-          Text.++ " show folder(s) to promote")
+          ++ Nat.toText (size folders)
+          ++ " show folder(s) to promote")
     if eq (size folders) 0 then ()
     else
       _ = if dryRun then () else sweepPartial libraryRoot
@@ -7934,42 +7938,8 @@ Tv.Move.run cfg maybeFolderName dryRun =
       total = size folders
       counter = IO.ref (0, 0)
       startEpoch = epochSeconds()
-      moveGo = cases
-        { r } -> r
-        { identityForEpisode path -> k } ->
-          ident = singleIO (toClientConfig cfg) do
-            pqIdent = prepareQuery selectFileByPathSql
-            found = loadIdentity pqIdent path
-            _ = PreparedQuery.close pqIdent
-            found
-          handle k ident with moveGo
-        { updateEpisodePathById newPath newName crc sz -> k } ->
-          use List ++
-          _ = 
-            singleIO (toClientConfig cfg) do
-              pcById = prepareCommand updateFilePathSql
-              _ = 
-                catch do
-                  bindAndExecuteCommand
-                    pcById
-                    (pt newPath ++ pt newName ++ pt crc ++ pobi (Some sz))
-              PreparedCommand.close pcById
-          handle k() with moveGo
-        { updateEpisodePathByName newPath newName oldPath -> k } ->
-          use List ++
-          _ = 
-            singleIO (toClientConfig cfg) do
-              pcByName = prepareCommand updatePathSql
-              _ = 
-                catch do
-                  bindAndExecuteCommand
-                    pcByName (pt newPath ++ pt newName ++ pt oldPath)
-              PreparedCommand.close pcByName
-          handle k() with moveGo
       safeMove folder =
-        use Text ++
-        outcome = 
-          catch do handle moveShow dryRun libraryRoot folder with moveGo
+        outcome = catch do moveShow cfg dryRun libraryRoot folder
         _ = match outcome with
           Right _ -> ()
           Left f  -> printLine ("  SHOW FAILED: " ++ Failure.message f)
@@ -8084,6 +8054,36 @@ Tv.Move.verifyEpisode oldPath =
           Some (_, sz) ->
             toText (FileIdentity.sizeBytes ident) == toText (Nat.toInt sz)
       (oldPath, diskOk, Some ident)
+
+Tv.Move.withCatalog :
+  Config -> '{IO, Exception, TvMoveCatalog} a ->{IO, Exception} a
+Tv.Move.withCatalog cfg body = 
+  myPg.singleIO (toClientConfig cfg) do
+    use List ++
+    pqIdent = prepareQuery selectFileByPathSql
+    pcById = prepareCommand updateFilePathSql
+    pcByName = prepareCommand updatePathSql
+    go = cases
+      { r } -> r
+      { identityForEpisode path -> k } ->
+        handle k (loadIdentity pqIdent path) with go
+      { updateEpisodePathById newPath newName crc sz -> k } ->
+        _ = 
+          catch do
+            bindAndExecuteCommand
+              pcById (pt newPath ++ pt newName ++ pt crc ++ pobi (Some sz))
+        handle k() with go
+      { updateEpisodePathByName newPath newName oldPath -> k } ->
+        _ = 
+          catch do
+            bindAndExecuteCommand
+              pcByName (pt newPath ++ pt newName ++ pt oldPath)
+        handle k() with go
+    result = handle body() with go
+    _ = PreparedQuery.close pqIdent
+    _ = PreparedCommand.close pcById
+    _ = PreparedCommand.close pcByName
+    result
 
 Tv.Nfo.episodeBlock :
   Text
