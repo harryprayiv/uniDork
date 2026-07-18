@@ -1,5 +1,20 @@
 quit
 compile cli ./bin/unidork-import
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+quit
+compile cli ./bin/unidork-import
+quit
+update
+delete.term Stage.partitionSessionSize Rename.sweepChunkSize Subs.Fix.subsChunkSize Stage.probeConnChunks
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
 delete.term Subs.Fix.selectBufferMoviesSql
 update
 quit
@@ -83,18 +98,3 @@ view cli
 quit
 update
 quit
-transcript.in-place ./nix/unison/snapshot.md
-ucm transcript.in-place ./nix/unison/snapshot.md
-push @harryprayiv/uniDork
-compile cli ./bin/unidork-import
-update
-run sweepMissing
-run sweepStaleStaging
-update
-compile cli ./bin/unidork-import
-add
-update
-run sweepMissing
-compile cli ./bin/unidork-import
-run sweepMissing
-run Rename.sweepMissing

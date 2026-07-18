@@ -87,17 +87,14 @@ in
   };
 
   tuning = {
-    probeJobs = 8;
-
-    # cgroup ceiling for unidork-import: MemoryHigh throttles + reclaims
-    # to swap/zram, MemoryMax is the hard kill line. Size these to the
-    # box actually running the job, not to your workstation.
-    memoryHigh = "6G";
-    memoryMax  = "8G";
-
-    # GHC RTS options for the ucm runtime. Silently ignored if the ucm
-    # binary wasn't built with full -rtsopts; the cgroup above is the
-    # enforcement layer either way.
-    ghcRts = "-M5G -c";
+    probeJobs = 8;            # blade: 2
+    partitionSession = 50;
+    sweepChunk = 100;
+    subsChunk = 100;
+    probeConnChunks = 4;
+    stageTimeout = "4h";      # coreutils timeout syntax; "0" disables
+    memoryHigh = "4G";        # blade: "1200M"
+    memoryMax  = "5G";        # blade: "1600M"
+    ghcRts     = "-M4500m -c"; # blade: "-M1400m -c"
   };
 }

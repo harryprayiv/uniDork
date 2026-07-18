@@ -55,10 +55,15 @@ pkgs.writeShellApplication {
     : "''${UNIDORK_TOKEN_SUB:=${config.subs.tokenFile}}"
     export UNIDORK_TOKEN_TMDB UNIDORK_TOKEN_SUB
 
-    : "''${UNIDORK_TUNE_PROBE_JOBS:=${toString config.tuning.probeJobs}}"
-    : "''${UNIDORK_TUNE_SUB_LANGS:=${lib.concatStringsSep "," config.subs.languages}}"
-    : "''${UNIDORK_TUNE_SUB_DELAY_MS:=${toString config.subs.delayMs}}"
-    export UNIDORK_TUNE_PROBE_JOBS UNIDORK_TUNE_SUB_LANGS UNIDORK_TUNE_SUB_DELAY_MS
+    : "''${UNIDORK_TUNE_PARTITION_SESSION:=${toString (config.tuning.partitionSession or 50)}}"
+    : "''${UNIDORK_TUNE_SWEEP_CHUNK:=${toString (config.tuning.sweepChunk or 100)}}"
+    : "''${UNIDORK_TUNE_SUBS_CHUNK:=${toString (config.tuning.subsChunk or 100)}}"
+    : "''${UNIDORK_TUNE_PROBE_CONN_CHUNKS:=${toString (config.tuning.probeConnChunks or 4)}}"
+    : "''${UNIDORK_TUNE_STAGE_TIMEOUT:=${config.tuning.stageTimeout or "4h"}}"
+    export UNIDORK_TUNE_PARTITION_SESSION UNIDORK_TUNE_SWEEP_CHUNK UNIDORK_TUNE_SUBS_CHUNK UNIDORK_TUNE_PROBE_CONN_CHUNKS UNIDORK_TUNE_STAGE_TIMEOUT
+  
+    : "''${UNIDORK_TUNE_STAGE_TIMEOUT:=${config.tuning.stageTimeout}}"
+    export UNIDORK_TUNE_STAGE_TIMEOUT
 
     : "''${UNIDORK_MEM_HIGH:=${config.tuning.memoryHigh}}"
     : "''${UNIDORK_MEM_MAX:=${config.tuning.memoryMax}}"
@@ -94,9 +99,10 @@ pkgs.writeShellApplication {
         systemd-run --user --scope --quiet --collect \
           -p "MemoryHigh=$UNIDORK_MEM_HIGH" \
           -p "MemoryMax=$UNIDORK_MEM_MAX" \
-          env "GHCRTS=$UNIDORK_GHCRTS" unidork-import "$@"
+          env "GHCRTS=$UNIDORK_GHCRTS" \
+          timeout --kill-after=30s "$UNIDORK_TUNE_STAGE_TIMEOUT" unidork-import "$@"
       else
-        GHCRTS="$UNIDORK_GHCRTS" unidork-import "$@"
+        GHCRTS="$UNIDORK_GHCRTS" timeout --kill-after=30s "$UNIDORK_TUNE_STAGE_TIMEOUT" unidork-import "$@"
       fi
     }
 
