@@ -11699,6 +11699,12 @@ Versions.canonicalMinSql =
     %% sql ", '') AS INTEGER) AND m.runtime_min IS NOT NULL"
     |> typedQuery integer
 
+Versions.clearAll : Config ->{IO, Exception} ()
+Versions.clearAll cfg = myPg.singleIO (toClientConfig cfg) do
+  pc = prepareCommand clearAllSql
+  _ = catch do bindAndExecuteCommand pc []
+  PreparedCommand.close pc
+
 Versions.clearAllSql : Command a a
 Versions.clearAllSql = sql "DELETE FROM movie_editions" |> buildCommand
 
@@ -11861,6 +11867,22 @@ Versions.fallbackStandardIndex clusters =
   match List.foldLeft step None (Versions.withIndex clusters) with
     Some (i, _) -> Some i
     None        -> None
+
+Versions.fetchMultiTmdbs : Config ->{IO, Exception} [Text]
+Versions.fetchMultiTmdbs cfg = myPg.singleIO (toClientConfig cfg) do
+  use Text ++
+  pq = prepareQuery selectMultiTmdbSql
+  tmdbsResult = catch do
+    portal = bindQuery pq []
+    (rs, _) = executeQueryPortal portal 0
+    rs
+  rs = match tmdbsResult with
+    Left f   ->
+      _ = printLine ("[versions] QUERY FAILED: " ++ Failure.message f)
+      []
+    Right rs -> rs
+  _ = PreparedQuery.close pq
+  rs
 
 Versions.groupByTmdb : [(Text, MediaFacts)] -> [(Text, [MediaFacts])]
 Versions.groupByTmdb pairs =
@@ -12070,65 +12092,45 @@ Versions.rowToStampRow = cases
     StampRow tmdb ck edLabel vLabel (Universal.eq d +1)
 
 Versions.run : Config ->{IO, Exception} ()
-Versions.run cfg = 
-  myPg.singleIO (toClientConfig cfg) do
-    use Db foreach_
-    use Failure message
-    use List size
-    use Text ++
-    pqTmdbs = prepareQuery selectMultiTmdbSql
-    pqGroup = prepareQuery selectLibFilesForTmdbSql
-    pqCanon = prepareQuery canonicalMinSql
-    pqEd = prepareQuery insertEditionSql
-    pcVer = prepareCommand insertVersionSql
-    pcClear = prepareCommand clearAllSql
-    tmdbsResult = catch do
-      portal = bindQuery pqTmdbs []
-      (rs, _) = executeQueryPortal portal 0
-      rs
-    tmdbs = match tmdbsResult with
-      Left f   ->
-        _ = printLine ("[versions] QUERY FAILED: " ++ message f)
-        []
-      Right rs -> rs
+Versions.run cfg =
+  use List size
+  use Nat toText
+  use Text ++
+  tmdbs = fetchMultiTmdbs cfg
+  total = size tmdbs
+  _ =
+    printLine
+      ("[versions] " ++ toText total ++ " tmdb group(s) with multiple copies")
+  _ = clearAll cfg
+  chunks = List.chunk sessionGroups tmdbs
+  runOne done chunk =
+    use Nat +
+    _ = runGroupChunk cfg chunk
+    d = done + size chunk
     _ =
       printLine
-        ("[versions] "
-          ++ Nat.toText (size tmdbs)
-          ++ " tmdb group(s) with multiple copies")
-    _ = catch do bindAndExecuteCommand pcClear []
-    writeGroup tmdbId =
-      use List map
-      use Nat >
-      rowsResult = catch do
-        portal = bindQuery pqGroup (pt tmdbId)
-        (rs, _) = executeQueryPortal portal 0
-        rs
-      rows =
-        match rowsResult with
-          Left f ->
-            _ =
-              printLine
-                ("[versions] group "
-                  ++ tmdbId
-                  ++ " QUERY FAILED: "
-                  ++ message f)
-            []
-          Right rs -> map rowToLib rs
-      fs = map at2 (List.filterMap factsForRow rows)
-      if size fs > 1 then
-        canon = canonicalMinFor pqCanon tmdbId
-        editions = analyze canon fs
-        foreach_ (ed -> writeEdition pqEd pcVer tmdbId ed) editions
-      else ()
-    _ = foreach_ writeGroup tmdbs
-    _ = PreparedQuery.close pqTmdbs
-    _ = PreparedQuery.close pqGroup
-    _ = PreparedQuery.close pqCanon
-    _ = PreparedQuery.close pqEd
-    _ = PreparedCommand.close pcVer
-    _ = PreparedCommand.close pcClear
-    printLine "[versions] done"
+        ("[versions] session done ("
+          ++ toText d
+          ++ "/"
+          ++ toText total
+          ++ " group(s), rss "
+          ++ toText rssMb()
+          ++ " MB)")
+    d
+  _ = List.foldLeft runOne 0 chunks
+  printLine "[versions] done"
+
+Versions.runGroupChunk : Config -> [Text] ->{IO, Exception} ()
+Versions.runGroupChunk cfg chunk = myPg.singleIO (toClientConfig cfg) do
+  pqGroup = prepareQuery selectLibFilesForTmdbSql
+  pqCanon = prepareQuery canonicalMinSql
+  pqEd = prepareQuery insertEditionSql
+  pcVer = prepareCommand insertVersionSql
+  _ = Db.foreach_ (writeGroup pqGroup pqCanon pqEd pcVer) chunk
+  _ = PreparedQuery.close pqGroup
+  _ = PreparedQuery.close pqCanon
+  _ = PreparedQuery.close pqEd
+  PreparedCommand.close pcVer
 
 Versions.sameCutTolerance : Float
 Versions.sameCutTolerance = 1.5e-2
@@ -12174,6 +12176,9 @@ Versions.selectStampRowsSql =
   sql
     "SELECT lm.tmdb_id, mv.folder_checksum, me.label, mv.version_label, CASE WHEN mv.is_default THEN 1 ELSE 0 END FROM movie_versions mv JOIN movie_editions me ON me.edition_id = mv.edition_id JOIN library_movies lm ON lm.folder_checksum = mv.folder_checksum WHERE lm.nfo_path IS NOT NULL ORDER BY lm.tmdb_id, me.label, mv.score DESC"
     |> typedQuery (text ~ text ~ text ~ text ~ integer)
+
+Versions.sessionGroups : Nat
+Versions.sessionGroups = 32
 
 Versions.Stamp.applyStamp : Optional (Text, Boolean) -> Text -> Text
 Versions.Stamp.applyStamp stamp nfo =
@@ -12533,6 +12538,39 @@ Versions.writeEdition pqEd pcVer tmdbId ed =
             ()
           Db.foreach_ writeOne (members ed)
         [] -> ()
+
+Versions.writeGroup :
+  PreparedQuery r1 a1 ((((Text, Text), Int), Text), Text)
+  -> PreparedQuery r a Int
+  -> PreparedQuery rE aE Int
+  -> PreparedCommand rV aV
+  -> Text
+  ->{IO, Exception, Postgres} ()
+Versions.writeGroup pqGroup pqCanon pqEd pcVer tmdbId =
+  use List map
+  use Nat >
+  use Text ++
+  rowsResult = catch do
+    portal = bindQuery pqGroup (pt tmdbId)
+    (rs, _) = executeQueryPortal portal 0
+    rs
+  rows =
+    match rowsResult with
+      Left f ->
+        _ =
+          printLine
+            ("[versions] group "
+              ++ tmdbId
+              ++ " QUERY FAILED: "
+              ++ Failure.message f)
+        []
+      Right rs -> map rowToLib rs
+  fs = map at2 (List.filterMap factsForRow rows)
+  if List.size fs > 1 then
+    canon = canonicalMinFor pqCanon tmdbId
+    editions = analyze canon fs
+    Db.foreach_ (ed -> writeEdition pqEd pcVer tmdbId ed) editions
+  else ()
 
 versionsRun : '{IO, Exception} ()
 versionsRun = do Versions.run fromEnv()
