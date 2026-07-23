@@ -2195,6 +2195,16 @@ MovieId.toJson m =
     , ("tvdb", toJsonOpt text (tvdb m))
     ]
 
+myPg.awaitReader : mutable.Ref g Boolean -> Nat ->{g, IO, Exception} ()
+myPg.awaitReader done tries =
+  use Nat - ==
+  if mutable.Ref.read done then ()
+  else
+    if tries == 0 then ()
+    else
+      _ = concurrent.sleepMicroseconds 10000
+      myPg.awaitReader done (tries - 1)
+
 myPg.runIO :
   net.Connection {IO, Exception}
   -> Map Text Text
@@ -2208,6 +2218,7 @@ myPg.runIO conn parameters p =
   use mutable.Ref read write
   txnStatus = ref None
   shuttingDown = ref false
+  readerDone = ref false
   msgQueue : TQueue BackendMessage
   msgQueue = atomically do TQueue.empty()
   logBackendError e =
@@ -2251,9 +2262,10 @@ myPg.runIO conn parameters p =
               (typeLink postgres.errors.ProtocolError)
               "Postgres abandoned connection"
               (Any a))
-    match catch do goBackend do backend conn parameters with
+    _ = match catch do goBackend do backend conn parameters with
       Left e  -> logBackendError e
       Right _ -> ()
+    write readerDone true
   go : '{h, IO, Exception, PostgresMessaging} a ->{h, IO, Exception} a
   go p =
     handle p()
@@ -2289,6 +2301,7 @@ myPg.runIO conn parameters p =
       { a } -> a
   result = go p
   _ = write shuttingDown true
+  _ = awaitReader readerDone 100
   result
 
 myPg.singleIO :
@@ -4949,6 +4962,103 @@ Resolve.writeMatch pcAssoc pcDelOther fileId tmdbId confidence source =
           ++ pi (toInt confidence)
           ++ pt source)
   ()
+
+runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO :
+  net.Connection {IO, Exception}
+  -> Map Text Text
+  -> '{h, IO, Exception, PostgresMessaging} a
+  ->{h, IO, Exception} a
+runarorama_postgres_2_5_1.postgres.net.messaging.PostgresMessaging.runIO
+  conn parameters p =
+  use IO ref
+  use Optional None
+  use STM atomically
+  use Text ++
+  use mutable.Ref read write
+  txnStatus = ref None
+  shuttingDown = ref false
+  msgQueue : TQueue BackendMessage
+  msgQueue = atomically do TQueue.empty()
+  logBackendError e =
+    if read shuttingDown then ()
+    else
+      Function.ignore
+        (hush do printLine ("Error in backend driver: " ++ toDebugText e))
+  concurrent.fork_ do
+    goBackend : '{IO, Exception, PostgresBackend} () ->{IO, Exception} ()
+    goBackend c =
+      handle
+        match catch c with
+          Left e  -> logBackendError e
+          Right _ -> ()
+      with cases
+        { offerBackendMessage msg -> k } ->
+          atomically do TQueue.boundedEnqueue 4096 msg msgQueue
+          next : '{IO, Exception, PostgresBackend} ()
+          next = do k()
+          goBackend next
+        { offerTransactionStatus b -> k } ->
+          write txnStatus (Some b)
+          next : '{IO, Exception, PostgresBackend} ()
+          next = do k()
+          goBackend next
+        { offerParameterStatus _ -> k } ->
+          next : '{IO, Exception, PostgresBackend} ()
+          next = do k()
+          goBackend next
+        { offerBackendKeyData _ -> k } ->
+          next : '{IO, Exception, PostgresBackend} ()
+          next = do k()
+          goBackend next
+        { offerNotification _ -> k } ->
+          next : '{IO, Exception, PostgresBackend} ()
+          next = do k()
+          goBackend next
+        { a } ->
+          Exception.raise
+            (Failure
+              (typeLink postgres.errors.ProtocolError)
+              "Postgres abandoned connection"
+              (Any a))
+    match catch do goBackend do backend conn parameters with
+      Left e  -> logBackendError e
+      Right _ -> ()
+  go : '{h, IO, Exception, PostgresMessaging} a ->{h, IO, Exception} a
+  go p =
+    handle p()
+    with cases
+      { trySendFrontendMessage msg -> k } ->
+        bytes = do FrontendMessage.encode msg
+        v = catch do Connection.send conn (encode.toBytes bytes)
+        next : '{h, IO, Exception, PostgresMessaging} a
+        next = do k v
+        go next
+      { tryGetTransactionStatus -> k } ->
+        match read txnStatus with
+          None ->
+            next : '{h, IO, Exception, PostgresMessaging} a
+            next =
+              do
+                k
+                  (Left
+                    (Failure
+                      (typeLink postgres.errors.ProtocolError)
+                      "Session not started"
+                      (Any ())))
+            go next
+          Some bs ->
+            next : '{h, IO, Exception, PostgresMessaging} a
+            next = do k (Right bs)
+            go next
+      { tryAwaitBackendMessage -> k } ->
+        msg = atomically do TQueue.dequeue msgQueue
+        next : '{h, IO, Exception, PostgresMessaging} a
+        next = do k (Right msg)
+        go next
+      { a } -> a
+  result = go p
+  _ = write shuttingDown true
+  result
 
 sampleNfo : Text
 sampleNfo =
@@ -11771,6 +11881,12 @@ test> Versions.defaultIsBestOfStandard.test =
       editions
   flatMap check [Universal.eq defaults ["UHD"]]
 
+Versions.deleteEditionsForTmdbSql : Command a (Text -> a)
+Versions.deleteEditionsForTmdbSql =
+  sql "DELETE FROM movie_editions WHERE tmdb_id = "
+    %% StatementBuilder.var Codec.text
+    |> buildCommand
+
 Versions.editionLabel : [MediaFacts] -> Boolean -> Float -> Float -> Text
 Versions.editionLabel cluster isStd rtSec stdRuntime =
   match editionTokenLabel cluster with
@@ -12094,7 +12210,7 @@ Versions.rowToStampRow = cases
 Versions.run : Config ->{IO, Exception} ()
 Versions.run cfg =
   use List size
-  use Nat toText
+  use Nat + > toText
   use Text ++
   tmdbs = fetchMultiTmdbs cfg
   total = size tmdbs
@@ -12103,10 +12219,11 @@ Versions.run cfg =
       ("[versions] " ++ toText total ++ " tmdb group(s) with multiple copies")
   _ = clearAll cfg
   chunks = List.chunk sessionGroups tmdbs
-  runOne done chunk =
-    use Nat +
-    _ = runGroupChunk cfg chunk
+  runOne acc chunk =
+    (done, failed) = acc
+    ok = runGroupChunkSafe cfg chunk
     d = done + size chunk
+    f = if ok then failed else failed + 1
     _ =
       printLine
         ("[versions] session done ("
@@ -12116,21 +12233,55 @@ Versions.run cfg =
           ++ " group(s), rss "
           ++ toText rssMb()
           ++ " MB)")
-    d
-  _ = List.foldLeft runOne 0 chunks
+    _ = concurrent.sleepMicroseconds sessionSettleMicros
+    (d, f)
+  (done, failed) = List.foldLeft runOne (0, 0) chunks
+  _ =
+    if failed > 0 then
+      printLine
+        ("[versions] WARNING: "
+          ++ toText failed
+          ++ " session(s) failed after retry; rerun is safe (per-group delete makes writes idempotent)")
+    else ()
   printLine "[versions] done"
 
 Versions.runGroupChunk : Config -> [Text] ->{IO, Exception} ()
 Versions.runGroupChunk cfg chunk = myPg.singleIO (toClientConfig cfg) do
+  pcDel = prepareCommand deleteEditionsForTmdbSql
   pqGroup = prepareQuery selectLibFilesForTmdbSql
   pqCanon = prepareQuery canonicalMinSql
   pqEd = prepareQuery insertEditionSql
   pcVer = prepareCommand insertVersionSql
-  _ = Db.foreach_ (writeGroup pqGroup pqCanon pqEd pcVer) chunk
+  _ = Db.foreach_ (writeGroup pcDel pqGroup pqCanon pqEd pcVer) chunk
+  _ = PreparedCommand.close pcDel
   _ = PreparedQuery.close pqGroup
   _ = PreparedQuery.close pqCanon
   _ = PreparedQuery.close pqEd
   PreparedCommand.close pcVer
+
+Versions.runGroupChunkSafe : Config -> [Text] ->{IO, Exception} Boolean
+Versions.runGroupChunkSafe cfg chunk =
+  use Failure message
+  use Text ++
+  r = catch do runGroupChunk cfg chunk
+  match r with
+    Right _ -> true
+    Left f ->
+      _ =
+        printLine
+          ("[versions] session failed: "
+            ++ message f
+            ++ "; retrying once after settle")
+      _ = concurrent.sleepMicroseconds 1000000
+      r2 = catch do runGroupChunk cfg chunk
+      match r2 with
+        Right _ -> true
+        Left f2 ->
+          _ =
+            printLine
+              ("[versions] session failed twice, skipping chunk: "
+                ++ message f2)
+          false
 
 Versions.sameCutTolerance : Float
 Versions.sameCutTolerance = 1.5e-2
@@ -12178,7 +12329,10 @@ Versions.selectStampRowsSql =
     |> typedQuery (text ~ text ~ text ~ text ~ integer)
 
 Versions.sessionGroups : Nat
-Versions.sessionGroups = 32
+Versions.sessionGroups = 256
+
+Versions.sessionSettleMicros : Nat
+Versions.sessionSettleMicros = 250000
 
 Versions.Stamp.applyStamp : Optional (Text, Boolean) -> Text -> Text
 Versions.Stamp.applyStamp stamp nfo =
@@ -12540,16 +12694,18 @@ Versions.writeEdition pqEd pcVer tmdbId ed =
         [] -> ()
 
 Versions.writeGroup :
-  PreparedQuery r1 a1 ((((Text, Text), Int), Text), Text)
+  PreparedCommand r2 a2
+  -> PreparedQuery r1 a1 ((((Text, Text), Int), Text), Text)
   -> PreparedQuery r a Int
   -> PreparedQuery rE aE Int
   -> PreparedCommand rV aV
   -> Text
   ->{IO, Exception, Postgres} ()
-Versions.writeGroup pqGroup pqCanon pqEd pcVer tmdbId =
+Versions.writeGroup pcDel pqGroup pqCanon pqEd pcVer tmdbId =
   use List map
   use Nat >
   use Text ++
+  _ = catch do bindAndExecuteCommand pcDel (pt tmdbId)
   rowsResult = catch do
     portal = bindQuery pqGroup (pt tmdbId)
     (rs, _) = executeQueryPortal portal 0
