@@ -460,6 +460,13 @@ type Versions.MediaFacts
       audioChannels : Nat,
       rawName : Text }
 
+type Versions.StampRow
+  = { tmdbId : Text,
+      folderChecksum : Text,
+      editionLabel : Text,
+      versionLabel : Text,
+      isDefault : Boolean }
+
 type Video
   = { codec : Text, aspect : Float, width : Nat, height : Nat }
 
@@ -552,6 +559,10 @@ cli =
         match nonFlags rest with
           format +: _ -> renameNewCombined cfg format dry ()
           []          -> printLine "rename requires a format string"
+      "versions" +: rest ->
+        dry = hasFlag "--dry-run" rest
+        _ = Versions.run cfg
+        stampNfos cfg dry
       "reconcile-stage" +: _ -> sweepStaleStaging cfg
       "sweep-missing" +: _ -> Rename.sweepMissing cfg
       "subs" +: rest -> Fix.run cfg (hasFlag "--dry-run" rest)
@@ -581,7 +592,7 @@ cli =
       _ ->
         _ =
           printLine
-            "usage: unidork-import <process|reconcile|reconcile-stage|sweep-missing|subs|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-reconcile|tv-identify|tv-resolve|tv-rename|tv-move|tv-process> [arg] [--dry-run]"
+            "usage: unidork-import <process|reconcile|reconcile-stage|sweep-missing|subs|versions|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-reconcile|tv-identify|tv-resolve|tv-rename|tv-move|tv-process> [arg] [--dry-run]"
         ()
 
 Config.fromEnv : '{IO} Config
@@ -11643,7 +11654,7 @@ Versions.analyze canonicalMin facts =
         None   -> false
       rtSec = clusterRuntimeSec cluster
       key = "rt-" ++ Nat.toText (Versions.toMinutes rtSec)
-      label = editionLabel cluster isStd rtSec stdRuntime
+      label = Versions.editionLabel cluster isStd rtSec stdRuntime
       members = List.map (assignMember defaultCrc) cluster
       Edition
         key label (getOrElse 0 (Float.toNat (Float.floor rtSec))) isStd members
@@ -11919,6 +11930,26 @@ Versions.insertVersionSql =
     %% sql ")"
     |> buildCommand
 
+Versions.loadDesired : Config ->{IO, Exception} [(Text, (Text, Boolean))]
+Versions.loadDesired cfg =
+  use Text ++
+  rows = myPg.singleIO (toClientConfig cfg) do
+    pq = prepareQuery selectStampRowsSql
+    rowsResult = catch do
+      portal = bindQuery pq []
+      (rs, _) = executeQueryPortal portal 0
+      rs
+    rs = match rowsResult with
+      Left f   ->
+        _ = printLine ("[versions-nfo] QUERY FAILED: " ++ Failure.message f)
+        []
+      Right rs -> rs
+    _ = PreparedQuery.close pq
+    rs
+  stampRows = List.map rowToStampRow rows
+  groups = Stamp.groupBy StampRow.tmdbId stampRows
+  List.flatMap labelsForPair groups
+
 Versions.normalizedSeconds : MediaFacts -> Float
 Versions.normalizedSeconds f =
   use Float * / >
@@ -12033,6 +12064,11 @@ Versions.rowToLib = cases
   ((((fc, tid), sz), pj), nm) ->
     LibRow fc tid (Optional.getOrElse 0 (Nat.fromInt sz)) pj nm
 
+Versions.rowToStampRow : ((((Text, Text), Text), Text), Int) -> StampRow
+Versions.rowToStampRow = cases
+  ((((tmdb, ck), edLabel), vLabel), d) ->
+    StampRow tmdb ck edLabel vLabel (Universal.eq d +1)
+
 Versions.run : Config ->{IO, Exception} ()
 Versions.run cfg = 
   myPg.singleIO (toClientConfig cfg) do
@@ -12121,8 +12157,303 @@ Versions.selectMultiTmdbSql =
     "SELECT lm.tmdb_id FROM library_movies lm JOIN files f ON f.crc32 = lm.crc32 WHERE lm.tmdb_id IS NOT NULL AND f.probe_json IS NOT NULL GROUP BY lm.tmdb_id HAVING COUNT(*) > 1 ORDER BY lm.tmdb_id"
     |> typedQuery Codec.text
 
+Versions.selectNfoChunkSql : postgres.Query b (Text -> b) (Text, Text)
+Versions.selectNfoChunkSql =
+  use Codec text
+  use Text ++
+  sql
+    "SELECT lm.folder_checksum, lm.nfo_path FROM library_movies lm WHERE lm.nfo_path IS NOT NULL AND lm.folder_checksum > "
+    %% StatementBuilder.var text
+    %% sql (" ORDER BY lm.folder_checksum LIMIT " ++ Nat.toText stampChunk)
+    |> typedQuery (text ~ text)
+
+Versions.selectStampRowsSql :
+  postgres.Query r r ((((Text, Text), Text), Text), Int)
+Versions.selectStampRowsSql =
+  use Codec text
+  sql
+    "SELECT lm.tmdb_id, mv.folder_checksum, me.label, mv.version_label, CASE WHEN mv.is_default THEN 1 ELSE 0 END FROM movie_versions mv JOIN movie_editions me ON me.edition_id = mv.edition_id JOIN library_movies lm ON lm.folder_checksum = mv.folder_checksum WHERE lm.nfo_path IS NOT NULL ORDER BY lm.tmdb_id, me.label, mv.score DESC"
+    |> typedQuery (text ~ text ~ text ~ text ~ integer)
+
+Versions.Stamp.applyStamp : Optional (Text, Boolean) -> Text -> Text
+Versions.Stamp.applyStamp stamp nfo =
+  use Text join
+  lines = Text.split ?\n nfo
+  kept = List.filter (l -> Boolean.not (isStampLine l)) lines
+  match stamp with
+    Optional.None -> join "\n" kept
+    Some (label, isDef) ->
+      if containsText "</movie>" nfo then
+        join "\n" (insertBeforeClose (stampLines label isDef) kept)
+      else nfo
+
+test> Versions.Stamp.applyStamp.test =
+  use Text join
+  use Universal eq
+  nfo = join "\n" ["<movie>", "  <title>X</title>", "</movie>", ""]
+  stamped = applyStamp (Some ("Director's Cut 2160p", true)) nfo
+  expected =
+    join
+      "\n"
+      [ "<movie>"
+      , "  <title>X</title>"
+      , "  <hasvideoversions>true</hasvideoversions>"
+      , "  <videoassettitle>Director's Cut 2160p</videoassettitle>"
+      , "  <isdefaultvideoversion>true</isdefaultvideoversion>"
+      , "</movie>"
+      , ""
+      ]
+  restamped = applyStamp (Some ("Director's Cut 2160p", true)) stamped
+  stripped = applyStamp Optional.None stamped
+  List.flatMap
+    check [eq stamped expected, eq restamped expected, eq stripped nfo]
+
+Versions.Stamp.countEqText : Text -> [Text] -> Nat
+Versions.Stamp.countEqText x xs =
+  use Nat +
+  step n y = if Universal.eq x y then n + 1 else n
+  List.foldLeft step 0 xs
+
+Versions.Stamp.groupBy : (a ->{g} Text) -> [a] ->{g} [(Text, [a])]
+Versions.Stamp.groupBy f xs =
+  List.foldLeft (acc x -> Stamp.upsert (f x) x acc) [] xs
+
+Versions.Stamp.insertBeforeClose : [Text] -> [Text] -> [Text]
+Versions.Stamp.insertBeforeClose newLines lines =
+  use List ++ +: reverse
+  go acc = cases
+    [] -> reverse acc ++ newLines
+    l +: rest ->
+      if containsText "</movie>" l then reverse acc ++ newLines ++ (l +: rest)
+      else go (l +: acc) rest
+  go [] lines
+
+Versions.Stamp.isStampLine : Text -> Boolean
+Versions.Stamp.isStampLine l =
+  needles =
+    [ "<hasvideoversions"
+    , "<isdefaultvideoversion"
+    , "<videoassettitle"
+    , "<videoassetid"
+    , "<videoassettype"
+    ]
+  List.any (n -> containsText n l) needles
+
+Versions.Stamp.kodiLabelsForGroup : [StampRow] -> [(Text, (Text, Boolean))]
+Versions.Stamp.kodiLabelsForGroup rows =
+  use Nat >
+  editions = Stamp.groupBy StampRow.editionLabel rows
+  multiEdition = List.size editions > 1
+  List.flatMap (labelEdition multiEdition) editions
+
+test> Versions.Stamp.kodiLabelsForGroup.test =
+  a = StampRow "122" "ck-a" "Theatrical Cut" "1080p x264 8bit ~aaaa1111" false
+  b = StampRow "122" "ck-b" "Extended Cut" "2160p x265 10bit ~bbbb2222" true
+  c = StampRow "122" "ck-c" "Extended Cut" "1080p x264 8bit ~cccc3333" false
+  out = kodiLabelsForGroup [a, b, c]
+  List.flatMap
+    check
+    [ Universal.eq
+        out
+        [ ("ck-a", ("Theatrical Cut", false))
+        , ("ck-b", ("Extended Cut 2160p x265 10bit", true))
+        , ("ck-c", ("Extended Cut 1080p x264 8bit", false))
+        ]
+    ]
+
+Versions.Stamp.labelEdition :
+  Boolean -> (Text, [StampRow]) -> [(Text, (Text, Boolean))]
+Versions.Stamp.labelEdition multiEdition = cases
+  (edLabel, members) ->
+    use List map
+    quals = map (r -> stripCrcSuffix (StampRow.versionLabel r)) members
+    single = Universal.eq (List.size members) 1
+    map (labelMember multiEdition edLabel quals single) members
+
+Versions.Stamp.labelMember :
+  Boolean -> Text -> [Text] -> Boolean -> StampRow -> (Text, (Text, Boolean))
+Versions.Stamp.labelMember multiEdition edLabel quals single r =
+  use Nat >
+  use StampRow versionLabel
+  use Text ++
+  qual = stripCrcSuffix (versionLabel r)
+  qualDup = countEqText qual quals > 1
+  qualPart = if qualDup then versionLabel r else qual
+  label =
+    if single then edLabel
+    else if multiEdition then edLabel ++ " " ++ qualPart else qualPart
+  (StampRow.folderChecksum r, (label, StampRow.isDefault r))
+
+Versions.Stamp.labelsForPair : (Text, [StampRow]) -> [(Text, (Text, Boolean))]
+Versions.Stamp.labelsForPair = cases (_, rs) -> kodiLabelsForGroup rs
+
+Versions.Stamp.lookupCk :
+  Text -> [(Text, (Text, Boolean))] -> Optional (Text, Boolean)
+Versions.Stamp.lookupCk ck = cases
+  [] -> Optional.None
+  (k, v) +: rest ->
+    if Universal.eq k ck then Some v else Versions.Stamp.lookupCk ck rest
+
+Versions.Stamp.patchOne :
+  Boolean
+  -> [(Text, (Text, Boolean))]
+  -> Nat
+  -> (Text, Text)
+  ->{IO, Exception} Nat
+Versions.Stamp.patchOne dry desired n = cases
+  (ck, nfoPath) ->
+    use Text ++
+    stamp = lookupCk ck desired
+    fp = FilePath nfoPath
+    if Boolean.not (pathExists fp) then skipMissing stamp nfoPath n
+    else
+      origResult = catch do readFileUtf8 fp
+      match origResult with
+        Left f ->
+          _ =
+            printLine
+              ("  [versions-nfo] read failed, skipped: "
+                ++ nfoPath
+                ++ " ("
+                ++ Failure.message f
+                ++ ")")
+          n
+        Right orig -> patchText dry stamp nfoPath orig n
+
+Versions.Stamp.patchText :
+  Boolean
+  -> Optional (Text, Boolean)
+  -> Text
+  -> Text
+  -> Nat
+  ->{IO, Exception} Nat
+Versions.Stamp.patchText dry stamp nfoPath orig n =
+  use Nat +
+  use Text ++
+  missingClose = match stamp with
+    Some _        -> Boolean.not (containsText "</movie>" orig)
+    Optional.None -> false
+  if missingClose then
+    _ = printLine ("  [versions-nfo] no </movie> tag, skipped: " ++ nfoPath)
+    n
+  else
+    desiredText = applyStamp stamp orig
+    if Universal.eq desiredText orig then n
+    else
+      if dry then
+        _ = printLine ("  would update: " ++ nfoPath)
+        n + 1
+      else
+        wr = catch do writeFileUtf8 (FilePath nfoPath) desiredText
+        match wr with
+          Left f ->
+            _ =
+              printLine
+                ("  [versions-nfo] WRITE FAILED: "
+                  ++ nfoPath
+                  ++ " ("
+                  ++ Failure.message f
+                  ++ ")")
+            n
+          Right _ ->
+            _ = printLine ("  updated: " ++ nfoPath)
+            n + 1
+
+Versions.Stamp.skipMissing :
+  Optional (Text, Boolean) -> Text -> Nat ->{IO, Exception} Nat
+Versions.Stamp.skipMissing stamp nfoPath n = match stamp with
+  Some _        ->
+    use Text ++
+    _ = printLine ("  [versions-nfo] missing nfo, skipped: " ++ nfoPath)
+    n
+  Optional.None -> n
+
+Versions.Stamp.stampLines : Text -> Boolean -> [Text]
+Versions.Stamp.stampLines label isDef =
+  use List :+
+  use Text ++
+  base =
+    [ "  <hasvideoversions>true</hasvideoversions>"
+    , "  <videoassettitle>" ++ escapeXml label ++ "</videoassettitle>"
+    ]
+  if isDef then base :+ "  <isdefaultvideoversion>true</isdefaultvideoversion>"
+  else base
+
+Versions.Stamp.upsert : Text -> a -> [(Text, [a])] -> [(Text, [a])]
+Versions.Stamp.upsert key v = cases
+  [] -> [(key, [v])]
+  (k, vs) +: rest ->
+    if Universal.eq k key then (k, vs List.:+ v) List.+: rest
+    else (k, vs) List.+: Versions.Stamp.upsert key v rest
+
+Versions.stampChunk : Nat
+Versions.stampChunk = 400
+
+Versions.stampNfos : Config -> Boolean ->{IO, Exception} ()
+Versions.stampNfos cfg dry =
+  use List size
+  use Nat + toText
+  use Optional None
+  use Text ++
+  desired = loadDesired cfg
+  _ =
+    printLine
+      ("[versions-nfo] "
+        ++ toText (size desired)
+        ++ " folder(s) carry version stamps")
+  runChunk lastCk = myPg.singleIO (toClientConfig cfg) do
+    pq = prepareQuery selectNfoChunkSql
+    rowsResult = catch do
+      portal = bindQuery pq (pt lastCk)
+      (rs, _) = executeQueryPortal portal 0
+      rs
+    rows = match rowsResult with
+      Left f   ->
+        _ = printLine ("[versions-nfo] QUERY FAILED: " ++ Failure.message f)
+        []
+      Right rs -> rs
+    changed = List.foldLeft (patchOne dry desired) 0 rows
+    _ = PreparedQuery.close pq
+    match lastOf rows with
+      None         -> None
+      Some (ck, _) -> Some (ck, size rows, changed)
+  loop lastCk checked changed =
+    match runChunk lastCk with
+      None -> (checked, changed)
+      Some (ck, n, c) ->
+        _ =
+          printLine
+            ("[versions-nfo] chunk done ("
+              ++ toText n
+              ++ " row(s), rss "
+              ++ toText rssMb()
+              ++ " MB)")
+        loop ck (checked + n) (changed + c)
+  (checked, changed) = loop "" 0 0
+  verbed = if dry then "would update" else "updated"
+  printLine
+    ("[versions-nfo] checked "
+      ++ toText checked
+      ++ " nfo(s), "
+      ++ verbed
+      ++ " "
+      ++ toText changed)
+
 test> Versions.standardPicksClosest.test =
   check (Universal.eq (pickStandardIndex (Some 120) [7197.0, 7680.0]) (Some 0))
+
+Versions.stripCrcSuffix : Text -> Text
+Versions.stripCrcSuffix t = match Text.indexOf " ~" t with
+  Some i        -> Text.take i t
+  Optional.None -> t
+
+test> Versions.stripCrcSuffix.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (stripCrcSuffix "2160p x265 10bit ~a1b2c3") "2160p x265 10bit"
+    , eq (stripCrcSuffix "1080p x264 8bit") "1080p x264 8bit"
+    ]
 
 Versions.testFacts :
   Text -> Float -> Float -> Nat -> Nat -> Nat -> Text -> Text -> MediaFacts
