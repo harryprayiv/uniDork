@@ -483,6 +483,20 @@ Actor.toJson a =
   use Json text
   Json.object [("name", text (Actor.name a)), ("role", text (role a))]
 
+Art.artworkLogDdl : Text
+Art.artworkLogDdl =
+  Text.join
+    ""
+    [ "CREATE TABLE IF NOT EXISTS artwork_log ("
+    , "  scope      TEXT NOT NULL,"
+    , "  item_key   TEXT NOT NULL,"
+    , "  kind       TEXT NOT NULL,"
+    , "  path       TEXT NOT NULL,"
+    , "  fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+    , "  PRIMARY KEY (scope, item_key, kind)"
+    , ")"
+    ]
+
 Art.bannerEntryFromJson : '{unison_json_1_3_5.Decoder} (Text, Text)
 Art.bannerEntryFromJson = do
   use Decoder text
@@ -598,6 +612,18 @@ Art.curlToFile url dest =
           Left f  -> Left (message f)
       else Left (Text.trim err)
 
+Art.destFor : Text -> Text -> Text
+Art.destFor folder kind = match kind with
+  "poster" -> folder Text.++ "/poster.jpg"
+  "fanart" -> folder Text.++ "/fanart.jpg"
+  "logo"   -> folder Text.++ "/clearlogo.png"
+  "banner" -> folder Text.++ "/banner.jpg"
+  _        -> folder Text.++ "/" Text.++ kind Text.++ ".jpg"
+
+Art.ensureSchema : Config ->{IO, Exception} ()
+Art.ensureSchema cfg = 
+  myPg.singleIO (toClientConfig cfg) do runDDLList [artworkLogDdl]
+
 Art.extractNfoTmdbId : Text -> Optional Nat
 Art.extractNfoTmdbId nfo = match Text.indexOf "type=\"tmdb\"" nfo with
   Optional.None -> Optional.None
@@ -632,6 +658,47 @@ test> Art.extractNfoTmdbId.test =
     , eq (extractNfoTmdbId "<tvshow></tvshow>") Optional.None
     ]
 
+Art.fanartThrottle : '{IO, Exception} ()
+Art.fanartThrottle = do
+  use Nat *
+  ms = getNatOr "UNIDORK_ART_THROTTLE_FANART_MS" 500
+  concurrent.sleepMicroseconds (ms * 1000)
+
+Art.fetchBannerUrl : Text -> Text ->{IO, Exception} Optional Text
+Art.fetchBannerUrl fanartTok tvdb =
+  use Text ++
+  _ = fanartThrottle()
+  url =
+    "https://webservice.fanart.tv/v3/tv/" ++ tvdb ++ "?api_key=" ++ fanartTok
+  match curlJson [] url with
+    Left _     -> Optional.None
+    Right json -> pickBanner json
+
+Art.fetchLogoUrl :
+  Optional Text -> Text -> Text ->{IO, Exception} Optional Text
+Art.fetchLogoUrl tokenOpt seg tmdbText =
+  match tokenOpt with
+    Optional.None -> Optional.None
+    Some tok ->
+      use Optional None
+      use Text ++
+      _ = tmdbThrottle()
+      url =
+        "https://api.themoviedb.org/3/"
+          ++ seg
+          ++ "/"
+          ++ tmdbText
+          ++ "/images?include_image_language=en,null"
+      match curlJson ["Authorization: Bearer " ++ tok] url with
+        Left _     -> None
+        Right json ->
+          match catch do unison_json_1_4_2.Decoder.run logosFromJson json with
+            Right ls ->
+              match pickLogo ls with
+                Some fp -> Some (tmdbImgUrl fp)
+                None    -> None
+            Left _   -> None
+
 Art.healTvdb : Config -> [(Text, Text)] ->{IO, Exception} ()
 Art.healTvdb cfg healed = myPg.singleIO (toClientConfig cfg) do
   use List ++
@@ -643,7 +710,28 @@ Art.healTvdb cfg healed = myPg.singleIO (toClientConfig cfg) do
   _ = Db.foreach_ writeOne healed
   PreparedCommand.close pc
 
-Art.loadShowsMeta : Config ->{IO, Exception} [(Text, Text)]
+Art.insertArtSql : Command b (Text -> Text -> Text -> Text -> b)
+Art.insertArtSql =
+  use Codec text
+  use StatementBuilder var
+  sql "INSERT INTO artwork_log (scope, item_key, kind, path) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql
+         ") ON CONFLICT (scope, item_key, kind) DO UPDATE SET path = EXCLUDED.path, fetched_at = NOW()"
+    |> buildCommand
+
+Art.isPngPath : Text -> Boolean
+Art.isPngPath p = match Text.indexOf ".png" p with
+  Some _        -> true
+  Optional.None -> false
+
+Art.loadShowsMeta : Config ->{IO, Exception} [((Text, Text), Text)]
 Art.loadShowsMeta cfg = myPg.singleIO (toClientConfig cfg) do
   use Text ++
   pq = prepareQuery showsMetaSql
@@ -658,6 +746,44 @@ Art.loadShowsMeta cfg = myPg.singleIO (toClientConfig cfg) do
     Right rs -> rs
   _ = PreparedQuery.close pq
   rows
+
+Art.logArt : Config -> [(Text, Text, Text, Text)] ->{IO, Exception} ()
+Art.logArt cfg rows =
+  match rows with
+    [] -> ()
+    _ ->
+      myPg.singleIO (toClientConfig cfg) do
+        use List ++
+        pc = prepareCommand insertArtSql
+        writeOne = cases
+          (scope, key, kind, path) ->
+            _ = 
+              catch do
+                bindAndExecuteCommand
+                  pc (pt scope ++ pt key ++ pt kind ++ pt path)
+            ()
+        _ = Db.foreach_ writeOne rows
+        PreparedCommand.close pc
+
+Art.logoEntryFromJson : '{unison_json_1_3_5.Decoder} (Text, Text)
+Art.logoEntryFromJson = do
+  use Decoder text
+  fp = object.at! "file_path" text
+  lang = Optional.getOrElse "" (Decoder.optional! (object.at "iso_639_1" text))
+  (fp, lang)
+
+Art.logosFromJson : '{unison_json_1_3_5.Decoder} [(Text, Text)]
+Art.logosFromJson =
+  do
+    Optional.getOrElse
+      []
+      (Decoder.optional! (object.at "logos" (Decoder.array logoEntryFromJson)))
+
+Art.lookupMeta : Text -> [((Text, Text), Text)] -> Optional (Text, Text)
+Art.lookupMeta sid = cases
+  [] -> Optional.None
+  ((k, tvdb), j) +: rest ->
+    if Universal.eq k sid then Some (tvdb, j) else Art.lookupMeta sid rest
 
 Art.lookupText : Text -> [(Text, Text)] -> Optional Text
 Art.lookupText k = cases
@@ -691,6 +817,65 @@ Art.movieChunkSql =
     %% StatementBuilder.var text
     %% sql (" ORDER BY lm.folder_checksum LIMIT " ++ Nat.toText chunkRows)
     |> typedQuery (text ~ text ~ text ~ text)
+
+Art.movieKindsEnv : '{IO, Exception} [Text]
+Art.movieKindsEnv = do parseKinds (getEnvOr "UNIDORK_ART_MOVIES" "poster")
+
+Art.movieKindStep :
+  Boolean
+  -> Optional Text
+  -> Text
+  -> Text
+  -> Text
+  -> (Optional Text, Optional Text)
+  -> ((Nat, Nat, Nat), [(Text, Text, Text, Text)])
+  -> Text
+  ->{IO, Exception} ((Nat, Nat, Nat), [(Text, Text, Text, Text)])
+Art.movieKindStep dry tokenOpt ck folder tmdbText pair acc kind =
+  use List :+
+  use Nat +
+  use Optional None
+  use Text ++
+  ((done, skipped, failed), logs) = acc
+  dest = destFor folder kind
+  if pathExists (FilePath dest) then ((done, skipped + 1, failed), logs)
+  else
+    urlOpt = match kind with
+      "poster" ->
+        match pair with
+          (Some p, _) -> Some (tmdbImgUrl p)
+          _           -> None
+      "fanart" ->
+        match pair with
+          (_, Some b) -> Some (tmdbImgUrl b)
+          _           -> None
+      "logo"   -> fetchLogoUrl tokenOpt "movie" tmdbText
+      _        -> None
+    match urlOpt with
+      None ->
+        _ = printLine ("  [artwork] no " ++ kind ++ ": " ++ folder)
+        ((done, skipped, failed + 1), logs)
+      Some url ->
+        if dry then
+          _ = printLine ("  would fetch " ++ kind ++ ": " ++ folder)
+          ((done + 1, skipped, failed), logs)
+        else
+          match curlToFile url dest with
+            Right _ ->
+              _ = printLine ("  " ++ kind ++ ": " ++ folder)
+              _ = tmdbThrottle()
+              ((done + 1, skipped, failed), logs :+ ("movie", ck, kind, dest))
+            Left e ->
+              _ =
+                printLine
+                  ("  [artwork] "
+                    ++ kind
+                    ++ " FAILED: "
+                    ++ folder
+                    ++ " ("
+                    ++ e
+                    ++ ")")
+              ((done, skipped, failed + 1), logs)
 
 Art.movieOne :
   Boolean
@@ -730,40 +915,137 @@ Art.movieOne dry tokenOpt acc = cases
                       ("  [artwork] FAILED: " ++ folder ++ " (" ++ e ++ ")")
                   (done, skipped, failed + 1)
 
+Art.movieRow :
+  Boolean
+  -> Optional Text
+  -> [Text]
+  -> ((Nat, Nat, Nat), [(Text, Text, Text, Text)])
+  -> (((Text, Text), Text), Text)
+  ->{IO, Exception} ((Nat, Nat, Nat), [(Text, Text, Text, Text)])
+Art.movieRow dry tokenOpt kinds acc = cases
+  (((ck, folder), tmdbText), cachedJson) ->
+    ((done, skipped, failed), logs) = acc
+    if Boolean.not (isDirectory (FilePath folder)) then
+      ((done, skipped Nat.+ 1, failed), logs)
+    else
+      use Optional None
+      use Universal eq
+      needsPair = List.any (k -> eq k "poster" || eq k "fanart") kinds
+      pair =
+        if needsPair then pairFor tokenOpt tmdbText cachedJson
+        else (None, None)
+      List.foldLeft
+        (movieKindStep dry tokenOpt ck folder tmdbText pair) acc kinds
+
 Art.movies : Config -> Boolean ->{IO, Exception} ()
 Art.movies cfg dry =
   use Nat toText
   use Optional None
   use Text ++
-  tokenOpt = match catch do readTmdbToken cfg with
-    Right t -> Some t
-    Left _  -> None
+  kindsRaw = movieKindsEnv()
+  (kinds, bad) = splitKinds validMovieKinds kindsRaw
   _ =
-    match tokenOpt with
-      None ->
-        printLine
-          "[artwork] no tmdb token; cached details only, no fallback fetches"
-      Some _ -> ()
-  loop lastCk stats =
-    rows = movieChunk cfg lastCk
-    match rows with
-      [] -> stats
-      _  ->
-        stats' = List.foldLeft (movieOne dry tokenOpt) stats rows
-        match lastOf rows with
-          Some (((ck, _), _), _) -> loop ck stats'
-          None                   -> stats'
-  (done, skipped, failed) = loop "" (0, 0, 0)
-  verbed = if dry then "would fetch" else "fetched"
-  printLine
-    ("[artwork] "
-      ++ verbed
-      ++ " "
-      ++ toText done
-      ++ ", skipped "
-      ++ toText skipped
-      ++ ", failed "
-      ++ toText failed)
+    Db.foreach_
+      (k -> printLine ("[artwork] unsupported movie kind ignored: " ++ k)) bad
+  if Universal.eq (List.size kinds) 0 then
+    printLine
+      "[artwork] no valid kinds configured (UNIDORK_ART_MOVIES); nothing to do"
+  else
+    _ = ensureSchema cfg
+    _ = printLine ("[artwork] kinds: " ++ Text.join ", " kinds)
+    tokenOpt = match catch do readTmdbToken cfg with
+      Right t -> Some t
+      Left _  -> None
+    _ =
+      match tokenOpt with
+        None ->
+          printLine
+            "[artwork] no tmdb token; cached details only, no logo or fallback fetches"
+        Some _ -> ()
+    loop lastCk stats =
+      rows = movieChunk cfg lastCk
+      match rows with
+        [] -> stats
+        _ ->
+          (stats', logs) =
+            List.foldLeft (movieRow dry tokenOpt kinds) (stats, []) rows
+          _ = if dry then () else logArt cfg logs
+          match lastOf rows with
+            Some (((ck, _), _), _) -> loop ck stats'
+            None                   -> stats'
+    (done, skipped, failed) = loop "" (0, 0, 0)
+    verbed = if dry then "would fetch" else "fetched"
+    printLine
+      ("[artwork] "
+        ++ verbed
+        ++ " "
+        ++ toText done
+        ++ ", skipped "
+        ++ toText skipped
+        ++ ", failed "
+        ++ toText failed)
+
+Art.nonEmptyPath : Optional Text -> Optional Text
+Art.nonEmptyPath = cases
+  Some p | Text.size p Nat.> 0 -> Some p
+  _      -> Optional.None
+
+Art.pairFor :
+  Optional Text
+  -> Text
+  -> Text
+  ->{IO, Exception} (Optional Text, Optional Text)
+Art.pairFor tokenOpt tmdbText cachedJson =
+  use Art pairOf
+  use Optional None
+  cached =
+    if Universal.eq cachedJson "" then (None, None) else pairOf cachedJson
+  match cached with
+    (None, None) ->
+      match (tokenOpt, Nat.fromText tmdbText) with
+        (Some tok, Some tid) ->
+          _ = tmdbThrottle()
+          match fetchDetailsBody tok tid with
+            Right json -> pairOf json
+            Left _     -> (None, None)
+        _                    -> (None, None)
+    pair         -> pair
+
+Art.pairFromJson : '{unison_json_1_3_5.Decoder} (Optional Text, Optional Text)
+Art.pairFromJson = do
+  use Decoder optional! text
+  use object at
+  p = optional! (at "poster_path" text)
+  b = optional! (at "backdrop_path" text)
+  (p, b)
+
+Art.pairOf : Text -> (Optional Text, Optional Text)
+Art.pairOf json =
+  match catch do unison_json_1_4_2.Decoder.run pairFromJson json with
+    Right (p, b) -> (nonEmptyPath p, nonEmptyPath b)
+    Left _       -> (Optional.None, Optional.None)
+
+test> Art.pairOf.test =
+  j = "{\"poster_path\": \"/p.jpg\", \"backdrop_path\": null}"
+  List.flatMap
+    check [Universal.eq (Art.pairOf j) (Some "/p.jpg", Optional.None)]
+
+Art.parseKinds : Text -> [Text]
+Art.parseKinds raw =
+  use Nat >
+  norm t =
+    n = Text.toLowercase (Text.trim t)
+    if Universal.eq n "clearlogo" then "logo" else n
+  cleaned = List.map norm (Text.split ?, raw)
+  List.filter (k -> Text.size k > 0) (List.distinct cleaned)
+
+test> Art.parseKinds.test =
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (parseKinds "poster, Fanart,clearlogo") ["poster", "fanart", "logo"]
+    , eq (parseKinds "") []
+    ]
 
 Art.pickBanner : Text -> Optional Text
 Art.pickBanner json =
@@ -778,6 +1060,39 @@ Art.pickBanner json =
           match entries with
             (u, _) +: _ -> Some u
             []          -> None
+
+Art.pickLogo : [(Text, Text)] -> Optional Text
+Art.pickLogo entries =
+  use List find
+  use Optional None
+  use Universal eq
+  pngs = List.filter (cases (fp, _) -> isPngPath fp) entries
+  en = find (cases (_, l) -> eq l "en") pngs
+  neutral = find (cases (_, l) -> eq l "") pngs
+  pick = match en with
+    Some e -> Some e
+    None   ->
+      match neutral with
+        Some n -> Some n
+        None   ->
+          match pngs with
+            e +: _ -> Some e
+            []     -> None
+  match pick with
+    Some (fp, _) -> Some fp
+    None         -> None
+
+test> Art.pickLogo.test =
+  use Optional None
+  use Universal eq
+  entries = [("/a.svg", "en"), ("/b.png", "de"), ("/c.png", "en")]
+  svgOnly = [("/a.svg", "en"), ("/b.svg", "")]
+  List.flatMap
+    check
+    [ eq (pickLogo entries) (Some "/c.png")
+    , eq (pickLogo svgOnly) None
+    , eq (pickLogo []) None
+    ]
 
 Art.posterFromJson : '{unison_json_1_3_5.Decoder} Optional Text
 Art.posterFromJson =
@@ -826,6 +1141,25 @@ Art.resolvePoster tokenOpt tmdbText cachedJson =
             Left _     -> None
         _                    -> None
 
+Art.resolveTvdb : Optional Text -> Text -> Text ->{IO, Exception} Optional Text
+Art.resolveTvdb tmdbTokOpt known sidT =
+  use Nat >
+  use Optional None
+  use Text ++
+  if Text.size known > 0 then Some known
+  else
+    match tmdbTokOpt with
+      None     -> None
+      Some tok ->
+        url = "https://api.themoviedb.org/3/tv/" ++ sidT ++ "/external_ids"
+        _ = tmdbThrottle()
+        match curlJson ["Authorization: Bearer " ++ tok] url with
+          Left _     -> None
+          Right json ->
+            match catch do unison_json_1_4_2.Decoder.run tvdbFromJson json with
+              Right (Some n) -> Some (Nat.toText n)
+              _              -> None
+
 Art.showRoots : Config ->{IO, Exception} [(Text, Nat)]
 Art.showRoots cfg =
   use List :+
@@ -849,46 +1183,84 @@ Art.showRoots cfg =
       else acc
   List.foldLeft step [] entries
 
-Art.showsMetaSql : postgres.Query r r (Text, Text)
+Art.showsMetaSql : postgres.Query r r ((Text, Text), Text)
 Art.showsMetaSql =
   use Codec text
-  sql "SELECT tmdb_show_id::text, COALESCE(tvdb_id, '') FROM shows"
-    |> typedQuery (text ~ text)
+  sql
+    "SELECT tmdb_show_id::text, COALESCE(tvdb_id, ''), details_json FROM shows"
+    |> typedQuery (text ~ text ~ text)
+
+Art.splitKinds : [Text] -> [Text] -> ([Text], [Text])
+Art.splitKinds valid kinds =
+  use List filter
+  isValid k = List.any (v -> Universal.eq v k) valid
+  good = filter isValid kinds
+  bad = filter (k -> Boolean.not (isValid k)) kinds
+  (good, bad)
+
+Art.tmdbImgUrl : Text -> Text
+Art.tmdbImgUrl p =
+  use Text ++
+  "https://image.tmdb.org/t/p/original" ++ p
+
+Art.tmdbThrottle : '{IO, Exception} ()
+Art.tmdbThrottle = do
+  use Nat *
+  ms = getNatOr "UNIDORK_ART_THROTTLE_TMDB_MS" 250
+  concurrent.sleepMicroseconds (ms * 1000)
 
 Art.tvBanners : Config -> Boolean ->{IO, Exception} ()
 Art.tvBanners cfg dry =
-  match readFanartToken() with
-    Optional.None ->
-      printLine
-        "[tv-artwork] banners require a fanart.tv key (TMDB has no banner art). Put a personal api key at ~/.config/uniDork/fanart-token or set UNIDORK_TOKEN_FANART."
-    Some fanartTok ->
-      use List size
-      use Nat toText
-      use Text ++
-      tmdbTokOpt = match catch do readTmdbToken cfg with
-        Right t -> Some t
-        Left _  -> Optional.None
-      roots = showRoots cfg
-      _ =
-        printLine ("[tv-artwork] " ++ toText (size roots) ++ " show folder(s)")
-      meta = loadShowsMeta cfg
-      (stats, healed) =
-        List.foldLeft
-          (bannerOne dry fanartTok tmdbTokOpt meta) ((0, 0, 0), []) roots
-      (done, skipped, failed) = stats
-      _ =
-        if dry then ()
-        else if Universal.eq (size healed) 0 then () else healTvdb cfg healed
-      verbed = if dry then "would fetch" else "fetched"
-      printLine
-        ("[tv-artwork] "
-          ++ verbed
-          ++ " "
-          ++ toText done
-          ++ ", skipped "
-          ++ toText skipped
-          ++ ", failed "
-          ++ toText failed)
+  use List size
+  use Nat toText
+  use Optional None
+  use Text ++
+  use Universal eq
+  kindsRaw = tvKindsEnv()
+  (kinds, bad) = splitKinds validTvKinds kindsRaw
+  _ =
+    Db.foreach_
+      (k -> printLine ("[tv-artwork] unsupported tv kind ignored: " ++ k)) bad
+  if eq (size kinds) 0 then
+    printLine
+      "[tv-artwork] no valid kinds configured (UNIDORK_ART_TV); nothing to do"
+  else
+    _ = ensureSchema cfg
+    _ = printLine ("[tv-artwork] kinds: " ++ Text.join ", " kinds)
+    fanartTokOpt = readFanartToken()
+    wantsBanner = List.any (k -> eq k "banner") kinds
+    _ =
+      match (wantsBanner, fanartTokOpt) with
+        (true, None) ->
+          printLine
+            "[tv-artwork] banner requested but no fanart.tv key (~/.config/uniDork/fanart-token or UNIDORK_TOKEN_FANART); banners will fail"
+        _ -> ()
+    tmdbTokOpt = match catch do readTmdbToken cfg with
+      Right t -> Some t
+      Left _  -> None
+    roots = showRoots cfg
+    _ = printLine ("[tv-artwork] " ++ toText (size roots) ++ " show folder(s)")
+    meta = loadShowsMeta cfg
+    ((stats, healed), logs) =
+      List.foldLeft
+        (tvRow dry kinds fanartTokOpt tmdbTokOpt meta)
+        (((0, 0, 0), []), [])
+        roots
+    (done, skipped, failed) = stats
+    _ = if dry then () else logArt cfg logs
+    _ =
+      if dry then ()
+      else if eq (size healed) 0 then () else healTvdb cfg healed
+    verbed = if dry then "would fetch" else "fetched"
+    printLine
+      ("[tv-artwork] "
+        ++ verbed
+        ++ " "
+        ++ toText done
+        ++ ", skipped "
+        ++ toText skipped
+        ++ ", failed "
+        ++ toText failed)
 
 Art.tvdbFor :
   Optional Text -> [(Text, Text)] -> Nat ->{IO, Exception} Optional Text
@@ -918,6 +1290,105 @@ Art.tvdbFor tmdbTokOpt meta sid =
 Art.tvdbFromJson : '{unison_json_1_3_5.Decoder} Optional Nat
 Art.tvdbFromJson = do Decoder.optional! (object.at "tvdb_id" Decoder.nat)
 
+Art.tvKindsEnv : '{IO, Exception} [Text]
+Art.tvKindsEnv = do parseKinds (getEnvOr "UNIDORK_ART_TV" "banner")
+
+Art.tvKindStep :
+  Boolean
+  -> Optional Text
+  -> Optional Text
+  -> Text
+  -> Text
+  -> Text
+  -> (Optional Text, Optional Text)
+  -> (((Nat, Nat, Nat), [(Text, Text)]), [(Text, Text, Text, Text)])
+  -> Text
+  ->{IO, Exception} ( ((Nat, Nat, Nat), [(Text, Text)]),
+    [(Text, Text, Text, Text)])
+Art.tvKindStep dry fanartTokOpt tmdbTokOpt sidT knownTvdb dir pair acc kind =
+  use List :+
+  use Nat + >
+  use Optional None
+  use Text ++
+  (((done, skipped, failed), healed), logs) = acc
+  dest = destFor dir kind
+  if pathExists (FilePath dest) then
+    (((done, skipped + 1, failed), healed), logs)
+  else
+    (urlOpt, healed') =
+      match kind with
+        "poster" ->
+          match pair with
+            (Some p, _) -> (Some (tmdbImgUrl p), healed)
+            _           -> (None, healed)
+        "fanart" ->
+          match pair with
+            (_, Some b) -> (Some (tmdbImgUrl b), healed)
+            _           -> (None, healed)
+        "logo" -> (fetchLogoUrl tmdbTokOpt "tv" sidT, healed)
+        "banner" ->
+          match fanartTokOpt with
+            None -> (None, healed)
+            Some ftok ->
+              match resolveTvdb tmdbTokOpt knownTvdb sidT with
+                None -> (None, healed)
+                Some tvdb ->
+                  h =
+                    if Text.size knownTvdb > 0 then healed
+                    else healed :+ (sidT, tvdb)
+                  (fetchBannerUrl ftok tvdb, h)
+        _ -> (None, healed)
+    match urlOpt with
+      None ->
+        _ = printLine ("  [tv-artwork] no " ++ kind ++ ": " ++ dir)
+        (((done, skipped, failed + 1), healed'), logs)
+      Some url ->
+        if dry then
+          _ = printLine ("  would fetch " ++ kind ++ ": " ++ dir)
+          (((done + 1, skipped, failed), healed'), logs)
+        else
+          match curlToFile url dest with
+            Right _ ->
+              _ = printLine ("  " ++ kind ++ ": " ++ dir)
+              ( ((done + 1, skipped, failed), healed')
+              , logs :+ ("tv", sidT, kind, dest)
+              )
+            Left e ->
+              _ =
+                printLine
+                  ("  [tv-artwork] "
+                    ++ kind
+                    ++ " FAILED: "
+                    ++ dir
+                    ++ " ("
+                    ++ e
+                    ++ ")")
+              (((done, skipped, failed + 1), healed'), logs)
+
+Art.tvRow :
+  Boolean
+  -> [Text]
+  -> Optional Text
+  -> Optional Text
+  -> [((Text, Text), Text)]
+  -> (((Nat, Nat, Nat), [(Text, Text)]), [(Text, Text, Text, Text)])
+  -> (Text, Nat)
+  ->{IO, Exception} ( ((Nat, Nat, Nat), [(Text, Text)]),
+    [(Text, Text, Text, Text)])
+Art.tvRow dry kinds fanartTokOpt tmdbTokOpt meta acc = cases
+  (dir, sid) ->
+    use Optional None
+    use Universal eq
+    sidT = Nat.toText sid
+    (knownTvdb, detailsJson) =
+      Optional.getOrElse ("", "") (lookupMeta sidT meta)
+    needsPair = List.any (k -> eq k "poster" || eq k "fanart") kinds
+    pair = if needsPair then Art.pairOf detailsJson else (None, None)
+    List.foldLeft
+      (tvKindStep dry fanartTokOpt tmdbTokOpt sidT knownTvdb dir pair)
+      acc
+      kinds
+
 Art.updateShowTvdbSql : Command a (Text -> Text -> a)
 Art.updateShowTvdbSql =
   use Codec text
@@ -927,6 +1398,12 @@ Art.updateShowTvdbSql =
     %% sql " WHERE tmdb_show_id::text = "
     %% var text
     |> buildCommand
+
+Art.validMovieKinds : [Text]
+Art.validMovieKinds = ["poster", "fanart", "logo"]
+
+Art.validTvKinds : [Text]
+Art.validTvKinds = ["poster", "fanart", "logo", "banner"]
 
 Audio.fromJson : '{unison_json_1_3_5.Decoder} Audio
 Audio.fromJson = do
