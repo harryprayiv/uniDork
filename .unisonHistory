@@ -1,5 +1,24 @@
 quit
 compile cli ./bin/unidork-import
+update
+edit cli
+update
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+update
+quit
+compile cli ./bin/unidork-import
+quit
+compile cli ./bin/unidork-import
 quit
 compile cli ./bin/unidork-import
 update
@@ -79,22 +98,3 @@ compile cli ./bin/unidork-import
 update
 quit
 compile cli ./bin/unidork-import
-update
-edit.namespace .
-quit
-compile cli ./bin/unidork-import
-quit
-delete.term snapshotProbe
-quit
-update
-quit
-delete.term snapshotProbe
-quit
-update
-quit
-compile cli ./bin/unidork-import
-update
-view cli
-quit
-update
-quit

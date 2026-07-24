@@ -184,6 +184,42 @@ pkgs.writeShellApplication {
       fi
     }
 
+    cmd_artwork() {
+      ensure_pg
+      if has_flag "--dry-run" "$@"; then
+        run_import artwork --dry-run
+      elif has_flag "--apply" "$@"; then
+        run_import artwork
+      else
+        echo "artwork downloads poster.jpg files into the library. pass --apply, or --dry-run to preview."
+        exit 1
+      fi
+    }
+
+    cmd_tv_artwork() {
+      ensure_pg
+      if has_flag "--dry-run" "$@"; then
+        run_import tv-artwork --dry-run
+      elif has_flag "--apply" "$@"; then
+        run_import tv-artwork
+      else
+        echo "tv-artwork downloads banner.jpg files into the TV library. pass --apply, or --dry-run to preview."
+        exit 1
+      fi
+    }
+
+    cmd_versions() {
+      ensure_pg
+      if has_flag "--dry-run" "$@"; then
+        run_import versions --dry-run
+      elif has_flag "--apply" "$@"; then
+        run_import versions
+      else
+        echo "versions rewrites movie.nfo files in the library. pass --apply, or --dry-run to preview."
+        exit 1
+      fi
+    }
+
     cmd_tv_init()     { ensure_pg; run_import tv-init; }
     cmd_tv_probe()    { ensure_pg; run_import tv-probe; }
     cmd_tv_resolve()  { ensure_pg; run_import tv-resolve; }
@@ -313,8 +349,10 @@ SQL
       move)                cmd_move "$@" ;;
       subs)                cmd_subs "$@" ;;
       rename)              cmd_rename "$@" ;;
+      versions)            cmd_versions "$@" ;;
       probe-resolve)       cmd_probe_resolve ;;
       reconcile|import-buffer) cmd_reconcile ;;
+      artwork)             cmd_artwork "$@" ;;
       import-library)      cmd_import_library ;;
       import-all)          cmd_import_all ;;
 
@@ -322,6 +360,7 @@ SQL
       tv-probe)            cmd_tv_probe ;;
       tv-resolve)          cmd_tv_resolve ;;
       tv-identify)         cmd_tv_identify ;;
+      tv-artwork)          cmd_tv_artwork "$@" ;;
       tv-rename)           cmd_tv_rename "$@" ;;
       tv-process)          cmd_tv_process "$@" ;;
       tv-move)             cmd_tv_move "$@" ;;
@@ -369,9 +408,11 @@ MOVIE PIPELINE
   resolve                    associate staging movie files -> tmdb movies
   identify                   read-only resolver report for movie intake
   rename --apply|--dry-run   rename staging movies into buffer          (DESTRUCTIVE with --apply)
+  versions --apply|--dry-run    detect movie versions, stamp Kodi v22 version tags into movie.nfo (DESTRUCTIVE with --apply)
   move [folder] [--dry-run]  promote buffer folder(s) into movie library
   subs [--dry-run]           fetch missing subtitle sidecars for buffer movies (paced: UNIDORK_TUNE_SUB_DELAY_MS)
   reconcile                  probe movie buffer (repair/record existing files)
+  artwork --apply|--dry-run     fetch Kodi poster.jpg for movies from TMDB (cached details first)
   import-library             scan library dirs -> files + library_movies
   import-all                 reconcile + import-library
 
@@ -382,6 +423,7 @@ TV PIPELINE
   tv-identify                   read-only resolver report for tv intake
   tv-rename --apply|--dry-run   rename staging episodes into tv buffer  (DESTRUCTIVE with --apply)
   tv-move [folder] [--dry-run]  promote tv buffer show folder(s) into tv library
+  tv-artwork --apply|--dry-run  fetch Kodi banner.jpg for shows from fanart.tv (needs fanart token)
   tv-init                       create tv schema tables
 
 COMBINED

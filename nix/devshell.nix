@@ -8,6 +8,7 @@ pkgs.mkShell {
     postgresql
     pgcli
     ffmpeg
+    curl
     rhash
     rsync
     jq
