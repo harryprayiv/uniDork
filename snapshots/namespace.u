@@ -483,6 +483,37 @@ Actor.toJson a =
   use Json text
   Json.object [("name", text (Actor.name a)), ("role", text (role a))]
 
+Art.applyScan :
+  Config
+  -> ([(Text, Text, Text, Text)], [(Text, Text, Text)])
+  ->{IO, Exception} ()
+Art.applyScan cfg = cases
+  ([], []) -> ()
+  (ups, dels) ->
+    myPg.singleIO (toClientConfig cfg) do
+      use Db foreach_
+      use List ++
+      use PreparedCommand close
+      pcUp = prepareCommand insertScanSql
+      pcDel = prepareCommand deleteArtSql
+      upOne = cases
+        (scope, key, kind, path) ->
+          _ = 
+            catch do
+              bindAndExecuteCommand
+                pcUp (pt scope ++ pt key ++ pt kind ++ pt path)
+          ()
+      delOne = cases
+        (scope, key, kind) ->
+          _ = 
+            catch do
+              bindAndExecuteCommand pcDel (pt scope ++ pt key ++ pt kind)
+          ()
+      _ = foreach_ upOne ups
+      _ = foreach_ delOne dels
+      _ = close pcUp
+      close pcDel
+
 Art.artworkLogDdl : Text
 Art.artworkLogDdl =
   Text.join
@@ -612,6 +643,18 @@ Art.curlToFile url dest =
           Left f  -> Left (message f)
       else Left (Text.trim err)
 
+Art.deleteArtSql : Command a (Text -> Text -> Text -> a)
+Art.deleteArtSql =
+  use Codec text
+  use StatementBuilder var
+  sql "DELETE FROM artwork_log WHERE scope = "
+    %% var text
+    %% sql " AND item_key = "
+    %% var text
+    %% sql " AND kind = "
+    %% var text
+    |> buildCommand
+
 Art.destFor : Text -> Text -> Text
 Art.destFor folder kind = match kind with
   "poster" -> folder Text.++ "/poster.jpg"
@@ -622,7 +665,11 @@ Art.destFor folder kind = match kind with
 
 Art.ensureSchema : Config ->{IO, Exception} ()
 Art.ensureSchema cfg = 
-  myPg.singleIO (toClientConfig cfg) do runDDLList [artworkLogDdl]
+  myPg.singleIO (toClientConfig cfg) do
+    runDDLList
+      [ artworkLogDdl
+      , "ALTER TABLE artwork_log ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'fetched'"
+      ]
 
 Art.extractNfoTmdbId : Text -> Optional Nat
 Art.extractNfoTmdbId nfo = match Text.indexOf "type=\"tmdb\"" nfo with
@@ -726,6 +773,22 @@ Art.insertArtSql =
          ") ON CONFLICT (scope, item_key, kind) DO UPDATE SET path = EXCLUDED.path, fetched_at = NOW()"
     |> buildCommand
 
+Art.insertScanSql : Command b (Text -> Text -> Text -> Text -> b)
+Art.insertScanSql =
+  use Codec text
+  use StatementBuilder var
+  sql "INSERT INTO artwork_log (scope, item_key, kind, path, origin) VALUES ("
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql ", "
+    %% var text
+    %% sql
+         ", 'scan') ON CONFLICT (scope, item_key, kind) DO UPDATE SET path = EXCLUDED.path, fetched_at = NOW()"
+    |> buildCommand
+
 Art.isPngPath : Text -> Boolean
 Art.isPngPath p = match Text.indexOf ".png" p with
   Some _        -> true
@@ -792,29 +855,34 @@ Art.lookupText k = cases
     if Universal.eq k2 k then Some v else Art.lookupText k rest
 
 Art.movieChunk :
-  Config -> Text ->{IO, Exception} [(((Text, Text), Text), Text)]
-Art.movieChunk cfg lastCk = myPg.singleIO (toClientConfig cfg) do
-  use Text ++
+  Config -> Text -> Text ->{IO, Exception} [(((Text, Text), Text), Text)]
+Art.movieChunk cfg libRoot lastCk = myPg.singleIO (toClientConfig cfg) do
   pq = prepareQuery movieChunkSql
   r = catch do
-    portal = bindQuery pq (pt lastCk)
+    use List ++
+    portal = bindQuery pq (pt libRoot ++ pt lastCk)
     (rs, _) = executeQueryPortal portal 0
     rs
   rows = match r with
     Left f   ->
+      use Text ++
       _ = printLine ("[artwork] QUERY FAILED: " ++ Failure.message f)
       []
     Right rs -> rs
   _ = PreparedQuery.close pq
   rows
 
-Art.movieChunkSql : postgres.Query b (Text -> b) (((Text, Text), Text), Text)
+Art.movieChunkSql :
+  postgres.Query b (Text -> Text -> b) (((Text, Text), Text), Text)
 Art.movieChunkSql =
   use Codec text
+  use StatementBuilder var
   use Text ++
   sql
-    "SELECT lm.folder_checksum, lm.folder_path, lm.tmdb_id, COALESCE(m.details_json, '') FROM library_movies lm LEFT JOIN movies m ON m.tmdb_id::text = lm.tmdb_id WHERE lm.folder_path IS NOT NULL AND lm.tmdb_id IS NOT NULL AND lm.folder_checksum > "
-    %% StatementBuilder.var text
+    "SELECT lm.folder_checksum, lm.folder_path, lm.tmdb_id, COALESCE(m.details_json, '') FROM library_movies lm LEFT JOIN movies m ON m.tmdb_id::text = lm.tmdb_id WHERE lm.folder_path IS NOT NULL AND lm.tmdb_id IS NOT NULL AND lm.folder_path LIKE "
+    %% var text
+    %% sql " || '/%' AND lm.folder_checksum > "
+    %% var text
     %% sql (" ORDER BY lm.folder_checksum LIMIT " ++ Nat.toText chunkRows)
     |> typedQuery (text ~ text ~ text ~ text)
 
@@ -962,8 +1030,9 @@ Art.movies cfg dry =
           printLine
             "[artwork] no tmdb token; cached details only, no logo or fallback fetches"
         Some _ -> ()
+    libRoot = library (paths cfg)
     loop lastCk stats =
-      rows = movieChunk cfg lastCk
+      rows = movieChunk cfg libRoot lastCk
       match rows with
         [] -> stats
         _ ->
@@ -1159,6 +1228,92 @@ Art.resolveTvdb tmdbTokOpt known sidT =
             match catch do unison_json_1_4_2.Decoder.run tvdbFromJson json with
               Right (Some n) -> Some (Nat.toText n)
               _              -> None
+
+Art.scanAll : Config ->{IO, Exception} ()
+Art.scanAll cfg =
+  use Nat toText
+  use Text ++
+  _ = ensureSchema cfg
+  m = scanMovies cfg
+  t = scanTv cfg
+  printLine
+    ("[artwork-scan] inventoried "
+      ++ toText m
+      ++ " movie folder(s), "
+      ++ toText t
+      ++ " show(s); query artwork_log for coverage")
+
+Art.scanChunk : Config -> Text -> Text ->{IO, Exception} [(Text, Text)]
+Art.scanChunk cfg libRoot lastCk = myPg.singleIO (toClientConfig cfg) do
+  pq = prepareQuery scanChunkSql
+  r = catch do
+    use List ++
+    portal = bindQuery pq (pt libRoot ++ pt lastCk)
+    (rs, _) = executeQueryPortal portal 0
+    rs
+  rows = match r with
+    Left f   ->
+      use Text ++
+      _ = printLine ("[artwork-scan] QUERY FAILED: " ++ Failure.message f)
+      []
+    Right rs -> rs
+  _ = PreparedQuery.close pq
+  rows
+
+Art.scanChunkSql : postgres.Query b (Text -> Text -> b) (Text, Text)
+Art.scanChunkSql =
+  use Codec text
+  use StatementBuilder var
+  use Text ++
+  sql
+    "SELECT lm.folder_checksum, lm.folder_path FROM library_movies lm WHERE lm.folder_path IS NOT NULL AND lm.folder_path LIKE "
+    %% var text
+    %% sql " || '/%' AND lm.folder_checksum > "
+    %% var text
+    %% sql (" ORDER BY lm.folder_checksum LIMIT " ++ Nat.toText chunkRows)
+    |> typedQuery (text ~ text)
+
+Art.scanItem :
+  Text
+  -> [Text]
+  -> ([(Text, Text, Text, Text)], [(Text, Text, Text)])
+  -> (Text, Text)
+  ->{IO, Exception} ([(Text, Text, Text, Text)], [(Text, Text, Text)])
+Art.scanItem scope kinds acc = cases
+  (key, folder) ->
+    (ups, dels) = acc
+    use List :+
+    step a kind =
+      (u, d) = a
+      dest = destFor folder kind
+      if pathExists (FilePath dest) then (u :+ (scope, key, kind, dest), d)
+      else (u, d :+ (scope, key, kind))
+    List.foldLeft step (ups, dels) kinds
+
+Art.scanMovies : Config ->{IO, Exception} Nat
+Art.scanMovies cfg =
+  libRoot = library (paths cfg)
+  loop lastCk n =
+    use List size
+    use Nat +
+    rows = scanChunk cfg libRoot lastCk
+    match rows with
+      [] -> n
+      _  ->
+        batch = List.foldLeft (scanItem "movie" validMovieKinds) ([], []) rows
+        _ = applyScan cfg batch
+        match lastOf rows with
+          Some (ck, _)  -> loop ck (n + size rows)
+          Optional.None -> n + size rows
+  loop "" 0
+
+Art.scanTv : Config ->{IO, Exception} Nat
+Art.scanTv cfg =
+  roots = showRoots cfg
+  pairs = List.map (cases (dir, sid) -> (Nat.toText sid, dir)) roots
+  batch = List.foldLeft (scanItem "tv" validTvKinds) ([], []) pairs
+  _ = applyScan cfg batch
+  List.size pairs
 
 Art.showRoots : Config ->{IO, Exception} [(Text, Nat)]
 Art.showRoots cfg =
@@ -1489,6 +1644,7 @@ cli =
       "sweep-missing" +: _ -> Rename.sweepMissing cfg
       "subs" +: rest -> Fix.run cfg (hasFlag "--dry-run" rest)
       "artwork" +: rest -> movies cfg (hasFlag "--dry-run" rest)
+      "artwork-scan" +: _ -> scanAll cfg
       "tv-init" +: _ -> Tv.Db.createSchema cfg
       "tv-probe" +: _ -> runProbeTv cfg
       "tv-reconcile" +: _ -> runProbeAtTv cfg (tvBuffer (paths cfg)) "buffer"
@@ -1516,7 +1672,7 @@ cli =
       _ ->
         _ =
           printLine
-            "usage: unidork-import <process|reconcile|reconcile-stage|sweep-missing|subs|versions|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-reconcile|tv-identify|tv-resolve|tv-rename|tv-move|tv-process> [arg] [--dry-run]"
+            "usage: unidork-import <process|reconcile|reconcile-stage|sweep-missing|subs|versions|artwork|artwork-scan|tv-artwork|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-reconcile|tv-identify|tv-resolve|tv-rename|tv-move|tv-process> [arg] [--dry-run]"
         ()
 
 Config.fromEnv : '{IO} Config
