@@ -47,12 +47,11 @@ type Config.Tuning
       connChunks : Nat }
 
 ability db.MovieCatalog where
-  identityFor : Text ->{MovieCatalog} Optional FileIdentity
-  recordAssociation : Int -> Nat -> Int -> Text ->{MovieCatalog} ()
-  recordBufferFile : Text -> Text -> ProbeResult ->{MovieCatalog} ()
+  cacheProbe : Text -> Int -> ProbeResult ->{MovieCatalog} ()
+  isImported : Text ->{MovieCatalog} Boolean
+  recordLibraryFile : Text -> Text -> ProbeResult ->{MovieCatalog} ()
   saveLibraryMovie :
     Optional Text -> Optional Nat -> Optional Nat -> Movie ->{MovieCatalog} ()
-  updateLibraryPath : Text -> Text -> Text -> Int ->{MovieCatalog} ()
 
 ability db.MovieMoveCatalog where
   identityForFile : Text ->{MovieMoveCatalog} Optional FileIdentity
@@ -1597,83 +1596,12 @@ classifyPiece p m =
               else if startsWith "av" p then videoCodec.set (Some p) m else m
 
 cli : '{IO, Exception} ()
-cli =
-  do
-    use Optional None
-    use Rename sweepStaleStaging
-    use Resolve runWith
-    cfg = fromEnv()
-    args = getArgs()
-    match args with
-      "import-library" +: _ -> batchedRun cfg
-      "reconcile" +: _ -> runProbeAt cfg (buffer (paths cfg)) "buffer"
-      "import-buffer" +: _ -> runProbeAt cfg (buffer (paths cfg)) "buffer"
-      "import-all" +: _ ->
-        _ = runProbeAt cfg (buffer (paths cfg)) "buffer"
-        batchedRun cfg
-      "process" +: rest ->
-        dry = hasFlag "--dry-run" rest
-        _ = runProbeStage cfg
-        _ = runWith false cfg
-        _ = renameNewCombined cfg (movieFormat (paths cfg)) dry ()
-        _ = if dry then () else sweepStaleStaging cfg
-        doneMsg =
-          if dry then
-            "[process] dry run done. no files were created, moved, or deleted."
-          else "[process] done. review the buffer, then: unidork move"
-        printLine doneMsg
-      "move" +: rest ->
-        use Move run
-        dry = hasFlag "--dry-run" rest
-        match nonFlags rest with
-          name +: _ -> run cfg (Some name) dry
-          []        -> run cfg None dry
-      "identify" +: _ -> runWith true cfg
-      "resolve" +: _ -> runWith false cfg
-      "probe-stage" +: _ -> runProbeStage cfg
-      "rename" +: rest ->
-        dry = hasFlag "--dry-run" rest
-        match nonFlags rest with
-          format +: _ -> renameNewCombined cfg format dry ()
-          []          -> printLine "rename requires a format string"
-      "versions" +: rest ->
-        dry = hasFlag "--dry-run" rest
-        _ = Versions.run cfg
-        stampNfos cfg dry
-      "reconcile-stage" +: _ -> sweepStaleStaging cfg
-      "sweep-missing" +: _ -> Rename.sweepMissing cfg
-      "subs" +: rest -> Fix.run cfg (hasFlag "--dry-run" rest)
-      "artwork" +: rest -> movies cfg (hasFlag "--dry-run" rest)
-      "artwork-scan" +: _ -> scanAll cfg
-      "tv-init" +: _ -> Tv.Db.createSchema cfg
-      "tv-probe" +: _ -> runProbeTv cfg
-      "tv-reconcile" +: _ -> runProbeAtTv cfg (tvBuffer (paths cfg)) "buffer"
-      "tv-identify" +: _ -> identify cfg
-      "tv-resolve" +: _ -> Resolve.run cfg
-      "tv-artwork" +: rest -> tvBanners cfg (hasFlag "--dry-run" rest)
-      "tv-rename" +: rest -> applyTv cfg (hasFlag "--dry-run" rest) ()
-      "tv-move" +: rest ->
-        use Tv.Move run
-        dry = hasFlag "--dry-run" rest
-        match nonFlags rest with
-          name +: _ -> run cfg (Some name) dry
-          []        -> run cfg None dry
-      "tv-process" +: rest ->
-        dry = hasFlag "--dry-run" rest
-        _ = runProbeTv cfg
-        _ = Resolve.run cfg
-        _ = applyTv cfg dry ()
-        _ = if dry then () else sweepStaleStaging cfg
-        doneMsg =
-          if dry then
-            "[tv-process] dry run done. no files were created, moved, or deleted."
-          else "[tv-process] done. review the TV buffer, then: unidork tv-move"
-        printLine doneMsg
-      _ ->
-        _ =
-          printLine
-            "usage: unidork-import <process|reconcile|reconcile-stage|sweep-missing|subs|versions|artwork|artwork-scan|tv-artwork|import-library|import-all|move|probe-stage|identify|resolve|rename|tv-init|tv-probe|tv-reconcile|tv-identify|tv-resolve|tv-rename|tv-move|tv-process> [arg] [--dry-run]"
-        ()
+cli = do
+  cfg = fromEnv()
+  args = getArgs()
+  match args with
+    verb +: rest -> runVerb cfg verb rest
+    []           -> printLine uniDork.usage
 
 Config.fromEnv : '{IO} Config
 Config.fromEnv =
@@ -12429,63 +12357,70 @@ uniDork.alreadyImported pq claimedCrc =
 
 uniDork.batchedMain : Config -> Boolean -> Text ->{IO, Exception} ()
 uniDork.batchedMain cfg force configPath =
-  use List foldLeft size
+  use List foldLeft map size
   use Nat + toText
-  use Text join
   configText = readFileUtf8 (FilePath configPath)
   dirs = List.filterMap parseConfigLine (lines configText)
   _ = Db.createSchema cfg
-  _ = printLine "collecting folders..."
+  _ = printLine "[index] listing library roots"
   folders = collectFolders dirs
-  total = size folders
-  _ = printLine (join "" ["found ", toText total, " folders to process"])
-  sized = List.map (f -> (f, folderVideoBytes f)) folders
-  sumStep acc = cases (_, b) -> acc + b
-  totalBytes = foldLeft sumStep 0 sized
   _ =
     printLine
-      (join
-        ""
-        [ "[import] plan: "
-        , gigabytes totalBytes
-        , " of video (already-imported folders skip fast)"
-        ])
-  counter = IO.ref (0, 0)
-  startEpoch = epochSeconds()
-  batches = List.chunk batchSize sized
-  nBatches = size batches
+      ("[index] " Text.++ toText (size folders) Text.++ " folder(s) on disk")
+  claims = map claimOf folders
+  (fresh, skipped) = partitionImported cfg force claims
   _ =
     printLine
-      (join
-        ""
-        [ "processing in "
-        , toText nBatches
-        , " batches of (up to) "
-        , toText batchSize
-        ])
-  step i batch =
+      ("[index] "
+        Text.++ toText skipped
+        Text.++ " skipped by folder tag (no filesystem access), "
+        Text.++ toText (size fresh)
+        Text.++ " to examine")
+  (withVid, noVid) = splitByVideo fresh
+  gated = if force then map sizeOfWork withVid else partitionWorkDb cfg withVid
+  _ =
+    printLine
+      ("[index] "
+        Text.++ toText (size withVid)
+        Text.++ " with video, "
+        Text.++ toText (size gated)
+        Text.++ " changed since last index, "
+        Text.++ toText (size noVid)
+        Text.++ " without video (always examined)")
+  sized =
+    map (cases (b, (f, _)) -> (f, b)) gated List.++ map (f -> (f, 0)) noVid
+  nWork = size sized
+  if Universal.eq nWork 0 then printLine "[index] nothing to do"
+  else
+    use Text ++
+    sumStep acc = cases (_, b) -> acc + b
+    totalBytes = foldLeft sumStep 0 sized
+    _ = printLine ("[index] plan: " ++ gigabytes totalBytes ++ " to hash")
+    counter = IO.ref (0, 0)
+    startEpoch = epochSeconds()
+    batches = List.chunk batchSize sized
+    nBatches = size batches
     _ =
-      runBatchSafe
-        cfg force i nBatches total totalBytes startEpoch counter batch
-    i + 1
-  _ = foldLeft step 1 batches
-  printLine "done"
-
-uniDork.batchedRun : Config ->{IO, Exception} ()
-uniDork.batchedRun cfg =
-  args = getArgs()
-  force = List.any (a -> Universal.eq a "--force") args
-  nonFlag = List.filter (a -> Boolean.not (startsWith "--" a)) args
-  configPath = match nonFlag with
-    _ +: rest ->
-      match rest with
-        p +: _ -> p
-        []     -> libraryConfig (paths cfg)
-    []        -> libraryConfig (paths cfg)
-  batchedMain cfg force configPath
+      printLine
+        ("[index] "
+          ++ toText nBatches
+          ++ " batch(es) of up to "
+          ++ toText batchSize)
+    step i batch =
+      _ =
+        runBatchSafe
+          cfg force i nBatches nWork totalBytes startEpoch counter batch
+      i + 1
+    _ = foldLeft step 1 batches
+    printLine "[index] done"
 
 uniDork.batchSize : Nat
 uniDork.batchSize = 50
+
+uniDork.claimOf : FilePath -> (FilePath, Text)
+uniDork.claimOf folder =
+  meta = parseFolderName (filePathBasename folder)
+  (folder, Optional.getOrElse "" (FolderMeta.checksum meta))
 
 uniDork.collectFolders : [FilePath] ->{IO, Exception} [FilePath]
 uniDork.collectFolders roots =
@@ -12517,9 +12452,104 @@ uniDork.collectFolders roots =
 uniDork.hasFlag : flag -> [flag] -> Boolean
 uniDork.hasFlag flag flagArgs = List.any (a -> Universal.eq a flag) flagArgs
 
+uniDork.importLibraryRun : Config -> [Text] ->{IO, Exception} ()
+uniDork.importLibraryRun cfg rest =
+  force = hasFlag "--force" rest
+  configPath = match nonFlags rest with
+    p +: _ -> p
+    []     -> libraryConfig (paths cfg)
+  batchedMain cfg force configPath
+
+uniDork.importMovie : Text -> Movie ->{IO, MovieCatalog, Exception} ()
+uniDork.importMovie claimedText m =
+  use Optional None
+  use Text ++
+  probeOutcome = match videoFilePath m with
+    None         -> None
+    Some vidPath ->
+      match catch do probeWithCrc vidPath with
+        Right (Right pr) -> Some (vidPath, pr)
+        _                -> None
+  match probeOutcome with
+    None               ->
+      _ = printLine ("  WARN: no probe for " ++ claimedText)
+      saveLibraryMovie None None None m
+    Some (vidPath, pr) -> importProbed claimedText vidPath pr m
+
+uniDork.importProbed :
+  Text -> Text -> ProbeResult -> Movie ->{IO, MovieCatalog, Exception} ()
+uniDork.importProbed claimedText vidPath pr m =
+  use Universal eq
+  verifiedCrc = ProbeResult.crc32 pr
+  verifiedSize = ProbeResult.sizeBytes pr
+  originalName = filePathBasename (FilePath vidPath)
+  _ = recordLibraryFile vidPath originalName pr
+  mtime = match fileStat vidPath with
+    Some (mt, _)  -> effectiveMtime vidPath mt
+    Optional.None -> +0
+  _ = cacheProbe vidPath mtime pr
+  _ =
+    if eq claimedText "" then ()
+    else
+      if eq verifiedCrc claimedText then ()
+      else
+        printLine
+          (Text.join
+            ""
+            [ "  CRC MISMATCH: folder claims ~"
+            , claimedText
+            , " but bytes hash to ~"
+            , verifiedCrc
+            , " (corrected in-place)"
+            ])
+  actualRuntime = Some (durationSeconds (ProbeResult.durationSec pr))
+  saveLibraryMovie (Some verifiedCrc) (Some verifiedSize) actualRuntime m
+
+uniDork.moveTarget : [Text] -> Optional Text
+uniDork.moveTarget rest = match nonFlags rest with
+  name +: _ -> Some name
+  []        -> Optional.None
+
 uniDork.nonFlags : [Text] -> [Text]
 uniDork.nonFlags flagArgs =
   List.filter (a -> Boolean.not (startsWith "--" a)) flagArgs
+
+uniDork.partitionImported :
+  Config -> Boolean -> [(FilePath, Text)] ->{IO, Exception} ([FilePath], Nat)
+uniDork.partitionImported cfg force claims =
+  use List +: size
+  use Nat + - toText
+  total = size claims
+  if force then (List.map (cases (f, _) -> f) claims, 0)
+  else
+    groups = List.chunk (partitionSession (tuning cfg)) claims
+    runGroup grp = 
+      myPg.singleIO (toClientConfig cfg) do
+        pq = prepareQuery selectImportedCrcSql
+        step out = cases
+          (f, crc) -> if alreadyImported pq crc then out else f +: out
+        keep = List.foldLeft step [] grp
+        _ = PreparedQuery.close pq
+        keep
+    go acc seen = cases
+      [] -> acc
+      g +: rest ->
+        keep = runGroup g
+        seen' = seen + size g
+        _ =
+          printLine
+            ("[index] checked "
+              Text.++ toText seen'
+              Text.++ "/"
+              Text.++ toText total
+              Text.++ ", "
+              Text.++ toText (size keep)
+              Text.++ " new here, rss "
+              Text.++ toText rssMb()
+              Text.++ " MB")
+        go (keep List.++ acc) seen' rest
+    kept = List.reverse (go [] 0 groups)
+    (kept, total - size kept)
 
 uniDork.processBatch :
   Config
@@ -12532,241 +12562,30 @@ uniDork.processBatch :
   ->{IO, Exception} ()
 uniDork.processBatch
   cfg force totalFolders totalBytes startEpoch counter folders = 
-  myPg.singleIO (toClientConfig cfg) do
+  withMovieCatalog cfg do
     use Nat +
-    pqImported = prepareQuery selectImportedCrcSql
-    pcFiles = prepareCommand Stage.upsertFileSql
-    pcUpsert = prepareCommand upsertMovieSql
-    pcVid = prepareCommand insertVideoSql
-    pcDVid = prepareCommand (deleteChildSql "movie_video_streams")
-    pcAud = prepareCommand insertAudioSql
-    pcDAud = prepareCommand (deleteChildSql "movie_audio_tracks")
-    pcSub = prepareCommand insertSubSql
-    pcDSub = prepareCommand (deleteChildSql "movie_subtitles")
-    pcAct = prepareCommand insertActorSql
-    pcDAct = prepareCommand (deleteChildSql "movie_actors")
-    pcGen = prepareCommand insertGenreSql
-    pcDGen = prepareCommand (deleteChildSql "movie_genres")
-    pcTag = prepareCommand insertTagSql
-    pcDTag = prepareCommand (deleteChildSql "movie_tags")
-    pcCou = prepareCommand insertCountrySql
-    pcDCou = prepareCommand (deleteChildSql "movie_countries")
-    pcStu = prepareCommand insertStudioSql
-    pcDStu = prepareCommand (deleteChildSql "movie_studios")
-    pcDir = prepareCommand insertDirectorSql
-    pcDDir = prepareCommand (deleteChildSql "movie_directors")
-    pcCre = prepareCommand insertCreditSql
-    pcDCre = prepareCommand (deleteChildSql "movie_credits")
     oneWithProgress = cases
       (folder, bytes) ->
-        _ =
-          processOne
-            cfg
-            force
-            pqImported
-            pcFiles
-            pcUpsert
-            pcVid
-            pcDVid
-            pcAud
-            pcDAud
-            pcSub
-            pcDSub
-            pcAct
-            pcDAct
-            pcGen
-            pcDGen
-            pcTag
-            pcDTag
-            pcCou
-            pcDCou
-            pcStu
-            pcDStu
-            pcDir
-            pcDDir
-            pcCre
-            pcDCre
-            folder
+        _ = processOne force folder
         (dF, dB) = mutable.Ref.read counter
         _ = mutable.Ref.write counter (dF + 1, dB + bytes)
         Progress.report "folders" totalFolders totalBytes startEpoch counter
-    _ = Db.foreach_ oneWithProgress folders
-    _ = PreparedQuery.close pqImported
-    _ = PreparedCommand.close pcFiles
-    _ = PreparedCommand.close pcUpsert
-    _ = PreparedCommand.close pcVid
-    _ = PreparedCommand.close pcDVid
-    _ = PreparedCommand.close pcAud
-    _ = PreparedCommand.close pcDAud
-    _ = PreparedCommand.close pcSub
-    _ = PreparedCommand.close pcDSub
-    _ = PreparedCommand.close pcAct
-    _ = PreparedCommand.close pcDAct
-    _ = PreparedCommand.close pcGen
-    _ = PreparedCommand.close pcDGen
-    _ = PreparedCommand.close pcTag
-    _ = PreparedCommand.close pcDTag
-    _ = PreparedCommand.close pcCou
-    _ = PreparedCommand.close pcDCou
-    _ = PreparedCommand.close pcStu
-    _ = PreparedCommand.close pcDStu
-    _ = PreparedCommand.close pcDir
-    _ = PreparedCommand.close pcDDir
-    _ = PreparedCommand.close pcCre
-    PreparedCommand.close pcDCre
+    Db.foreach_ oneWithProgress folders
 
-uniDork.processOne :
-  Config
-  -> Boolean
-  -> PreparedQuery rI aI Text
-  -> PreparedCommand rF aF
-  -> PreparedCommand r20 a20
-  -> PreparedCommand r19 a19
-  -> PreparedCommand r18 a18
-  -> PreparedCommand r17 a17
-  -> PreparedCommand r16 a16
-  -> PreparedCommand r15 a15
-  -> PreparedCommand r14 a14
-  -> PreparedCommand r13 a13
-  -> PreparedCommand r12 a12
-  -> PreparedCommand r11 a11
-  -> PreparedCommand r10 a10
-  -> PreparedCommand r9 a9
-  -> PreparedCommand r8 a8
-  -> PreparedCommand r7 a7
-  -> PreparedCommand r6 a6
-  -> PreparedCommand r5 a5
-  -> PreparedCommand r4 a4
-  -> PreparedCommand r3 a3
-  -> PreparedCommand r2 a2
-  -> PreparedCommand r1 a1
-  -> PreparedCommand r a
-  -> FilePath
-  ->{IO, Exception, Postgres} ()
-uniDork.processOne
-  _cfg
-  force
-  pqImported
-  pcFiles
-  pcUpsert
-  pcVid
-  pcDVid
-  pcAud
-  pcDAud
-  pcSub
-  pcDSub
-  pcAct
-  pcDAct
-  pcGen
-  pcDGen
-  pcTag
-  pcDTag
-  pcCou
-  pcDCou
-  pcStu
-  pcDStu
-  pcDir
-  pcDDir
-  pcCre
-  pcDCre
-  folder =
-  use Optional None
+uniDork.processOne : Boolean -> FilePath ->{IO, MovieCatalog, Exception} ()
+uniDork.processOne force folder =
   use Text ++
-  use Universal eq
   folderName = filePathBasename folder
-  claimedCrc = FolderMeta.checksum (parseFolderName folderName)
-  claimedText = Optional.getOrElse "" claimedCrc
-  skip = if force then false else alreadyImported pqImported claimedText
+  claimedText =
+    Optional.getOrElse "" (FolderMeta.checksum (parseFolderName folderName))
+  skip = if force then false else isImported claimedText
   if skip then printLine ("  skip (already imported): " ++ claimedText)
   else
     match processFolder folder with
-      Left _ ->
+      Left _  ->
         _ = printLine ("  no nfo: " ++ filePathText folder)
         ()
-      Right m ->
-        probeOutcome = match videoFilePath m with
-          None         -> None
-          Some vidPath ->
-            match catch do probeWithCrc vidPath with
-              Right (Right pr) -> Some (vidPath, pr)
-              _                -> None
-        match probeOutcome with
-          None ->
-            _ = printLine ("  WARN: no probe for " ++ claimedText)
-            upsertWith
-              pcUpsert
-              pcVid
-              pcDVid
-              pcAud
-              pcDAud
-              pcSub
-              pcDSub
-              pcAct
-              pcDAct
-              pcGen
-              pcDGen
-              pcTag
-              pcDTag
-              pcCou
-              pcDCou
-              pcStu
-              pcDStu
-              pcDir
-              pcDDir
-              pcCre
-              pcDCre
-              None
-              None
-              None
-              m
-          Some (vidPath, pr) ->
-            verifiedCrc = ProbeResult.crc32 pr
-            verifiedSize = ProbeResult.sizeBytes pr
-            originalName = filePathBasename (FilePath vidPath)
-            _ =
-              Stage.upsertFileWith
-                pcFiles vidPath originalName (None, None, None) "library" pr
-            _ =
-              if eq claimedText "" then ()
-              else
-                if eq verifiedCrc claimedText then ()
-                else
-                  printLine
-                    (Text.join
-                      ""
-                      [ "  CRC MISMATCH: folder claims ~"
-                      , claimedText
-                      , " but bytes hash to ~"
-                      , verifiedCrc
-                      , " (corrected in-place)"
-                      ])
-            actualRuntime = Some (durationSeconds (ProbeResult.durationSec pr))
-            upsertWith
-              pcUpsert
-              pcVid
-              pcDVid
-              pcAud
-              pcDAud
-              pcSub
-              pcDSub
-              pcAct
-              pcDAct
-              pcGen
-              pcDGen
-              pcTag
-              pcDTag
-              pcCou
-              pcDCou
-              pcStu
-              pcDStu
-              pcDir
-              pcDDir
-              pcCre
-              pcDCre
-              (Some verifiedCrc)
-              (Some verifiedSize)
-              actualRuntime
-              m
+      Right m -> importMovie claimedText m
 
 uniDork.renameNewCombined : Config -> Text -> Boolean -> '{IO, Exception} ()
 uniDork.renameNewCombined cfg fullFormat dryRun =
@@ -12817,6 +12636,218 @@ uniDork.runBatchSafe
     processBatch cfg force totalFolders totalBytes startEpoch counter batch with
     Right _ -> ()
     Left f  -> printLine (join "" ["  BATCH FAILED: ", Failure.message f])
+
+uniDork.runVerb : Config -> Text -> [Text] ->{IO, Exception} ()
+uniDork.runVerb cfg verb rest =
+  use Resolve runWith
+  use Text ++
+  use uniDork usage
+  dry = hasFlag "--dry-run" rest
+  ps = paths cfg
+  match verb with
+    "db-init"         -> Db.createSchema cfg
+    "db-migrate"      -> migrate cfg
+    "db-tv-init"      -> Tv.Db.createSchema cfg
+    "movie-probe"     -> runProbeStage cfg
+    "movie-resolve"   -> runWith false cfg
+    "movie-rename"    -> renameNewCombined cfg (movieFormat ps) dry ()
+    "movie-subs"      -> Fix.run cfg dry
+    "movie-move"      -> Move.run cfg (moveTarget rest) dry
+    "movie-index"     -> importLibraryRun cfg rest
+    "movie-versions"  -> Versions.run cfg
+    "movie-nfo"       -> stampNfos cfg dry
+    "movie-artwork"   -> movies cfg dry
+    "movie-identify"  -> runWith true cfg
+    "movie-reconcile" -> runProbeAt cfg (buffer ps) "buffer"
+    "tv-probe"        -> runProbeTv cfg
+    "tv-resolve"      -> Resolve.run cfg
+    "tv-rename"       -> applyTv cfg dry ()
+    "tv-move"         -> Tv.Move.run cfg (moveTarget rest) dry
+    "tv-artwork"      -> tvBanners cfg dry
+    "tv-identify"     -> identify cfg
+    "tv-reconcile"    -> runProbeAtTv cfg (tvBuffer ps) "buffer"
+    "sweep-stage"     -> Rename.sweepStaleStaging cfg
+    "sweep-missing"   -> Rename.sweepMissing cfg
+    "artwork-scan"    -> scanAll cfg
+    "help"            -> printLine usage
+    "--help"          -> printLine usage
+    "-h"              -> printLine usage
+    other             ->
+      _ = printLine ("unidork-import: unknown verb '" ++ other ++ "'")
+      printLine usage
+
+uniDork.sizeOfWork : (FilePath, Text) ->{IO, Exception} (Nat, (FilePath, Text))
+uniDork.sizeOfWork = cases
+  (folder, videoPath) ->
+    match fileStat videoPath with
+      Some (_, sz)  -> (sz, (folder, videoPath))
+      Optional.None -> (0, (folder, videoPath))
+
+uniDork.splitByVideo :
+  [FilePath] ->{IO, Exception} ([(FilePath, Text)], [FilePath])
+uniDork.splitByVideo folders =
+  use List +: reverse
+  step acc folder =
+    (withVid, noVid) = acc
+    match videoOf folder with
+      Some pair     -> (pair +: withVid, noVid)
+      Optional.None -> (withVid, folder +: noVid)
+  (a, b) = List.foldLeft step ([], []) folders
+  (reverse a, reverse b)
+
+uniDork.usage : Text
+uniDork.usage =
+  Text.join
+    "\n"
+    [ "unidork-import <verb> [args] [--dry-run]"
+    , ""
+    , "  One stage per invocation, always. The 'unidork' orchestrator chains"
+    , "  these in order, one process per stage, so every stage gets a fresh"
+    , "  heap. There are deliberately no composite verbs here."
+    , ""
+    , "SCHEMA"
+    , "  db-init            create the movie schema"
+    , "  db-migrate         apply movie schema migrations"
+    , "  db-tv-init         create the tv schema"
+    , ""
+    , "MOVIE PIPELINE, in order"
+    , "   1 movie-probe     intake -> files(stage=staging)"
+    , "   2 movie-resolve   staging files -> tmdb associations"
+    , "   3 movie-rename    staging -> buffer, via UNIDORK_FORMAT_MOVIE"
+    , "   4 sweep-stage     drop emptied staging dirs and stale rows"
+    , "   5 movie-subs      fetch missing subtitle sidecars in the buffer"
+    , "   6 movie-move      buffer -> library"
+    , "   7 movie-index     library dirs -> files + library_movies"
+    , "   8 movie-versions  detect multi-copy editions, db only"
+    , "   9 movie-nfo       stamp version tags into movie.nfo"
+    , "  10 movie-artwork   fetch configured artwork into library folders"
+    , "  11 artwork-scan    inventory artwork on disk -> artwork_log"
+    , ""
+    , "TV PIPELINE, in order"
+    , "   1 tv-probe        tv intake -> files(stage=staging)"
+    , "   2 tv-resolve      staging files -> shows/episodes"
+    , "   3 tv-rename       staging -> tv buffer, via UNIDORK_FORMAT_TV"
+    , "   4 sweep-stage     drop emptied staging dirs and stale rows"
+    , "   5 tv-move         tv buffer -> tv library"
+    , "   6 tv-artwork      fetch configured show artwork"
+    , "   7 artwork-scan    inventory artwork on disk -> artwork_log"
+    , ""
+    , "REPORTS AND REPAIR"
+    , "  movie-identify     read-only resolver report for movie intake"
+    , "  tv-identify        read-only resolver report for tv intake"
+    , "  movie-reconcile    re-probe the movie buffer"
+    , "  tv-reconcile       re-probe the tv buffer"
+    , "  sweep-missing      delete files rows with stage='missing'"
+    , ""
+    , "FLAGS"
+    , "  --dry-run          create, move, or delete no file"
+    , "  --force            movie-index only: reimport already-seen folders"
+    ]
+
+uniDork.videoOf : FilePath ->{IO, Exception} Optional (FilePath, Text)
+uniDork.videoOf folder = match catch do directoryContents.texts folder with
+  Left _      -> Optional.None
+  Right files ->
+    match findFirstVideo files with
+      Optional.None -> Optional.None
+      Some v        -> Some (folder, filePathText (pathJoin folder v))
+
+uniDork.withMovieCatalog :
+  Config -> '{IO, MovieCatalog, Exception} a ->{IO, Exception} a
+uniDork.withMovieCatalog cfg body = 
+  myPg.singleIO (toClientConfig cfg) do
+    use Optional None
+    pqImported = prepareQuery selectImportedCrcSql
+    pcFiles = prepareCommand Stage.upsertFileSql
+    pcGate = prepareCommand upsertProbeCacheSql
+    pcUpsert = prepareCommand upsertMovieSql
+    pcVid = prepareCommand insertVideoSql
+    pcDVid = prepareCommand (deleteChildSql "movie_video_streams")
+    pcAud = prepareCommand insertAudioSql
+    pcDAud = prepareCommand (deleteChildSql "movie_audio_tracks")
+    pcSub = prepareCommand insertSubSql
+    pcDSub = prepareCommand (deleteChildSql "movie_subtitles")
+    pcAct = prepareCommand insertActorSql
+    pcDAct = prepareCommand (deleteChildSql "movie_actors")
+    pcGen = prepareCommand insertGenreSql
+    pcDGen = prepareCommand (deleteChildSql "movie_genres")
+    pcTag = prepareCommand insertTagSql
+    pcDTag = prepareCommand (deleteChildSql "movie_tags")
+    pcCou = prepareCommand insertCountrySql
+    pcDCou = prepareCommand (deleteChildSql "movie_countries")
+    pcStu = prepareCommand insertStudioSql
+    pcDStu = prepareCommand (deleteChildSql "movie_studios")
+    pcDir = prepareCommand insertDirectorSql
+    pcDDir = prepareCommand (deleteChildSql "movie_directors")
+    pcCre = prepareCommand insertCreditSql
+    pcDCre = prepareCommand (deleteChildSql "movie_credits")
+    go = cases
+      { r } -> r
+      { isImported crc -> k } ->
+        handle k (alreadyImported pqImported crc) with go
+      { recordLibraryFile path name pr -> k } ->
+        _ =
+          Stage.upsertFileWith
+            pcFiles path name (None, None, None) "library" pr
+        handle k() with go
+      { cacheProbe path mtime pr -> k } ->
+        _ = upsertProbeCacheWith pcGate path mtime pr
+        handle k() with go
+      { saveLibraryMovie crc sz runtime m -> k } ->
+        _ =
+          upsertWith
+            pcUpsert
+            pcVid
+            pcDVid
+            pcAud
+            pcDAud
+            pcSub
+            pcDSub
+            pcAct
+            pcDAct
+            pcGen
+            pcDGen
+            pcTag
+            pcDTag
+            pcCou
+            pcDCou
+            pcStu
+            pcDStu
+            pcDir
+            pcDDir
+            pcCre
+            pcDCre
+            crc
+            sz
+            runtime
+            m
+        handle k() with go
+    result = handle body() with go
+    _ = PreparedQuery.close pqImported
+    _ = PreparedCommand.close pcFiles
+    _ = PreparedCommand.close pcGate
+    _ = PreparedCommand.close pcUpsert
+    _ = PreparedCommand.close pcVid
+    _ = PreparedCommand.close pcDVid
+    _ = PreparedCommand.close pcAud
+    _ = PreparedCommand.close pcDAud
+    _ = PreparedCommand.close pcSub
+    _ = PreparedCommand.close pcDSub
+    _ = PreparedCommand.close pcAct
+    _ = PreparedCommand.close pcDAct
+    _ = PreparedCommand.close pcGen
+    _ = PreparedCommand.close pcDGen
+    _ = PreparedCommand.close pcTag
+    _ = PreparedCommand.close pcDTag
+    _ = PreparedCommand.close pcCou
+    _ = PreparedCommand.close pcDCou
+    _ = PreparedCommand.close pcStu
+    _ = PreparedCommand.close pcDStu
+    _ = PreparedCommand.close pcDir
+    _ = PreparedCommand.close pcDDir
+    _ = PreparedCommand.close pcCre
+    _ = PreparedCommand.close pcDCre
+    result
 
 Versions.analyze : Optional Nat -> [MediaFacts] -> [Edition]
 Versions.analyze canonicalMin facts =
