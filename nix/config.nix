@@ -6,17 +6,9 @@ in
 {
   inherit name;
 
-  # ------------------------------------------------------------------
-  # TEMPLATE KNOB. This is the only thing a new project derived from
-  # this template should need to touch for editor integration.
-  # Available languages are defined in nix/ide.nix's registry; unknown
-  # names fail evaluation loudly.
-  # ------------------------------------------------------------------
   ide = {
     languages = [ "unison" "nix" ];
 
-    # Escape hatches for one-off project needs, so ide.nix itself never
-    # has to be edited per-project:
     extraRecommendations = [ ];   # e.g. [ "tamasfe.even-better-toml" ]
     extraSettings = { };          # merged last, wins over registry settings
   };
@@ -38,16 +30,10 @@ in
     dataDir = "$HOME/.local/share/uniDork/postgres";
 
     backup = {
-      # Must live on a different device than dataDir to survive disk death.
-      # NAS is correct here since PGDATA is on local disk.
       dir = "/home/bismuth/NAS/video/HT_Profile/~Backup";
 
-      # How many timestamped dumps to keep. Older ones are pruned after each
-      # successful backup.
       keep = 10;
 
-      # `pg-backup --auto` (used by the orchestrator before destructive verbs)
-      # is a no-op if a backup newer than this many hours already exists.
       autoIntervalHours = 2;
     };
   };
@@ -73,16 +59,56 @@ in
     tvFormat = "{ny}/Season {s00}/{n} - S{s00}E{e00} - {t} [{vc}_{bitdepth}b_{resolution}_{mbps}_{ac}-{channels}] ~{crc32}";
   };
 
-  tmdb = {
-    tokenFile = "$HOME/.config/uniDork/tmdb-token";
+  # Every API key uniDork touches, in one table.
+  #
+  # The Unison side already takes *paths*, never values, so no secret ever
+  # lands in the nix store, in a process listing, or in a derivation.
+  #
+  #   env     variable the Unison Config reader looks at
+  #   key     leaf name inside the sops YAML, under the top-level `unidork:`
+  #           mapping. Also the basename under runDir.
+  #   legacy  basename of the pre-sops plaintext file under legacyDir
+  #
+  # Runtime resolution order is: already-exported env, then runDir, then
+  # legacyDir. An activated NixOS host uses sops. A bare `nix develop` on a
+  # machine that has never seen sops still works.
+  secrets = {
+    runDir    = "/run/secrets/unidork";
+    legacyDir = "$HOME/.config/uniDork";
+
+    entries = {
+      tmdb = {
+        env    = "UNIDORK_TOKEN_TMDB";
+        key    = "tmdb_token";
+        legacy = "tmdb-token";
+        note   = "TMDB v4 read access token, sent as Authorization: Bearer";
+      };
+
+      opensubtitles = {
+        env    = "UNIDORK_TOKEN_SUB";
+        key    = "opensubtitles_key";
+        legacy = "sub-token";
+        note   = "OpenSubtitles api_key query parameter";
+      };
+
+      fanart = {
+        env    = "UNIDORK_TOKEN_FANART";
+        key    = "fanart_key";
+        legacy = "fanart-token";
+        note   = "fanart.tv api_key query parameter, used by tv-artwork banners";
+      };
+    };
+  };
+
+  artwork = {
+    movies = [ "poster" "fanart" "logo" ];
+    tv = [ "banner" "poster" ];
+    tmdbThrottleMs = 250;
+    fanartThrottleMs = 500;
   };
 
   subs = {
-    tokenFile = "$HOME/.config/uniDork/sub-token";
     languages = [ "en" "es" "th" ];
-    # Minimum pacing between subdl API requests, in milliseconds. On a
-    # rate-limit-shaped failure the fetch retries with 4x backoff, max 3
-    # attempts (2s -> 8s -> 32s at the default).
     delayMs = 2000;
   };
 

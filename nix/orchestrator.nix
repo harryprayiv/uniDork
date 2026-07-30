@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, snapshot, mirror }:
+{ pkgs, lib ? pkgs.lib, config, secrets, uniDork, postgres, snapshot, mirror }:
 
 pkgs.writeShellApplication {
   name = "unidork";
@@ -19,9 +19,11 @@ pkgs.writeShellApplication {
     postgres.pg-cleanup
     postgres.pg-backup
     postgres.pg-restore
+    secrets.doctor
   ];
   text = ''
     set -euo pipefail
+
 
     : "''${PGDATA:=${config.database.dataDir}}"
     export PGDATA
@@ -51,18 +53,20 @@ pkgs.writeShellApplication {
     : "''${UNIDORK_FORMAT_TV:=${config.rename.tvFormat}}"
     export UNIDORK_FORMAT_MOVIE UNIDORK_FORMAT_TV
 
-    : "''${UNIDORK_TOKEN_TMDB:=${config.tmdb.tokenFile}}"
-    : "''${UNIDORK_TOKEN_SUB:=${config.subs.tokenFile}}"
-    export UNIDORK_TOKEN_TMDB UNIDORK_TOKEN_SUB
+${secrets.envSetup}
+
+    export UNIDORK_ART_MOVIES="${lib.concatStringsSep "," config.artwork.movies}"
+    export UNIDORK_ART_TV="${lib.concatStringsSep "," config.artwork.tv}"
+    export UNIDORK_ART_THROTTLE_TMDB_MS="${toString config.artwork.tmdbThrottleMs}"
+    export UNIDORK_ART_THROTTLE_FANART_MS="${toString config.artwork.fanartThrottleMs}"
 
     : "''${UNIDORK_TUNE_PARTITION_SESSION:=${toString (config.tuning.partitionSession or 50)}}"
     : "''${UNIDORK_TUNE_SWEEP_CHUNK:=${toString (config.tuning.sweepChunk or 100)}}"
     : "''${UNIDORK_TUNE_SUBS_CHUNK:=${toString (config.tuning.subsChunk or 100)}}"
     : "''${UNIDORK_TUNE_PROBE_CONN_CHUNKS:=${toString (config.tuning.probeConnChunks or 4)}}"
     : "''${UNIDORK_TUNE_STAGE_TIMEOUT:=${config.tuning.stageTimeout or "4h"}}"
-    export UNIDORK_TUNE_PARTITION_SESSION UNIDORK_TUNE_SWEEP_CHUNK UNIDORK_TUNE_SUBS_CHUNK UNIDORK_TUNE_PROBE_CONN_CHUNKS UNIDORK_TUNE_STAGE_TIMEOUT
-  
-    : "''${UNIDORK_TUNE_STAGE_TIMEOUT:=${config.tuning.stageTimeout}}"
+    export UNIDORK_TUNE_PARTITION_SESSION UNIDORK_TUNE_SWEEP_CHUNK
+    export UNIDORK_TUNE_SUBS_CHUNK UNIDORK_TUNE_PROBE_CONN_CHUNKS
     export UNIDORK_TUNE_STAGE_TIMEOUT
 
     : "''${UNIDORK_MEM_HIGH:=${config.tuning.memoryHigh}}"
@@ -84,6 +88,7 @@ pkgs.writeShellApplication {
     log_dir="$HOME/.cache/uniDork/logs"
     mkdir -p "$log_dir"
 
+
     use_scope=0
     if command -v systemd-run >/dev/null 2>&1; then
       if systemd-run --user --scope --quiet --collect true 2>/dev/null; then
@@ -91,7 +96,7 @@ pkgs.writeShellApplication {
       fi
     fi
     if [ "$use_scope" = 0 ]; then
-      echo "[orchestrator] warn: no user systemd scope available; running without memory cgroup" >&2
+      echo "[unidork] warn: no user systemd scope; running without a memory cgroup" >&2
     fi
 
     run_import() {
@@ -102,195 +107,224 @@ pkgs.writeShellApplication {
           env "GHCRTS=$UNIDORK_GHCRTS" \
           timeout --kill-after=30s "$UNIDORK_TUNE_STAGE_TIMEOUT" unidork-import "$@"
       else
-        GHCRTS="$UNIDORK_GHCRTS" timeout --kill-after=30s "$UNIDORK_TUNE_STAGE_TIMEOUT" unidork-import "$@"
+        GHCRTS="$UNIDORK_GHCRTS" \
+          timeout --kill-after=30s "$UNIDORK_TUNE_STAGE_TIMEOUT" unidork-import "$@"
       fi
     }
 
-    cmd="''${1:-help}"; shift || true
-
-    # Every database-touching command routes through this. pg-ensure is
-    # idempotent: running server, stale pid, missing cluster, and missing
-    # database are all handled. It never fails because the db is "already
-    # running".
     ensure_pg() { pg-ensure; }
 
-    # Throttled safety net taken before destructive verbs. Non-fatal on
-    # purpose: an unmounted backup volume should not block a rename you
-    # explicitly asked for, but you WILL be yelled at.
     auto_backup() {
       if [ "$UNIDORK_AUTO_BACKUP" = 1 ]; then
         if ! pg-backup --auto; then
-          echo "[orchestrator] WARNING: auto-backup failed (backup root missing/unmounted?)." >&2
-          echo "[orchestrator] Proceeding anyway. Run 'unidork backup --init' with the volume mounted." >&2
+          echo "[unidork] WARNING: auto-backup failed (backup root unmounted?)." >&2
+          echo "[unidork] Proceeding. Run 'unidork backup --init' with the volume mounted." >&2
         fi
       fi
     }
 
-    has_flag() {
-      flag="$1"; shift
-      for a in "$@"; do [ "$a" = "$flag" ] && return 0; done
+
+    movie_stages() {
+      printf '%s\n' \
+        'probe|no|intake -> files(stage=staging)|movie-probe' \
+        'resolve|no|staging files -> tmdb associations|movie-resolve' \
+        'rename|yes|staging -> buffer (UNIDORK_FORMAT_MOVIE)|movie-rename' \
+        'sweep|yes|drop emptied staging dirs and stale rows|sweep-stage' \
+        'subs|yes|fetch missing subtitle sidecars in buffer|movie-subs' \
+        'move|yes|buffer -> library|movie-move' \
+        'index|no|library dirs -> files + library_movies|movie-index' \
+        'versions|no|detect multi-copy editions (db only)|movie-versions' \
+        'nfo|yes|stamp version tags into movie.nfo|movie-nfo' \
+        'artwork|yes|fetch artwork into library folders|movie-artwork' \
+        'artscan|no|inventory artwork on disk -> artwork_log|artwork-scan'
+    }
+
+    tv_stages() {
+      printf '%s\n' \
+        'probe|no|tv intake -> files(stage=staging)|tv-probe' \
+        'resolve|no|staging files -> shows/episodes|tv-resolve' \
+        'rename|yes|staging -> tv buffer (UNIDORK_FORMAT_TV)|tv-rename' \
+        'sweep|yes|drop emptied staging dirs and stale rows|sweep-stage' \
+        'move|yes|tv buffer -> tv library|tv-move' \
+        'artwork|yes|fetch show artwork into library folders|tv-artwork' \
+        'artscan|no|inventory artwork on disk -> artwork_log|artwork-scan'
+    }
+
+
+    OPT_MODE=preview
+    OPT_FROM=""
+    OPT_TO=""
+    OPT_ONLY=""
+    OPT_SKIP=""
+
+    parse_pipeline_opts() {
+      OPT_MODE=preview
+      OPT_FROM=""
+      OPT_TO=""
+      OPT_ONLY=""
+      OPT_SKIP=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --apply)    OPT_MODE=apply ;;
+          --dry-run)  OPT_MODE=dryrun ;;
+          --list)     OPT_MODE=list ;;
+          --from)     shift; OPT_FROM="''${1:-}" ;;
+          --from=*)   OPT_FROM="''${1#--from=}" ;;
+          --to)       shift; OPT_TO="''${1:-}" ;;
+          --to=*)     OPT_TO="''${1#--to=}" ;;
+          --only)     shift; OPT_ONLY="''${1:-}" ;;
+          --only=*)   OPT_ONLY="''${1#--only=}" ;;
+          --skip)     shift; OPT_SKIP="''${1:-}" ;;
+          --skip=*)   OPT_SKIP="''${1#--skip=}" ;;
+          *)
+            echo "unidork: unknown option '$1'" >&2
+            return 1
+            ;;
+        esac
+        shift
+      done
+    }
+
+    in_csv() {
+      needle="$1"
+      csv="$2"
+      if [ -z "$csv" ]; then
+        return 1
+      fi
+      case ",$csv," in
+        *",$needle,"*) return 0 ;;
+      esac
       return 1
     }
-    cmd_push() { unidork-push; }
-    cmd_log_change() { unidork-log-change "$@"; }
-    cmd_snapshot()   { unidork-snapshot; }
-    cmd_start()  { pg-ensure; }
-    cmd_stop()   { pg-stop; }
 
-    cmd_backup()  { ensure_pg; pg-backup "$@"; }
-    cmd_backups() { pg-backup --list; }
-    cmd_restore() { ensure_pg; pg-restore "$@"; }
-
-    cmd_probe()    { ensure_pg; run_import probe-stage; }
-    cmd_resolve()  { ensure_pg; run_import resolve; }
-    cmd_identify() { ensure_pg; run_import identify; }
-
-    # Staged: probe, resolve, and rename each run as a SEPARATE
-    # unidork-import invocation, i.e. a fresh runtime heap and a fresh
-    # systemd scope per stage. The in-binary 'process' verb (all three in
-    # one heap) is deliberately no longer used.
-    cmd_process() {
-      ensure_pg
-      auto_backup
-      run_import probe-stage
-      run_import resolve
-      if has_flag "--dry-run" "$@"; then
-        run_import rename "$UNIDORK_FORMAT_MOVIE" --dry-run
-        echo "[process] dry run done. no files were created, moved, or deleted."
-      else
-        run_import rename "$UNIDORK_FORMAT_MOVIE"
-        run_import reconcile-stage
-        echo "[process] done. review the buffer, then: unidork move"
+    select_stages() {
+      started=0
+      stopped=0
+      if [ -z "$OPT_FROM" ]; then
+        started=1
       fi
+      while IFS='|' read -r id destructive desc verb; do
+        if [ -z "$id" ]; then
+          continue
+        fi
+        if [ "$stopped" = 1 ]; then
+          continue
+        fi
+        if [ -n "$OPT_ONLY" ]; then
+          if in_csv "$id" "$OPT_ONLY"; then
+            printf '%s|%s|%s|%s\n' "$id" "$destructive" "$desc" "$verb"
+          fi
+          continue
+        fi
+        if [ "$started" = 0 ]; then
+          if [ "$id" = "$OPT_FROM" ]; then
+            started=1
+          else
+            continue
+          fi
+        fi
+        if in_csv "$id" "$OPT_SKIP"; then
+          if [ -n "$OPT_TO" ] && [ "$id" = "$OPT_TO" ]; then
+            stopped=1
+          fi
+          continue
+        fi
+        printf '%s|%s|%s|%s\n' "$id" "$destructive" "$desc" "$verb"
+        if [ -n "$OPT_TO" ] && [ "$id" = "$OPT_TO" ]; then
+          stopped=1
+        fi
+      done
     }
 
-    cmd_move()     { ensure_pg; auto_backup; run_import move "$@"; }
-    cmd_subs()     { ensure_pg; run_import subs "$@"; }
+    print_plan() {
+      domain="$1"
+      table="$2"
+      total="$3"
+      echo "[$domain] plan, $total stage(s):"
+      n=0
+      while IFS='|' read -r id destructive desc verb; do
+        n=$((n + 1))
+        mark=" "
+        if [ "$destructive" = yes ]; then
+          mark="!"
+        fi
+        printf '  %s %2d. %-9s %-44s (%s)\n' "$mark" "$n" "$id" "$desc" "$verb"
+      done < <(printf '%s\n' "$table")
+    }
 
-    cmd_reconcile()      { ensure_pg; run_import reconcile; }
-    cmd_import_library() { ensure_pg; auto_backup; run_import import-library "$UNIDORK_PATH_CONFIG"; }
-    cmd_import_all()     { ensure_pg; auto_backup; run_import import-all "$UNIDORK_PATH_CONFIG"; }
+    run_pipeline() {
+      domain="$1"
+      shift
+      parse_pipeline_opts "$@" || return 1
 
-    cmd_rename() {
+      case "$domain" in
+        movie) table="$(movie_stages | select_stages)" ;;
+        tv)    table="$(tv_stages | select_stages)" ;;
+        *)     echo "unidork: unknown pipeline '$domain'" >&2; return 1 ;;
+      esac
+
+      if [ -z "$table" ]; then
+        echo "unidork: stage selection matched nothing" >&2
+        echo "unidork: valid ids: $(printf '%s\n' "$table")" >&2
+        return 1
+      fi
+
+      total="$(printf '%s\n' "$table" | wc -l | tr -d ' ')"
+
+      if [ "$OPT_MODE" = list ]; then
+        print_plan "$domain" "$table" "$total"
+        return 0
+      fi
+
+      if [ "$OPT_MODE" = preview ]; then
+        print_plan "$domain" "$table" "$total"
+        echo ""
+        echo "  ! = writes to the filesystem"
+        echo ""
+        echo "  unidork $domain --dry-run    walk every stage, touch no file"
+        echo "  unidork $domain --apply      run it for real"
+        return 1
+      fi
+
+      resume_flag="--apply"
+      if [ "$OPT_MODE" = dryrun ]; then
+        resume_flag="--dry-run"
+      fi
+
       ensure_pg
-      if has_flag "--dry-run" "$@"; then
-        run_import rename "$UNIDORK_FORMAT_MOVIE" --dry-run
-      elif has_flag "--apply" "$@"; then
+      if [ "$OPT_MODE" = apply ]; then
         auto_backup
-        run_import rename "$UNIDORK_FORMAT_MOVIE"
-      else
-        echo "rename is destructive. pass --apply to move files, or --dry-run to preview."
-        exit 1
       fi
-    }
 
-    cmd_artwork() {
-      ensure_pg
-      if has_flag "--dry-run" "$@"; then
-        run_import artwork --dry-run
-      elif has_flag "--apply" "$@"; then
-        run_import artwork
-      else
-        echo "artwork downloads poster.jpg files into the library. pass --apply, or --dry-run to preview."
-        exit 1
-      fi
-    }
+      echo "[$domain] $total stage(s), mode=$OPT_MODE"
+      pipeline_start="$(date +%s)"
+      n=0
+      while IFS='|' read -r id destructive desc verb; do
+        n=$((n + 1))
+        flags=()
+        if [ "$destructive" = yes ] && [ "$OPT_MODE" != apply ]; then
+          flags+=(--dry-run)
+        fi
+        echo ""
+        echo "[$domain $n/$total] $id: $desc"
+        stage_start="$(date +%s)"
+        if ! run_import "$verb" "''${flags[@]}"; then
+          echo "" >&2
+          echo "[$domain] FAILED at '$id' (unidork-import $verb)" >&2
+          echo "[$domain] fix it, then resume from that stage with:" >&2
+          echo "    unidork $domain --from=$id $resume_flag" >&2
+          return 1
+        fi
+        echo "[$domain $n/$total] $id ok ($(( $(date +%s) - stage_start ))s)"
+      done < <(printf '%s\n' "$table")
 
-    cmd_tv_artwork() {
-      ensure_pg
-      if has_flag "--dry-run" "$@"; then
-        run_import tv-artwork --dry-run
-      elif has_flag "--apply" "$@"; then
-        run_import tv-artwork
-      else
-        echo "tv-artwork downloads banner.jpg files into the TV library. pass --apply, or --dry-run to preview."
-        exit 1
-      fi
-    }
-
-    cmd_versions() {
-      ensure_pg
-      if has_flag "--dry-run" "$@"; then
-        run_import versions --dry-run
-      elif has_flag "--apply" "$@"; then
-        run_import versions
-      else
-        echo "versions rewrites movie.nfo files in the library. pass --apply, or --dry-run to preview."
-        exit 1
-      fi
-    }
-
-    cmd_tv_init()     { ensure_pg; run_import tv-init; }
-    cmd_tv_probe()    { ensure_pg; run_import tv-probe; }
-    cmd_tv_resolve()  { ensure_pg; run_import tv-resolve; }
-    cmd_tv_identify() { ensure_pg; run_import tv-identify; }
-    cmd_tv_move()     { ensure_pg; auto_backup; run_import tv-move "$@"; }
-
-    # Staged for the same reason as cmd_process: the tv pipeline was the
-    # one still running probe + resolve + rename in a single heap.
-    cmd_tv_process() {
-      ensure_pg
-      auto_backup
-      run_import tv-probe
-      run_import tv-resolve
-      if has_flag "--dry-run" "$@"; then
-        run_import tv-rename --dry-run
-        echo "[tv-process] dry run done. no files were created, moved, or deleted."
-      else
-        run_import tv-rename
-        run_import reconcile-stage
-        echo "[tv-process] done. review the TV buffer, then: unidork tv-move"
-      fi
-    }
-
-    cmd_tv_rename() {
-      ensure_pg
-      if has_flag "--dry-run" "$@"; then
-        run_import tv-rename --dry-run
-      elif has_flag "--apply" "$@"; then
-        auto_backup
-        run_import tv-rename
-      else
-        echo "tv-rename is destructive. pass --apply to move files, or --dry-run to preview."
-        exit 1
-      fi
-    }
-
-    cmd_process_all() {
-      ensure_pg
-      auto_backup
-      echo "[orchestrator] === movie process ==="
-      cmd_process
       echo ""
-      echo "[orchestrator] === tv process ==="
-      cmd_tv_process
-      echo ""
-      echo "[orchestrator] both pipelines done."
-      echo "  review movie buffer: $UNIDORK_PATH_BUFFER"
-      echo "  review tv buffer:    $UNIDORK_PATH_TV_BUFFER"
+      echo "[$domain] complete in $(( $(date +%s) - pipeline_start ))s"
+      if [ "$OPT_MODE" = dryrun ]; then
+        echo "[$domain] dry run: no file was created, moved, or deleted."
+      fi
     }
 
-    cmd_run_all() {
-      echo "[orchestrator] ensure -> backup -> import-library -> movie process -> tv process"
-      ensure_pg
-      auto_backup
-      cmd_import_library
-      cmd_process
-      cmd_tv_process
-      echo "[orchestrator] done."
-    }
-
-    cmd_probe_resolve() {
-      cmd_probe
-      cmd_resolve
-    }
-
-    cmd_clean_stage() {
-      ensure_pg
-      echo "[clean-stage] truncating probe_cache"
-      psql -At -v ON_ERROR_STOP=1 -c "TRUNCATE probe_cache"
-      echo "[clean-stage] done (files + associations left intact)"
-    }
 
     cmd_status() {
       ensure_pg
@@ -331,115 +365,137 @@ SQL
       pg-backup --list 2>/dev/null | sed 's/^/  /' || echo "  (backup root not initialized: unidork backup --init)"
     }
 
-    case "$cmd" in
-      push)           cmd_push ;;
-      log-change)          cmd_log_change "$@" ;;
-      snapshot)            cmd_snapshot ;;
-      start)          cmd_start ;;
-      stop)           cmd_stop ;;
+    cmd_clean_stage() {
+      ensure_pg
+      echo "[clean-stage] truncating probe_cache"
+      psql -At -v ON_ERROR_STOP=1 -c "TRUNCATE probe_cache"
+      echo "[clean-stage] done (files and associations left intact)"
+    }
 
-      backup)              cmd_backup "$@" ;;
-      backups)             cmd_backups ;;
-      restore)             cmd_restore "$@" ;;
+    cmd_schema() {
+      ensure_pg
+      run_import db-init
+      run_import db-migrate
+      run_import db-tv-init
+      echo "[schema] movie and tv schemas present"
+    }
 
-      probe|probe-stage)   cmd_probe ;;
-      resolve)             cmd_resolve ;;
-      identify)            cmd_identify ;;
-      process)             cmd_process "$@" ;;
-      move)                cmd_move "$@" ;;
-      subs)                cmd_subs "$@" ;;
-      rename)              cmd_rename "$@" ;;
-      versions)            cmd_versions "$@" ;;
-      probe-resolve)       cmd_probe_resolve ;;
-      reconcile|import-buffer) cmd_reconcile ;;
-      artwork)             cmd_artwork "$@" ;;
-      import-library)      cmd_import_library ;;
-      import-all)          cmd_import_all ;;
+    cmd_stage() {
+      if [ "$#" -eq 0 ]; then
+        echo "usage: unidork stage <import-verb> [args] [--dry-run]" >&2
+        echo "       unidork stage help    lists every verb" >&2
+        return 1
+      fi
+      ensure_pg
+      run_import "$@"
+    }
 
-      tv-init)             cmd_tv_init ;;
-      tv-probe)            cmd_tv_probe ;;
-      tv-resolve)          cmd_tv_resolve ;;
-      tv-identify)         cmd_tv_identify ;;
-      tv-artwork)          cmd_tv_artwork "$@" ;;
-      tv-rename)           cmd_tv_rename "$@" ;;
-      tv-process)          cmd_tv_process "$@" ;;
-      tv-move)             cmd_tv_move "$@" ;;
+    usage() {
+      cat <<'HELP'
+unidork - media pipeline
 
-      process-all)         cmd_process_all ;;
-      run-all)             cmd_run_all ;;
-      run)                 cmd_run_all ;;
+TWO COMMANDS DO EVERYTHING
 
-      status)              cmd_status ;;
-      psql|connect)        pg-connect ;;
-      clean-stage)         cmd_clean_stage ;;
-      logs)                ls -la "$log_dir" 2>/dev/null || echo "no logs yet at $log_dir" ;;
+  unidork movies --apply        run the whole movie pipeline, in order
+  unidork tv     --apply        run the whole tv pipeline, in order
+  unidork all    --apply        movies then tv
 
-      help|--help|-h|"")
-        cat <<EOF
-unidork - pipeline orchestrator
+  Each stage is a separate unidork-import process, so every stage gets a
+  fresh heap. Order lives in the stage table, nowhere else.
 
-DATABASE SAFETY
-  Every db-touching command routes through pg-ensure (idempotent: handles
-  already-running, stale pid after a crash, missing cluster, missing db).
-  Destructive verbs take a throttled auto-backup first (skipped if a backup
-  newer than $UNIDORK_BACKUP_AUTO_HOURS h exists; disable with UNIDORK_AUTO_BACKUP=0).
+PIPELINE FLAGS (movies | tv | all)
 
-  backup [--init|--list]   dump db -> $UNIDORK_BACKUP_DIR (verified, checksummed,
-                           keeps newest $UNIDORK_BACKUP_KEEP). --init once, with volume mounted.
-  backups                  list available dumps
-  restore <file|latest>    restore into a FRESH database (live db untouched)
-  restore <f> --swap       ...then swap names; old db kept as <name>_pre_restore_<ts>
+  (none)          print the ordered plan and exit non-zero. safe default.
+  --list          print the ordered plan and exit 0
+  --dry-run       run every stage; destructive stages touch no file
+  --apply         run for real; takes a throttled auto-backup first
+  --from=ID       start at stage ID (this is how you resume after a crash)
+  --to=ID         stop after stage ID
+  --only=ID,ID    run exactly these stages, in table order
+  --skip=ID,ID    run everything except these
 
-DRY RUN
-  Every destructive verb accepts --dry-run: no file is created, moved, or
-  deleted. DB metadata (probe rows, associations, TMDB caches) may still be
-  written.
+MOVIE STAGE IDS, in order
+  probe resolve rename sweep subs move index versions nfo artwork artscan
+
+TV STAGE IDS, in order
+  probe resolve rename sweep move artwork artscan
+
+ESCAPE HATCH
+
+  unidork stage <verb> [args]   run one unidork-import verb directly
+  unidork stage help            list every verb the binary understands
+
+  Examples:
+    unidork stage movie-move "Blade Runner (1982)" --dry-run
+    unidork stage movie-identify
+    unidork stage tv-reconcile
+    unidork stage sweep-missing
+
+DATABASE
+
+  schema                   create/migrate movie and tv schemas
+  backup [--init|--list]   dump db, verified and checksummed
+  backups                  list dumps
+  restore <file|latest>    restore into a fresh database
+  restore <f> --swap       ...then swap names
+  start | stop             postgres lifecycle (start == ensure, safe)
+  status                   row counts and backup inventory
+  psql                     interactive session
+  clean-stage              truncate probe_cache
+
+SECRETS
+
+  secrets                  show where each API key resolves from
+
+CODEBASE
+
+  push | log-change | snapshot | logs
 
 MEMORY
-  unidork-import runs inside a systemd user scope with
-  MemoryHigh=$UNIDORK_MEM_HIGH / MemoryMax=$UNIDORK_MEM_MAX when a user
-  session bus is available. process and tv-process run each stage (probe,
-  resolve, rename, sweep) as a separate invocation: fresh heap per stage.
-  Override per-run with UNIDORK_MEM_HIGH, UNIDORK_MEM_MAX, UNIDORK_GHCRTS.
 
-MOVIE PIPELINE
-  process [--dry-run]        probe, resolve, rename -> buffer, each in its own heap (DESTRUCTIVE without --dry-run)
-  probe                      probe movie intake -> files (stage=staging)
-  resolve                    associate staging movie files -> tmdb movies
-  identify                   read-only resolver report for movie intake
-  rename --apply|--dry-run   rename staging movies into buffer          (DESTRUCTIVE with --apply)
-  versions --apply|--dry-run    detect movie versions, stamp Kodi v22 version tags into movie.nfo (DESTRUCTIVE with --apply)
-  move [folder] [--dry-run]  promote buffer folder(s) into movie library
-  subs [--dry-run]           fetch missing subtitle sidecars for buffer movies (paced: UNIDORK_TUNE_SUB_DELAY_MS)
-  reconcile                  probe movie buffer (repair/record existing files)
-  artwork --apply|--dry-run     fetch Kodi poster.jpg for movies from TMDB (cached details first)
-  import-library             scan library dirs -> files + library_movies
-  import-all                 reconcile + import-library
+  Stages run inside a systemd user scope with MemoryHigh/MemoryMax when a
+  session bus exists. Override with UNIDORK_MEM_HIGH, UNIDORK_MEM_MAX,
+  UNIDORK_GHCRTS, UNIDORK_TUNE_STAGE_TIMEOUT.
+HELP
+    }
 
-TV PIPELINE
-  tv-process [--dry-run]        tv-probe, tv-resolve, tv-rename -> tv buffer, each in its own heap (DESTRUCTIVE without --dry-run)
-  tv-probe                      probe tv intake -> files
-  tv-resolve                    associate staging episode files -> shows/episodes
-  tv-identify                   read-only resolver report for tv intake
-  tv-rename --apply|--dry-run   rename staging episodes into tv buffer  (DESTRUCTIVE with --apply)
-  tv-move [folder] [--dry-run]  promote tv buffer show folder(s) into tv library
-  tv-artwork --apply|--dry-run  fetch Kodi banner.jpg for shows from fanart.tv (needs fanart token)
-  tv-init                       create tv schema tables
 
-COMBINED
-  process-all       movie process then tv process                       (DESTRUCTIVE)
-  run               backup + import-library + movie process + tv process
+    cmd="''${1:-help}"
+    shift || true
 
-UTILITY
-  push              push to Unison Share + snapshot diff to git mirror
-  start | stop      postgres lifecycle (start == ensure, always safe)
-  status            row counts across all tables + backup inventory
-  psql              interactive psql session
-  clean-stage       truncate probe_cache
-  logs              list log files
-EOF
+    case "$cmd" in
+      movies|movie)  run_pipeline movie "$@" ;;
+      tv)            run_pipeline tv "$@" ;;
+      all)
+        run_pipeline movie "$@"
+        echo ""
+        run_pipeline tv "$@"
         ;;
-      *) echo "unknown command: $cmd" >&2; exit 1 ;;
+
+      stage)         cmd_stage "$@" ;;
+
+      schema)        cmd_schema ;;
+      backup)        ensure_pg; pg-backup "$@" ;;
+      backups)       pg-backup --list ;;
+      restore)       ensure_pg; pg-restore "$@" ;;
+      start)         pg-ensure ;;
+      stop)          pg-stop ;;
+      status)        cmd_status ;;
+      psql|connect)  pg-connect ;;
+      secrets)       unidork-secrets ;;
+      clean-stage)   cmd_clean_stage ;;
+
+      push)          unidork-push ;;
+      log-change)    unidork-log-change "$@" ;;
+      snapshot)      unidork-snapshot ;;
+      logs)          ls -la "$log_dir" 2>/dev/null || echo "no logs yet at $log_dir" ;;
+
+      help|--help|-h|"") usage ;;
+      *)
+        echo "unidork: unknown command '$cmd'" >&2
+        echo "try: unidork help" >&2
+        exit 1
+        ;;
     esac
   '';
 }

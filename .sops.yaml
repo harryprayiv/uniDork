@@ -1,0 +1,13 @@
+keys:
+  # Your personal age key. `age-keygen -y ~/.config/sops/age/keys.txt`
+  - &admin_harry     age138lswq34d07rndupcv25qkwfn92xvc3z3tz2d64uwq6h02kgn96s5hgl43
+  # winsmuth's host key, derived from its ssh host key.
+  # `nix run nixpkgs#ssh-to-age -- -i /etc/ssh/ssh_host_ed25519_key.pub`
+  - &host_winsmuth   age1p6rtzhtzlpkv4dw6umvv2wpplekmjj225xkyf8xelgewuhndxvlqq8smh6
+
+creation_rules:
+  - path_regex: ^secrets/unidork\.yaml$
+    key_groups:
+      - age:
+          - *admin_harry
+          - *host_winsmuth

@@ -1,5 +1,5 @@
 {
-  description = "uniDork — movie metadata pipeline in Unison";
+  description = "uniDork, movie metadata pipeline in Unison";
 
   inputs = {
     nixpkgs.url     = "github:NixOS/nixpkgs/nixos-unstable";
@@ -29,13 +29,14 @@
           };
         };
 
+        secrets      = import ./nix/secrets.nix   { inherit pkgs config; };
         uniDork      = import ./nix/build.nix     { inherit pkgs; };
         postgres     = import ./nix/postgres.nix  { inherit pkgs; inherit (config) database; };
         snapshot = import ./nix/snapshot.nix { inherit pkgs config; };
         mirror = import ./nix/mirror.nix { inherit pkgs config; };
         ide = import ./nix/ide.nix { inherit pkgs config; };
         orchestrator = import ./nix/orchestrator.nix {
-          inherit pkgs config uniDork postgres snapshot mirror;
+          inherit pkgs config secrets uniDork postgres snapshot mirror;
         };
 
       in {
@@ -43,12 +44,17 @@
           default        = orchestrator;
           unidork        = orchestrator;
           unidork-import = uniDork;
+          unidork-secrets = secrets.doctor;
         };
 
         devShells.default = import ./nix/devshell.nix {
-          inherit pkgs config uniDork postgres orchestrator snapshot mirror ide;
+          inherit pkgs config secrets uniDork postgres orchestrator snapshot mirror ide;
         };
-      });
+      })
+    // {
+      nixosModules.unidork = import ./nix/nixos-module.nix { inherit self; };
+      nixosModules.default = self.nixosModules.unidork;
+    };
 
   nixConfig = {
     extra-experimental-features = ["nix-command flakes" "ca-derivations"];

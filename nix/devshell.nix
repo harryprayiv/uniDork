@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib, config, uniDork, postgres, orchestrator, snapshot, mirror, ide }:
+{ pkgs, lib ? pkgs.lib, config, secrets, uniDork, postgres, orchestrator, snapshot, mirror, ide }:
 
 pkgs.mkShell {
   name = "uniDork-devshell";
@@ -30,6 +30,7 @@ pkgs.mkShell {
     mirror.unidork-snapshot
 
     ide.sync
+    secrets.doctor
   ] ++ ide.tools;
 
   shellHook = ''
@@ -59,8 +60,7 @@ pkgs.mkShell {
     export UNIDORK_FORMAT_MOVIE="${config.rename.movieFormat}"
     export UNIDORK_FORMAT_TV="${config.rename.tvFormat}"
 
-    export UNIDORK_TOKEN_TMDB="${config.tmdb.tokenFile}"
-    export UNIDORK_TOKEN_SUB="${config.subs.tokenFile}"
+${secrets.envSetup}
 
     export UNIDORK_TUNE_PROBE_JOBS="${toString config.tuning.probeJobs}"
     export UNIDORK_TUNE_SUB_LANGS="${lib.concatStringsSep "," config.subs.languages}"
@@ -79,7 +79,7 @@ pkgs.mkShell {
     echo "  TV:      unidork tv-process | tv-identify"
     echo "  Both:    unidork run-all"
     echo "  Safety:  unidork backup | backups | restore <file|latest> [--swap]"
-    echo "  Utility: push | start | stop | clean-stage"
+    echo "  Utility: push | start | stop | clean-stage | secrets"
     echo ""
   '';
 }
