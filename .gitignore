@@ -1,4 +1,7 @@
 dork_library/*
 result
 result-*
-.direnv/
+.direnv/secrets/*.plaintext*
+secrets/*.decrypted*
+secrets/*.yaml.tmp
+.unisonHistory
