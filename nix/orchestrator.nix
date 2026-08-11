@@ -34,10 +34,6 @@ pkgs.writeShellApplication {
     : "''${UNIDORK_DB_NAME:=${config.database.name}}"
     export UNIDORK_DB_HOST UNIDORK_DB_PORT UNIDORK_DB_USER UNIDORK_DB_NAME
 
-    : "''${UNIDORK_CACHE_FFPROBE:=${config.cache.ffprobeDir}}"
-    : "''${UNIDORK_CACHE_STAGE:=${config.cache.stageDir}}"
-    export UNIDORK_CACHE_FFPROBE UNIDORK_CACHE_STAGE
-
     : "''${UNIDORK_PATH_CONFIG:=${config.paths.configFile}}"
     : "''${UNIDORK_PATH_INTAKE:=${config.paths.intake}}"
     : "''${UNIDORK_PATH_BUFFER:=${config.paths.buffer}}"
@@ -114,6 +110,44 @@ ${secrets.envSetup}
 
     ensure_pg() { pg-ensure; }
 
+    schema_present() {
+      psql -At -c "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'files'" 2>/dev/null | grep -q 1
+    }
+
+    orphan_dbs() {
+      psql -At -d postgres -c \
+        "SELECT datname || '  ' || pg_size_pretty(pg_database_size(datname))
+           FROM pg_database
+          WHERE datname LIKE '$PGDATABASE' || '_restored_%'
+             OR datname LIKE '$PGDATABASE' || '_pre_restore_%'
+          ORDER BY datname DESC"
+    }
+
+    require_schema() {
+      if schema_present; then
+        return 0
+      fi
+      echo "" >&2
+      echo "[unidork] database \"$PGDATABASE\" has no uniDork schema." >&2
+      echo "" >&2
+      echo "  This looks like a fresh cluster. Pick one:" >&2
+      echo "" >&2
+      echo "    unidork bootstrap          restore the newest backup, or create an" >&2
+      echo "                               empty schema if there is no backup" >&2
+      echo "    unidork bootstrap --empty  force an empty schema, ignore backups" >&2
+      echo "" >&2
+      orphans="$(orphan_dbs 2>/dev/null || true)"
+      if [ -n "$orphans" ]; then
+        echo "  You have restored databases that were never swapped in:" >&2
+        printf '%s\n' "$orphans" | sed 's/^/    /' >&2
+        echo "" >&2
+        echo "  If your data is in one of those, you wanted --swap:" >&2
+        echo "    unidork restore latest --swap" >&2
+        echo "" >&2
+      fi
+      return 1
+    }
+
     auto_backup() {
       if [ "$UNIDORK_AUTO_BACKUP" = 1 ]; then
         if ! pg-backup --auto; then
@@ -123,6 +157,58 @@ ${secrets.envSetup}
       fi
     }
 
+
+    PENDING_GLOBAL=""
+    GLOBAL_MODE=preview
+
+    # Stages whose verb is domain-agnostic. Running one per domain is both
+    # wasted work and wrong: in `all`, movie artscan sits ahead of tv artwork,
+    # so a first-occurrence-wins dedupe would miss art fetched later. They are
+    # queued during the run and flushed once, after every domain has finished.
+    is_global_stage() {
+      case "$1" in
+        artscan) return 0 ;;
+        *)       return 1 ;;
+      esac
+    }
+
+    queue_global_stage() {
+      g_id="$1"; g_dest="$2"; g_desc="$3"; g_verb="$4"
+      GLOBAL_MODE="$OPT_MODE"
+      if printf '%s\n' "$PENDING_GLOBAL" | grep -q "^$g_id|"; then
+        return 0
+      fi
+      PENDING_GLOBAL="$(printf '%s\n%s' "$PENDING_GLOBAL" "$g_id|$g_dest|$g_desc|$g_verb")"
+    }
+
+    flush_global_stages() {
+      if [ -z "$(printf '%s' "$PENDING_GLOBAL" | tr -d '\n')" ]; then
+        return 0
+      fi
+      echo ""
+      echo "[global] deferred stage(s), mode=$GLOBAL_MODE"
+      while IFS='|' read -r q_id q_dest q_desc q_verb; do
+        if [ -z "$q_id" ]; then
+          continue
+        fi
+        q_flags=()
+        if [ "$q_dest" = yes ] && [ "$GLOBAL_MODE" != apply ]; then
+          q_flags+=(--dry-run)
+        fi
+        echo ""
+        echo "[global] $q_id: $q_desc"
+        q_start="$(date +%s)"
+        if ! run_import "$q_verb" "''${q_flags[@]}"; then
+          echo "" >&2
+          echo "[global] FAILED at '$q_id' (unidork-import $q_verb)" >&2
+          echo "[global] rerun it alone with:" >&2
+          echo "    unidork stage $q_verb" >&2
+          return 1
+        fi
+        echo "[global] $q_id ok ($(( $(date +%s) - q_start ))s)"
+      done < <(printf '%s\n' "$PENDING_GLOBAL")
+      PENDING_GLOBAL=""
+    }
 
     movie_stages() {
       printf '%s\n' \
@@ -248,7 +334,11 @@ ${secrets.envSetup}
         if [ "$destructive" = yes ]; then
           mark="!"
         fi
-        printf '  %s %2d. %-9s %-44s (%s)\n' "$mark" "$n" "$id" "$desc" "$verb"
+        gmark=" "
+        if is_global_stage "$id"; then
+          gmark="*"
+        fi
+        printf '  %s%s %2d. %-9s %-44s (%s)\n' "$mark" "$gmark" "$n" "$id" "$desc" "$verb"
       done < <(printf '%s\n' "$table")
     }
 
@@ -280,6 +370,7 @@ ${secrets.envSetup}
         print_plan "$domain" "$table" "$total"
         echo ""
         echo "  ! = writes to the filesystem"
+        echo "  * = domain-agnostic, deferred and run once after every domain"
         echo ""
         echo "  unidork $domain --dry-run    walk every stage, touch no file"
         echo "  unidork $domain --apply      run it for real"
@@ -292,6 +383,7 @@ ${secrets.envSetup}
       fi
 
       ensure_pg
+      require_schema || return 1
       if [ "$OPT_MODE" = apply ]; then
         auto_backup
       fi
@@ -301,6 +393,12 @@ ${secrets.envSetup}
       n=0
       while IFS='|' read -r id destructive desc verb; do
         n=$((n + 1))
+        if is_global_stage "$id"; then
+          queue_global_stage "$id" "$destructive" "$desc" "$verb"
+          echo ""
+          echo "[$domain $n/$total] $id: deferred, runs once after every domain"
+          continue
+        fi
         flags=()
         if [ "$destructive" = yes ] && [ "$OPT_MODE" != apply ]; then
           flags+=(--dry-run)
@@ -380,6 +478,115 @@ SQL
       echo "[schema] movie and tv schemas present"
     }
 
+    cmd_bootstrap() {
+      force_empty=0
+      case "''${1:-}" in
+        --empty) force_empty=1 ;;
+        "")      ;;
+        *)       echo "usage: unidork bootstrap [--empty]" >&2; return 1 ;;
+      esac
+
+      ensure_pg
+
+      if schema_present; then
+        echo "[bootstrap] \"$PGDATABASE\" already has a uniDork schema, nothing to do"
+        echo ""
+        cmd_status
+        return 0
+      fi
+
+      newest=""
+      if [ "$force_empty" = 0 ]; then
+        # Glob into an array rather than parsing ls, which shellcheck rejects
+        # (SC2012). Dump names are "<db>-YYYYmmdd-HHMMSS.dump", so a reverse
+        # lexicographic sort is newest-first and does not depend on mtime,
+        # which rsync and NAS copies happily clobber.
+        shopt -s nullglob
+        dumps=("$UNIDORK_BACKUP_DIR"/*.dump)
+        shopt -u nullglob
+        if [ "''${#dumps[@]}" -gt 0 ]; then
+          newest="$(printf '%s\n' "''${dumps[@]}" | sort -r | head -n 1)"
+        fi
+      fi
+
+      if [ -n "$newest" ]; then
+        echo "[bootstrap] restoring $newest and swapping it in"
+        pg-restore "$newest" --swap
+      else
+        if [ "$force_empty" = 0 ]; then
+          echo "[bootstrap] no backup found in $UNIDORK_BACKUP_DIR"
+        fi
+        echo "[bootstrap] creating an empty schema"
+        cmd_schema
+      fi
+
+      if ! schema_present; then
+        echo "[bootstrap] FAILED: still no schema after bootstrap" >&2
+        return 1
+      fi
+
+      echo ""
+      echo "[bootstrap] schema present in \"$PGDATABASE\""
+      echo ""
+      unidork-secrets || echo "[bootstrap] warn: keys are not fully resolvable, see above" >&2
+      echo ""
+      echo "[bootstrap] next: unidork all --dry-run"
+    }
+
+    cmd_gc() {
+      ensure_pg
+
+      echo "=== leftover databases (restore never reaps these) ==="
+      if orphans="$(orphan_dbs 2>&1)"; then
+        if [ -n "$orphans" ]; then
+          printf '%s\n' "$orphans" | sed 's/^/  /'
+        else
+          echo "  (none)"
+        fi
+      else
+        echo "  QUERY FAILED, so treat this section as unknown, not empty:" >&2
+        printf '%s\n' "$orphans" | sed 's/^/    /' >&2
+      fi
+
+      echo ""
+      echo "=== largest tables ==="
+      psql -At -v ON_ERROR_STOP=1 <<'SQL'
+SELECT '  ' || rpad(c.relname, 24) || lpad(pg_size_pretty(pg_total_relation_size(c.oid)), 10)
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'public' AND c.relkind = 'r'
+ ORDER BY pg_total_relation_size(c.oid) DESC
+ LIMIT 12;
+SQL
+
+      echo ""
+      echo "=== dead tuples and autovacuum ==="
+      psql -At -v ON_ERROR_STOP=1 <<'SQL'
+SELECT '  ' || rpad(relname, 24) || lpad(n_live_tup::text, 9) || lpad(n_dead_tup::text, 8)
+         || '  ' || coalesce(last_autovacuum::text, 'never')
+  FROM pg_stat_user_tables
+ WHERE n_dead_tup > 0
+ ORDER BY n_dead_tup DESC
+ LIMIT 8;
+SQL
+
+      echo ""
+      echo "=== rows that may be stranded ==="
+      psql -At -v ON_ERROR_STOP=1 <<'SQL'
+SELECT '  stage=buffer   ' || COUNT(*)::text || '   (nfo/subs skip these when the folder is gone)' FROM files WHERE stage = 'buffer';
+SELECT '  stage=missing  ' || COUNT(*)::text || '   (retired by sweep, kept for history)' FROM files WHERE stage = 'missing';
+SQL
+
+      echo ""
+      echo "Nothing was deleted. Reclaiming, in descending order of usefulness:"
+      echo ""
+      echo "  a leftover database:   psql -d postgres -c 'DROP DATABASE \"<name>\"'"
+      echo "  probe_cache table:     unidork clean-stage   (probe re-derives it)"
+      echo ""
+      echo "Autovacuum fires at roughly 20% dead, so a table sitting below that"
+      echo "with an old timestamp is fine, not neglected. Leave tmdb_search_cache"
+      echo "alone. None of this reduces peak RSS, which is live working set."
+    }
+
     cmd_stage() {
       if [ "$#" -eq 0 ]; then
         echo "usage: unidork stage <import-verb> [args] [--dry-run]" >&2
@@ -433,7 +640,12 @@ ESCAPE HATCH
 
 DATABASE
 
+  bootstrap                first run on a new machine. ensures the cluster,
+                           restores the newest backup if there is one, else
+                           creates an empty schema, then checks the API keys.
+  bootstrap --empty        same, but ignore backups and start empty
   schema                   create/migrate movie and tv schemas
+  gc                       report table sizes, dead tuples, stranded rows
   backup [--init|--list]   dump db, verified and checksummed
   backups                  list dumps
   restore <file|latest>    restore into a fresh database
@@ -442,6 +654,10 @@ DATABASE
   status                   row counts and backup inventory
   psql                     interactive session
   clean-stage              truncate probe_cache
+
+  Pipelines refuse to start against a database with no schema, and tell you
+  to run bootstrap. restore is non-destructive: without --swap it leaves your
+  data in a side database and the live one untouched.
 
 SECRETS
 
@@ -464,17 +680,26 @@ HELP
     shift || true
 
     case "$cmd" in
-      movies|movie)  run_pipeline movie "$@" ;;
-      tv)            run_pipeline tv "$@" ;;
+      movies|movie)
+        run_pipeline movie "$@"
+        flush_global_stages
+        ;;
+      tv)
+        run_pipeline tv "$@"
+        flush_global_stages
+        ;;
       all)
         run_pipeline movie "$@"
         echo ""
         run_pipeline tv "$@"
+        flush_global_stages
         ;;
 
       stage)         cmd_stage "$@" ;;
 
+      bootstrap)     cmd_bootstrap "$@" ;;
       schema)        cmd_schema ;;
+      gc)            cmd_gc ;;
       backup)        ensure_pg; pg-backup "$@" ;;
       backups)       pg-backup --list ;;
       restore)       ensure_pg; pg-restore "$@" ;;
