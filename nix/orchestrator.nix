@@ -148,6 +148,13 @@ ${secrets.envSetup}
       return 1
     }
 
+    ensure_schema_current() {
+      echo "[schema] reconciling the database with the compiled code"
+      run_import db-init
+      run_import db-migrate
+      run_import db-tv-init
+    }
+
     auto_backup() {
       if [ "$UNIDORK_AUTO_BACKUP" = 1 ]; then
         if ! pg-backup --auto; then
@@ -161,10 +168,6 @@ ${secrets.envSetup}
     PENDING_GLOBAL=""
     GLOBAL_MODE=preview
 
-    # Stages whose verb is domain-agnostic. Running one per domain is both
-    # wasted work and wrong: in `all`, movie artscan sits ahead of tv artwork,
-    # so a first-occurrence-wins dedupe would miss art fetched later. They are
-    # queued during the run and flushed once, after every domain has finished.
     is_global_stage() {
       case "$1" in
         artscan) return 0 ;;
@@ -387,6 +390,7 @@ ${secrets.envSetup}
       if [ "$OPT_MODE" = apply ]; then
         auto_backup
       fi
+      ensure_schema_current
 
       echo "[$domain] $total stage(s), mode=$OPT_MODE"
       pipeline_start="$(date +%s)"
@@ -440,6 +444,11 @@ SELECT '  tmdb movies:        ' || COUNT(*)::text FROM movies;
 SELECT '  associations:       ' || COUNT(*)::text FROM associations;
 SELECT '  library_movies:     ' || COUNT(*)::text FROM library_movies;
 SQL
+      if psql -At -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'resolve_candidates'" 2>/dev/null | grep -q 1; then
+        psql -At <<'SQL'
+SELECT '  pending review:     ' || COUNT(DISTINCT file_id)::text FROM resolve_candidates;
+SQL
+      fi
       if psql -At -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'shows'" 2>/dev/null | grep -q 1; then
         echo "=== tv ==="
         psql -At <<'SQL'
@@ -497,10 +506,6 @@ SQL
 
       newest=""
       if [ "$force_empty" = 0 ]; then
-        # Glob into an array rather than parsing ls, which shellcheck rejects
-        # (SC2012). Dump names are "<db>-YYYYmmdd-HHMMSS.dump", so a reverse
-        # lexicographic sort is newest-first and does not depend on mtime,
-        # which rsync and NAS copies happily clobber.
         shopt -s nullglob
         dumps=("$UNIDORK_BACKUP_DIR"/*.dump)
         shopt -u nullglob
@@ -587,6 +592,113 @@ SQL
       echo "alone. None of this reduces peak RSS, which is live working set."
     }
 
+    cmd_pending() {
+      ensure_pg
+      if ! psql -At -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'resolve_candidates'" 2>/dev/null | grep -q 1; then
+        echo "[pending] no resolve_candidates table in \"$PGDATABASE\"." >&2
+        echo "[pending] run: unidork schema" >&2
+        return 1
+      fi
+
+      echo "=== no association, no candidates ==="
+      echo "    (no year parsed from the name, or tmdb returned nothing)"
+      psql -At <<'SQL'
+SELECT '  ' || rpad(p.file_id::text, 7) ||
+       CASE WHEN p.folder IS NULL OR p.folder = p.stem
+            THEN p.name
+            ELSE p.folder || '/' || p.name
+       END
+  FROM (
+    SELECT f.file_id,
+           f.original_name AS name,
+           substring(f.original_path from '([^/]+)/[^/]+$') AS folder,
+           COALESCE(substring(f.original_name from '^(.*)\.[^.]*$'),
+                    f.original_name) AS stem
+      FROM files f
+      LEFT JOIN associations a ON a.file_id = f.file_id
+      LEFT JOIN resolve_candidates c ON c.file_id = f.file_id
+     WHERE a.file_id IS NULL
+       AND c.file_id IS NULL
+       AND f.stage <> 'buffer'
+       AND f.media_kind = 'movie'
+  ) p
+ ORDER BY p.file_id;
+SQL
+
+      echo ""
+      echo "=== ambiguous, candidates the resolver scored and rejected ==="
+      psql -At <<'SQL'
+SELECT '  ' || rpad(p.file_id::text, 7) ||
+       CASE WHEN p.folder IS NULL OR p.folder = p.stem
+            THEN p.name
+            ELSE p.folder || '/' || p.name
+       END || E'\n' ||
+       string_agg(
+         '      ' || lpad(p.score::text, 3) ||
+         '  tmdb:' || rpad(p.tmdb_id::text, 8) ||
+         '  ' || p.title || ' (' || substr(p.release_date, 1, 4) || ')',
+         E'\n' ORDER BY p.score DESC, p.popularity DESC)
+  FROM (
+    SELECT f.file_id,
+           f.original_name AS name,
+           substring(f.original_path from '([^/]+)/[^/]+$') AS folder,
+           COALESCE(substring(f.original_name from '^(.*)\.[^.]*$'),
+                    f.original_name) AS stem,
+           c.score, c.tmdb_id, c.title, c.release_date, c.popularity
+      FROM resolve_candidates c
+      JOIN files f USING (file_id)
+  ) p
+ GROUP BY p.file_id, p.name, p.folder, p.stem
+ ORDER BY p.file_id;
+SQL
+
+      echo ""
+      echo "Pick one with:  unidork assign <fileId> <tmdbId>"
+    }
+
+    cmd_assign() {
+      if [ "$#" -lt 2 ]; then
+        echo "usage: unidork assign <fileId> <tmdbId>" >&2
+        echo "       unidork pending    lists file ids and candidate tmdb ids" >&2
+        return 1
+      fi
+      case "$1" in
+        ""|*[!0-9]*)
+          echo "unidork assign: fileId must be a number, got '$1'" >&2
+          return 1
+          ;;
+      esac
+      case "$2" in
+        ""|*[!0-9]*)
+          echo "unidork assign: tmdbId must be a number, got '$2'" >&2
+          return 1
+          ;;
+      esac
+      ensure_pg
+      require_schema || return 1
+
+      a_stage="$(psql -At -c "SELECT stage FROM files WHERE file_id = $1" 2>/dev/null || true)"
+      if [ -z "$a_stage" ]; then
+        echo "unidork assign: no files row with file_id $1" >&2
+        return 1
+      fi
+
+      run_import movie-assign "$@"
+
+      echo ""
+      case "$a_stage" in
+        staging)
+          echo "[assign] the renamer picks this up on the next rename stage:"
+          echo "    unidork movies --from=rename --apply"
+          ;;
+        *)
+          echo "[assign] WARNING: file_id $1 is at stage='$a_stage', not 'staging'."
+          echo "[assign] rename only reads staging, so this association will not"
+          echo "[assign] rename anything until the file is back in staging."
+          ;;
+      esac
+    }
+
     cmd_stage() {
       if [ "$#" -eq 0 ]; then
         echo "usage: unidork stage <import-verb> [args] [--dry-run]" >&2
@@ -638,6 +750,24 @@ ESCAPE HATCH
     unidork stage tv-reconcile
     unidork stage sweep-missing
 
+REVIEW AND REPAIR
+
+  pending                  files the resolver could not place, with the tmdb
+                           candidates it scored and rejected
+  assign <fileId> <tmdbId> force a manual association for one file
+
+  Workflow for a backlog: run the resolve stage, then 'pending' to see what
+  it declined and why, then 'assign' per file, then re-run rename:
+
+    unidork movies --only=resolve --apply
+    unidork pending
+    unidork assign 4211 603
+    unidork movies --from=rename --apply
+
+  A manual association wins permanently. movie-resolve will not overwrite or
+  delete a row whose match_source is 'manual', so re-running the pipeline
+  cannot undo your decision.
+
 DATABASE
 
   bootstrap                first run on a new machine. ensures the cluster,
@@ -656,8 +786,12 @@ DATABASE
   clean-stage              truncate probe_cache
 
   Pipelines refuse to start against a database with no schema, and tell you
-  to run bootstrap. restore is non-destructive: without --swap it leaves your
-  data in a side database and the live one untouched.
+  to run bootstrap. Once a schema exists, every --dry-run and --apply run
+  reconciles it against the compiled code first (db-init, db-migrate,
+  db-tv-init, all idempotent), so a binary carrying a new table cannot die
+  mid-pipeline on a database that predates it. restore is non-destructive:
+  without --swap it leaves your data in a side database and the live one
+  untouched.
 
 SECRETS
 
@@ -696,6 +830,8 @@ HELP
         ;;
 
       stage)         cmd_stage "$@" ;;
+      pending)       cmd_pending ;;
+      assign)        cmd_assign "$@" ;;
 
       bootstrap)     cmd_bootstrap "$@" ;;
       schema)        cmd_schema ;;
@@ -724,3 +860,4 @@ HELP
     esac
   '';
 }
+

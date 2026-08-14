@@ -1,0 +1,399 @@
+type Resolve.FileRow
+  = { fileId : Int,
+      originalName : Text,
+      durationSec : Float,
+      hintTitle : Optional Text,
+      hintYear : Optional Nat,
+      hintTmdbId : Optional Nat,
+      originalPath : Text }
+
+Resolve.rowToFile = cases
+  ((((((fid, oname), dur), ht), hy), htm), opath) ->
+    Resolve.FileRow.FileRow
+      fid oname dur ht (optIntToNat hy) (optIntToNat htm) opath
+
+Resolve.selectUnresolvedChunkSql =
+  use Codec optional text
+  use Text ++
+  sql
+    "SELECT f.file_id, f.original_name, f.duration_sec, f.hint_title, f.hint_year, f.hint_tmdb_id, f.original_path FROM files f LEFT JOIN associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.stage <> 'buffer' AND f.media_kind = 'movie' AND f.file_id > "
+    %% StatementBuilder.var bigint
+    %% sql (" ORDER BY f.file_id LIMIT " ++ Nat.toText resolveChunkSize)
+    |> typedQuery
+      (bigint
+        ~ text
+        ~ Codec.double
+        ~ optional text
+        ~ optional integer
+        ~ optional integer
+        ~ text)
+
+Resolve.selectUnresolvedSql =
+  use Codec optional text
+  sql
+    "SELECT f.file_id, f.original_name, f.duration_sec, f.hint_title, f.hint_year, f.hint_tmdb_id, f.original_path FROM files f LEFT JOIN associations a ON a.file_id = f.file_id WHERE a.file_id IS NULL AND f.stage <> 'buffer' AND f.media_kind = 'movie'"
+    |> typedQuery
+      (bigint
+        ~ text
+        ~ Codec.double
+        ~ optional text
+        ~ optional integer
+        ~ optional integer
+        ~ text)
+
+Resolve.parentName : Text -> Text
+Resolve.parentName path =
+  use Nat - >
+  parts = List.filter (p -> Text.size p > 0) (Text.split ?/ path)
+  n = List.size parts
+  match lastOf (List.take (n - 1) parts) with
+    Some d        -> d
+    Optional.None -> ""
+
+test> Resolve.parentName.test =
+  use Resolve parentName
+  use Universal eq
+  List.flatMap
+    check
+    [ eq (parentName "/intake/Some Movie (2004)/VIDEO.mkv") "Some Movie (2004)"
+    , eq (parentName "/intake/loose.mkv") "intake"
+    , eq (parentName "loose.mkv") ""
+    ]
+
+Resolve.describeFile : Resolve.FileRow -> Text
+Resolve.describeFile row =
+  use Text ++
+  fid = Resolve.FileRow.fileId row
+  name = Resolve.FileRow.originalName row
+  folder = Resolve.parentName (Resolve.FileRow.originalPath row)
+  shown =
+    if Universal.eq (Text.size folder) 0 then name
+    else
+      if Universal.eq folder (basenameNoExt name) then name
+      else folder ++ "/" ++ name
+  "  " ++ Int.toText fid ++ "  " ++ shown
+
+Resolve.printOutcome :
+  Resolve.FileRow -> Resolve.Outcome ->{IO, Exception} ()
+Resolve.printOutcome row outcome =
+  use Nat >
+  use Text ++
+  head = Resolve.describeFile row
+  match outcome with
+    ResolvedById _ tmdbId       ->
+      printLine (head ++ "  ->  tmdb:" ++ Nat.toText tmdbId ++ " (nfo id)")
+    ResolvedBySearch _ tmdbId s ->
+      printLine
+        (head
+          ++ "  ->  tmdb:"
+          ++ Nat.toText tmdbId
+          ++ " ("
+          ++ Nat.toText s
+          ++ "%)")
+    NoHint _                    ->
+      printLine (head ++ "  ->  no title/year parsed from the name")
+    NoResults _                 ->
+      printLine (head ++ "  ->  tmdb returned no results")
+    Ambiguous _ scored          ->
+      step acc = cases
+        (_, s) -> if s > acc then s else acc
+      best = List.foldLeft step 0 scored
+      _ =
+        printLine
+          (head
+            ++ "  ->  AMBIGUOUS, "
+            ++ Nat.toText (List.size scored)
+            ++ " candidate(s), best "
+            ++ Nat.toText best
+            ++ " of "
+            ++ Nat.toText scoreThreshold
+            ++ " needed")
+      Db.foreach_
+        (c -> printLine (Resolve.candidateLine c)) (List.take 5 scored)
+    SearchError _ err           ->
+      printLine (head ++ "  ->  error: " ++ err)
+
+Resolve.resolveOne :
+  Boolean
+  -> Text
+  -> Resolve.FileRow
+  ->{MetaApi, ResolveCatalog} Resolve.Outcome
+Resolve.resolveOne dryRun token row =
+  fileId = Resolve.FileRow.fileId row
+  stashCandidates scored =
+    if dryRun then () else recordCandidates fileId scored
+  commitMatch tmdbId conf source =
+    _ = if dryRun then () else recordMatch fileId tmdbId conf source
+    stashCandidates []
+  hintId = Resolve.FileRow.hintTmdbId row
+  match hintId with
+    Some tmdbId   ->
+      match movieDetails tmdbId with
+        Right _ ->
+          _ = commitMatch tmdbId 100 "nfo_id"
+          ResolvedById fileId tmdbId
+        Left _  -> SearchError fileId "details fetch failed"
+    Optional.None ->
+      titleHint = Resolve.FileRow.hintTitle row
+      yearHint = Resolve.FileRow.hintYear row
+      rawName = Resolve.FileRow.originalName row
+      parsed = match (titleHint, yearHint) with
+        (Some t, Some y) -> Some (ParsedRelease rawName t y Optional.None)
+        _                -> parseReleaseName (basenameNoExt rawName)
+      match parsed with
+        Optional.None -> NoHint fileId
+        Some p        ->
+          searchResult =
+            searchMovies (ParsedRelease.title p) (ParsedRelease.year p)
+          match searchResult with
+            Left err   -> SearchError fileId err
+            Right resp ->
+              candidates = Tmdb.SearchResponse.results resp
+              scored = List.map (r -> (r, scoreCandidate p r)) candidates
+              probeMin =
+                Some (Rename.minutes (Resolve.FileRow.durationSec row))
+              match pickBestWithRuntime probeMin scored with
+                Some (r, s)   ->
+                  tmdbId = Result.tmdbId r
+                  match movieDetails tmdbId with
+                    Right _ ->
+                      _ = commitMatch tmdbId s "title_year"
+                      ResolvedBySearch fileId tmdbId s
+                    Left _  -> SearchError fileId "details fetch failed"
+                Optional.None ->
+                  _ = stashCandidates scored
+                  if Universal.eq (List.size scored) 0 then NoResults fileId
+                  else Ambiguous fileId scored
+
+Resolve.runWith : Boolean -> Config ->{IO, Exception} ()
+Resolve.runWith dryRun cfg =
+  use Nat +
+  use Text ++
+  token = readTmdbToken cfg
+  label = if dryRun then "[identify] " else "[resolve] "
+  runChunk lastId =
+    myPg.singleIO (toClientConfig cfg) do
+      pqFiles = prepareQuery selectUnresolvedChunkSql
+      pqSearch = prepareQuery Tmdb.selectSearchSql
+      pcSearch = prepareCommand Tmdb.upsertSearchSql
+      pqDet = prepareQuery selectDetailsSql
+      pcDet = prepareCommand upsertDetailsSql
+      pcAssoc = prepareCommand upsertAssociationSql
+      pcDelOther = prepareCommand deleteOtherAssociationsSql
+      pcCandDel = prepareCommand Resolve.deleteCandidatesSql
+      pcCandIns = prepareCommand Resolve.insertCandidateSql
+      rowsResult = catch do
+        portal = bindQuery pqFiles (pobi (Some lastId))
+        (rs, _) = executeQueryPortal portal 0
+        rs
+      rows = match rowsResult with
+        Left f   ->
+          _ = printLine (label ++ "QUERY FAILED: " ++ Failure.message f)
+          []
+        Right rs -> List.map Resolve.rowToFile rs
+      metaGo = cases
+        { r } -> r
+        { movieDetails tmdbId -> k } ->
+          handle k (cachedDetailsWith pqDet pcDet token tmdbId) with metaGo
+        { searchMovies title year -> k } ->
+          handle k (Tmdb.cachedSearchWith pqSearch pcSearch token title year)
+          with metaGo
+      catalogGo = cases
+        { r }                                          -> r
+        { recordMatch fileId tmdbId conf source -> k } ->
+          _ = Resolve.writeMatch pcAssoc pcDelOther fileId tmdbId conf source
+          handle k() with catalogGo
+        { recordCandidates fileId scored -> k }        ->
+          _ = Resolve.writeCandidates pcCandDel pcCandIns fileId scored
+          handle k() with catalogGo
+      runOne row =
+        outcome =
+          handle handle Resolve.resolveOne dryRun token row with catalogGo
+          with metaGo
+        Resolve.printOutcome row outcome
+      _ = Db.foreach_ runOne rows
+      _ = PreparedQuery.close pqFiles
+      _ = PreparedQuery.close pqSearch
+      _ = PreparedQuery.close pqDet
+      _ = PreparedCommand.close pcSearch
+      _ = PreparedCommand.close pcDet
+      _ = PreparedCommand.close pcAssoc
+      _ = PreparedCommand.close pcDelOther
+      _ = PreparedCommand.close pcCandDel
+      _ = PreparedCommand.close pcCandIns
+      match lastOf rows with
+        Some lastRow  -> Some (Resolve.FileRow.fileId lastRow, List.size rows)
+        Optional.None -> Optional.None
+  loop lastId done =
+    match runChunk lastId with
+      Optional.None    -> done
+      Some (nextId, n) ->
+        _ =
+          printLine
+            (label
+              ++ "chunk done ("
+              ++ Nat.toText n
+              ++ " file(s), cursor at file_id "
+              ++ Int.toText nextId
+              ++ ", rss "
+              ++ Nat.toText rssMb()
+              ++ " MB)")
+        loop nextId (done + n)
+  total = loop +0 0
+  printLine
+    (label
+      ++ "done ("
+      ++ Nat.toText total
+      ++ " file(s)"
+      ++ (if dryRun then ", no writes)" else ")"))
+
+test> Resolve.resolveOne.dryRunNoWrite.test =
+  use Optional None
+  use Universal eq
+  scriptedMeta = cases
+    { r } -> r
+    { movieDetails _ -> k } -> handle k (Right testDetails) with scriptedMeta
+    { searchMovies _ _ -> k } ->
+      handle k (Right (Tmdb.SearchResponse.SearchResponse []))
+      with scriptedMeta
+  recordingCatalog = cases
+    { r }                                 -> (r, None)
+    { recordCandidates _ _ -> k }         -> handle k() with recordingCatalog
+    { recordMatch fid tid conf src -> k } ->
+      (res, _) = handle k() with recordingCatalog
+      (res, Some (fid, tid, conf, src))
+  row =
+    Resolve.FileRow.FileRow
+      +7 "Movie.2010.mkv" 0.0 None None (Some 122) "/intake/Movie.2010.mkv"
+  (outcome, written) =
+    handle handle Resolve.resolveOne true "tok" row with recordingCatalog
+    with scriptedMeta
+  List.flatMap check [eq outcome (ResolvedById +7 122), eq written None]
+
+test> Resolve.resolveOne.nfoId.test =
+  use Optional None
+  use Universal eq
+  scriptedMeta = cases
+    { r } -> r
+    { movieDetails _ -> k } -> handle k (Right testDetails) with scriptedMeta
+    { searchMovies _ _ -> k } ->
+      handle k (Right (Tmdb.SearchResponse.SearchResponse []))
+      with scriptedMeta
+  recordingCatalog = cases
+    { r }                                 -> (r, None)
+    { recordCandidates _ _ -> k }         -> handle k() with recordingCatalog
+    { recordMatch fid tid conf src -> k } ->
+      (res, _) = handle k() with recordingCatalog
+      (res, Some (fid, tid, conf, src))
+  row =
+    Resolve.FileRow.FileRow
+      +7 "Movie.2010.mkv" 0.0 None None (Some 122) "/intake/Movie.2010.mkv"
+  (outcome, written) =
+    handle handle Resolve.resolveOne false "tok" row with recordingCatalog
+    with scriptedMeta
+  List.flatMap
+    check
+    [ eq outcome (ResolvedById +7 122)
+    , eq written (Some (+7, 122, 100, "nfo_id"))
+    ]
+
+test> Resolve.resolveOne.noHint.test =
+  use Optional None
+  use Universal eq
+  scriptedMeta = cases
+    { r } -> r
+    { movieDetails _ -> k } -> handle k (Right testDetails) with scriptedMeta
+    { searchMovies _ _ -> k } ->
+      handle k (Right (Tmdb.SearchResponse.SearchResponse []))
+      with scriptedMeta
+  recordingCatalog = cases
+    { r }                                 -> (r, None)
+    { recordCandidates _ _ -> k }         -> handle k() with recordingCatalog
+    { recordMatch fid tid conf src -> k } ->
+      (res, _) = handle k() with recordingCatalog
+      (res, Some (fid, tid, conf, src))
+  row =
+    Resolve.FileRow.FileRow
+      +3
+      "garbage no year or title"
+      0.0
+      None
+      None
+      None
+      "/intake/garbage no year or title"
+  (outcome, written) =
+    handle handle Resolve.resolveOne false "tok" row with recordingCatalog
+    with scriptedMeta
+  List.flatMap check [eq outcome (NoHint +3), eq written None]
+
+test> Resolve.resolveOne.search.test =
+  use Optional None
+  use Universal eq
+  result =
+    Tmdb.Result.Result 500 "The Matrix" "The Matrix" "en" "1999-03-31" 9.0 ""
+  scriptedMeta = cases
+    { r } -> r
+    { movieDetails _ -> k } -> handle k (Right testDetails) with scriptedMeta
+    { searchMovies _ _ -> k } ->
+      handle k (Right (Tmdb.SearchResponse.SearchResponse [result]))
+      with scriptedMeta
+  recordingCatalog = cases
+    { r }                                 -> (r, None)
+    { recordCandidates _ _ -> k }         -> handle k() with recordingCatalog
+    { recordMatch fid tid conf src -> k } ->
+      (res, _) = handle k() with recordingCatalog
+      (res, Some (fid, tid, conf, src))
+  row =
+    Resolve.FileRow.FileRow
+      +9
+      "The.Matrix.1999.1080p.mkv"
+      0.0
+      None
+      None
+      None
+      "/intake/The.Matrix.1999.1080p/The.Matrix.1999.1080p.mkv"
+  (outcome, written) =
+    handle handle Resolve.resolveOne false "tok" row with recordingCatalog
+    with scriptedMeta
+  matched = match outcome with
+    ResolvedBySearch fid tid _ -> eq fid +9 && eq tid 500
+    _                          -> false
+  wroteSomething = match written with
+    Some (fid, tid, _, src) -> eq fid +9 && eq tid 500 && eq src "title_year"
+    None                    -> false
+  List.flatMap check [matched, wroteSomething]
+
+test> Resolve.resolveOne.ambiguous.test =
+  use Optional None
+  use Universal eq
+  result =
+    Tmdb.Result.Result
+      700 "Some Other Film" "Some Other Film" "en" "1994-01-01" 1.0 ""
+  scriptedMeta = cases
+    { r } -> r
+    { movieDetails _ -> k } -> handle k (Right testDetails) with scriptedMeta
+    { searchMovies _ _ -> k } ->
+      handle k (Right (Tmdb.SearchResponse.SearchResponse [result]))
+      with scriptedMeta
+  recordingCatalog = cases
+    { r }                            -> (r, None)
+    { recordMatch _ _ _ _ -> k }     -> handle k() with recordingCatalog
+    { recordCandidates fid cs -> k } ->
+      (res, _) = handle k() with recordingCatalog
+      (res, Some (fid, List.size cs))
+  row =
+    Resolve.FileRow.FileRow
+      +11
+      "The.Matrix.1999.1080p.mkv"
+      0.0
+      None
+      None
+      None
+      "/intake/The.Matrix.1999.1080p/The.Matrix.1999.1080p.mkv"
+  (outcome, recorded) =
+    handle handle Resolve.resolveOne false "tok" row with recordingCatalog
+    with scriptedMeta
+  isAmbiguous = match outcome with
+    Ambiguous fid cs -> eq fid +11 && eq (List.size cs) 1
+    _                -> false
+  List.flatMap check [isAmbiguous, eq recorded (Some (+11, 1))]

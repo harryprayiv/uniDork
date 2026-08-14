@@ -29,6 +29,16 @@ name. Consequences:
   no "change line 12." A definition in the scratch file replaces the old
   one entirely on `update`. To add one arm to a `match`, re-emit the whole
   function containing it.
+- **A failed `update` is not a no-op on the scratch file.** UCM creates a
+  temporary branch (`update-main`) and *appends the affected existing
+  definitions to `scratch.u`* for repair, mixing them with what you wrote.
+  The file you emitted is no longer the file on disk, so a second round of
+  "fix these lines" applies to a file you have never seen. Recovery is
+  `cancel`, which drops the temp branch and leaves the original branch
+  untouched, then replacing the scratch file wholesale. Say this to the user
+  the first time an `update` fails: iterating on a polluted scratch file is
+  how a two-line fix becomes an unrecoverable mess, and re-emitting one
+  complete file is always cheaper than patching a merged one.
 - **Compiled binaries are snapshots.** `compile main ./bin/foo` freezes the
   namespace at that moment. Editing the namespace afterward does not change
   the binary. After every successful `update`, remind the user to recompile
@@ -110,7 +120,22 @@ Related layout facts:
 
 - `then`, `else`, `match` arms, and `cases` arms followed by newline +
   indent open blocks; bindings inside them are fine. The fragility is
-  specifically inline lambdas and very deep nesting.
+  specifically inline lambdas and very deep nesting. Trust this: do not
+  restructure a working `then`-block or arm-block "to be safe," because the
+  restructuring introduces new definitions and new chances to be wrong.
+- **A `use` clause cannot precede `cases` in a point-free definition.**
+  `f = cases ...` has no block to hold one, so there is nowhere to put
+  `use Nat >`. If a body written with `cases` turns out to need a `use`
+  clause, convert it to a named parameter and an explicit `match`:
+
+  ```unison
+  f x =
+    use Nat >
+    match x with
+      ...
+  ```
+
+  The same applies to any block-scoped form you want above the arms.
 - Every `if` requires an `else`. `if` is an expression. Conditional side
   effect idiom: `if cond then doThing() else ()`.
 - Guards in match arms: `match x with n | n > 0 -> ...`.
@@ -132,6 +157,23 @@ produces three distinct failure modes:
   ability rows differ, and picking one can force a signature change on the
   function you are editing (see section 7 on ability widening). These are
   not interchangeable picks even though either "resolves."
+- **Two `use` clauses claiming the same symbol in one block.** `use List ++`
+  and `use Text ++` together produce no error at the `use` site. One wins
+  silently and the failure surfaces later, at a call site, as a type error
+  naming the wrong namespace's function:
+
+  ```
+  The 1st argument to `(Text.++)` has type: [Optional Text]
+                                but I expected: Text
+  ```
+
+  `[Optional Text]` is a Postgres parameter list, so the real fault is that
+  a `List.++` was parsed as `Text.++`. Read that error as a resolution
+  problem, not a types problem. Rule: **at most one namespace per symbol per
+  block.** If a block genuinely needs both, `use` whichever it uses more and
+  write the other qualified-infix (`xs List.++ ys`). Audit this in any
+  function that both assembles query parameters and formats a log line,
+  which is most database-writing functions.
 - **Stale-version capture during type migration.** When a scratch file
   redefines a type that already exists in the codebase, a bare constructor
   name (`Tuning`) can suffix-resolve to the OLD codebase constructor
@@ -316,12 +358,45 @@ section 9 for everything else a field change triggers).
   `Optional.None`. Same discipline for any constructor whose suffix
   collides.
 
-## 12. Operators quick reference
+## 12. Operators: infix only, one namespace per symbol
 
-No prefix application (`Nat.> x y` is a parse error), no sections
-(`(> 3)` does not exist — write `(n -> n > 3)`), no `$` (use parens or
-`|>`, which pipes left-to-right). Infix works bare after `use`, or
-qualified: `a Nat.+ b`.
+**A qualified symbolic name is infix-only.** `Nat.> s acc` is a parse error.
+`s Nat.> acc` is correct. This is the single most common way LLM-written
+Unison fails to parse, because the Haskell instinct that `(>) a b` is always
+available is wrong here, and because the error message does not look like an
+operator problem:
+
+```
+I got confused here:
+    43 |     step acc = cases (_, s) -> if Nat.> s acc then s else acc
+I was surprised to find a Nat.> here.
+I was expecting one of these instead:
+* bang
+* binding
+* do
+...
+```
+
+That expectation list reads like a layout failure and is not one. Any time
+the surprising token is a symbolic name, the diagnosis is position, not
+indentation.
+
+There are no parenthesised operator references either: `(Nat.>)` as a value
+does not exist. To pass a comparison as an argument, write a lambda:
+`(a -> a Nat.> b)`.
+
+Also: no sections (`(> 3)` does not exist, write `(n -> n > 3)`), no `$`
+(use parens or `|>`, which pipes left-to-right). Bare infix works after a
+`use` clause; otherwise qualified-infix.
+
+The codebase being edited shows the house form. If existing code writes
+`Text.size p Nat.> 0`, imitate that everywhere, including in accumulator
+folds where both operands are obviously `Nat` and the qualification looks
+redundant. Redundant qualification always parses; the alternative sometimes
+does not.
+
+And see section 4: two `use` clauses claiming one symbol in the same block
+resolve silently and fail later at the call site.
 
 ## 13. Tests are watch expressions
 
@@ -387,8 +462,14 @@ Run this against your own code before outputting a scratch file:
 1. Every definition complete — no elided bodies, no "rest unchanged".
 2. No binding as the first line of an inline lambda; helpers already
    extracted, not planned.
-3. Every bare operator in every body appears in an in-scope `use` clause or
-   is qualified-infix. Count them; verify none were dropped in transit.
+3. **Operators, mechanically, one definition at a time.** For each body:
+   (a) scan for any `X.op a b` and rewrite it to `a X.op b`, because a
+   qualified symbolic name in prefix position is a parse error every time;
+   (b) every bare operator appears in an in-scope `use` clause; (c) no
+   symbol is claimed by two `use` clauses in the same block. Perform this by
+   reading the text you actually emitted. Having known the rule while
+   writing is not evidence of having followed it, and this item exists
+   because that failure has already happened.
 4. Every `Int` literal signed; every `Float` has a decimal point.
 5. Every `if` has an `else`; every discarded effect has `_ =`.
 6. Every delayed function forced at its call site (`f x ()`).
@@ -411,3 +492,11 @@ Run this against your own code before outputting a scratch file:
     already writes them; no version "upgrades".
 15. Warned the user that fixing this round's error may reveal the next,
     and that a recompile + reload is required after a successful update.
+16. If a previous `update` in this session failed, the user's scratch file
+    now contains UCM's dumped dependents mixed with your code. Do not emit
+    a partial patch against it. Direct them to `cancel` and replace the file
+    wholesale with one complete scratch, dependents included.
+17. Re-read the emitted code against sections 3, 4, and 12 specifically.
+    Those three account for most round-trips, and every rule in them was
+    already in this file before it was violated. This item is the difference
+    between having read the guide and having applied it.
