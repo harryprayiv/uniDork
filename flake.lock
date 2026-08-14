@@ -494,11 +494,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1779560665,
-        "narHash": "sha256-tpyBcxPpcQb8ukyNF7DoCwfSY3VPsxHoYwj00Cayv5o=",
+        "lastModified": 1786599213,
+        "narHash": "sha256-yNJd40f11EzXBjSByCB7IPpeFFAdeoSKKM67dGkfFoU=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "64c08a7ca051951c8eae34e3e3cb1e202fe36786",
+        "rev": "0e251e24a4f24e036a084b6b4b2d2491af4167f4",
         "type": "github"
       },
       "original": {
@@ -800,11 +800,11 @@
         "unison": "unison"
       },
       "locked": {
-        "lastModified": 1770661811,
-        "narHash": "sha256-YWd1clM9A4kkkFvVSzVBIfGf09sZzNqbbt9hDqx+izs=",
+        "lastModified": 1782382686,
+        "narHash": "sha256-Jq3oFj3qxd9YpOBAUs48ZPpr4DBc6KEto20QdFO8Nxs=",
         "owner": "ceedubs",
         "repo": "unison-nix",
-        "rev": "451afabefe1fbd36f081c641cd112db1fcbcb622",
+        "rev": "f5ebed834bfe7d545a644f1485f573ed10575417",
         "type": "github"
       },
       "original": {
