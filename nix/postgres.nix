@@ -1,7 +1,8 @@
 { pkgs, lib ? pkgs.lib, database }:
 
 let
-  postgresql = pkgs.postgresql;
+  postgresql = pkgs.postgresql_18;
+  pgMajor = lib.versions.major postgresql.version;
   bin = {
     pgctl     = "${postgresql}/bin/pg_ctl";
     psql      = "${postgresql}/bin/psql";
